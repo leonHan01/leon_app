@@ -1,0 +1,159 @@
+# Leon
+
+macOS 与 Android 原生消息应用。0.4.0 支持输入 @快捷选择、Agent 头像配置与上传、设备文字互发、Agent 私聊，以及在群聊中 @指定 Agent。两端填写相同的服务地址和现有访问令牌，同步同一所有者下的会话。
+
+应用提供文字发送、消息历史、增量同步、更早历史分页、网络状态、失败手动重试、待发消息恢复、消息复制及设备名称。服务器确认接收后显示正式消息，不把服务器接收称为对方已读。每条最多 8,000 个 UTF-16 单元（部分 emoji 占两个）。
+
+## Agent 配置与聊天
+
+升级服务端后，从工作空间侧栏进入「Agent 工作台」，或访问 `/workspace/agents.html`。
+
+1. 新建 Agent，填写显示名称、唯一的 `@标识`、OpenAI / DeepSeek、账户可用的模型 ID、API Key 和角色提示词，保存并启用。
+2. 编辑时 API Key 不回显，留空会保留原值；切换模型服务商必须填写新 Key。停用保留历史消息。
+3. Mac 左侧「AGENTS · 私聊」、Android「Agent 私聊」或页面「聊天测试」均可打开私聊；私聊中的每条用户消息会触发该 Agent。
+4. 在默认设备群聊或新建群聊里，通过 `@ Agent` 菜单 / 页面 Agent 按钮插入 `@标识`，例如 `@writer 帮我润色这段文字`。只有被 @ 的群成员回复，普通群消息不调用模型。每条最多 @4 个 Agent，自建群最多加入 32 个 Agent。
+5. 回复显示「等待回复」「正在回复」或脱敏后的失败原因；失败可点击「重试回复」。消息发送重试和模型回复重试分别处理，不会重复保存用户消息。
+
+模型请求完全由服务端执行。API Key 使用 AES-GCM 加密存储在 H2，并复用服务器已有 `LEON_WORKFLOW_CREDENTIAL_KEY`；未配置此加密主密钥时，页面会提示并禁止新建凭据。主密钥必须保留原值，不能为启用本功能重新生成或轮换已有工作流密钥。
+
+每个私聊 / 群聊拥有独立历史和上下文。模型使用当前会话至本次提问的最近至多 30 条消息、约 32,000 字符，以及该 Agent 的提示词；这些内容会发送至所选模型服务商。回复仅使用官方 HTTPS 接口，不支持自定义转发地址，不提供工具执行能力。Agent 回复不会自动触发其他 Agent。
+
+后台队列最多积压 256 个任务，至多同时处理 4 个会话，同一会话按顺序回复。未开始的任务可在重启后继续；正在执行的任务在重启后标记失败，避免自动重复付费调用。网络超时或服务重启后的手动重试可能产生新的模型费用。当前回复一次性完成后展示，未实现逐字流式输出。
+
+## Agent 头像（0.3.0）
+
+在「Agent 工作台」选择一个 Agent，可使用「选择头像」或「上传头像」。选定后点击「保存 Agent」生效。
+
+- 内置你提供的 30 张 PNG：海绵宝宝、章鱼哥、Abigail / Alfred 等人物和 Avatar 系列。预设原文件不改动，透明背景和宽高比保留；旧 Agent 默认使用 Alfred。
+- 自定义上传支持 PNG / JPG，文件最多 5 MB，宽高均不超过 4096 像素。服务端根据真实图片格式校验，等比缩放并居中生成 512×512 PNG，保留透明背景，不拉伸图片。
+- 上传文件持久化到 H2 的 `chat_agent_avatar` 表，随既有数据库一起备份；重复图片去重，不依赖临时目录或原始下载文件。Agent 的 `avatar_id` 保存当前选择。
+- 上传仅允许管理页 Cookie 和原有写入来源校验；头像读取也需要现有 Cookie 或 Bearer。Mac、Android 使用已认证请求加载头像，并在内存缓存，避免在 URL 中暴露令牌。
+- 后台卡片、网页聊天、Mac Agent 列表 / 聊天气泡、Android Agent 选择列表 / 聊天身份栏显示头像。改变头像不会改动既有消息正文或模型凭据。
+
+新增接口：`GET /api/agent-avatars` 返回预设和已上传的头像元数据；`GET /api/agent-avatars/{id}` 返回 PNG；`POST /api/agent-admin/avatars` 使用 multipart 字段 `file` 上传。Agent 创建 / 更新接收 `avatarId`，省略时新 Agent 使用默认值，旧 Agent 保留当前值。`/api/agents` 摘要包含 `avatarId`。
+
+## 输入 @快捷选择（0.4.0）
+
+Mac、Android 和网页群聊输入框中键入 `@` 或全角 `＠`，会自动显示当前群内已启用的 Agent，候选显示头像、名称与 `@标识`。继续输入中文名称或标识可筛选，每次最多显示 8 个匹配项。
+
+可点击候选，或使用上下方向键选择、Enter / Tab 确认、Esc 关闭。补全只替换光标所在的 `@` 片段，保留前后正文，并把光标放在分隔空白之后，便于继续输入。输入邮箱、选择了一段文字或中文输入法仍在组词时，不会自动匹配；私聊不展示其他 Agent 的候选。Shift+Enter 保持换行。
+
+网页逻辑检查：`node --test src/test/js/agent-mentions.test.cjs`（在服务端项目执行）。Mac 检查包含 `scripts/test-macos.sh` 的光标 / Unicode / 文本保留用例；Android 构建脚本包含 `MentionCompletionTest`。
+
+## 安装与连接
+
+- macOS：解压 `dist/Leon-macOS.zip`，把 `Leon.app` 拖入「应用程序」。当前构建为 Apple Silicon，最低 macOS 13。包使用本机 ad-hoc 签名，尚未使用 Developer ID 公证。
+- Android：将 `dist/Leon-android-debug.apk` 传入手机安装，最低 Android 8.0（API 26）。这是开发签名安装包，发布商店前需配置长期发布密钥。
+- 打开「连接设置」，填写服务器地址（默认 `https://121.40.254.112`）、现有访问令牌和设备名称，点击「验证并连接」。两端令牌必须一致。
+- 服务端需要先运行下文新增消息接口的版本。仅构建客户端不会升级公网服务。
+
+应用处于前台时约每 2 秒拉取增量，失败后逐步延长至 30 秒；返回前台或点击「同步」会立即重连。退出或后台不接收系统推送，重新打开后读取服务器消息。首次显示最近 100 条，点击「加载更早的消息」继续读取。历史保存在服务器；待发消息保存在设备内，重新打开后可手动重试，重试不会重复落库。
+
+macOS 将令牌存入系统钥匙串；Android 使用 Android Keystore 的 AES-GCM 加密后保存。令牌不会出现在 URL 或日志，HTTP 重定向不会携带认证继续跳转。Android 禁用备份和设备迁移，避免复制设备标识及不可解密的凭据。切换服务地址或令牌会切换待发队列，不把旧消息发送到新连接。
+
+## 服务端
+
+直接扩展现有 `/Users/leon/Documents/ChatGPT/leon_lite_workflow` Spring Boot 项目，没有引入第二个服务器。
+
+新增文件：
+
+- `src/main/java/com/leon/workflow/messaging/DeviceMessageController.java`
+- `src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java`
+- `src/test/java/com/leon/workflow/messaging/DeviceMessageIntegrationTest.java`
+- `src/test/java/com/leon/workflow/messaging/DeviceMessagePersistenceTest.java`
+
+沿用现有 `/api/**` 的 Bearer 认证及 Cookie 写入来源限制。为 `device_message` 增加会话、角色和回复引用字段，旧消息自动归入 `shared` 设备群聊。新增 `chat_agent`、`chat_conversation` 和 `chat_agent_job` 表，启动时迁移并保留既有消息 ID 和内容。部署继续使用该项目的 `scripts/deploy.py`，不需要修改公网端口。已有反向代理需要把 `/api/device-messages`、`/api/agents`、`/api/conversations` 和 `/api/agent-admin` 交给 Spring 服务，保留 Authorization / Cookie；`/workspace/agents.*` 沿用现有 workspace 页面登录保护。配置接口还会强制校验管理页 Cookie；客户端 Bearer 令牌只能读取 Agent 摘要及聊天，不能读取角色提示词或管理模型凭据。
+
+沿用现有单所有者认证域，没有新增用户注册或联系人系统。这里的 Agent 私聊在同一所有者的设备间同步；所有持有该服务有效令牌的客户端都能访问其会话。未提供多用户权限隔离或端到端加密。令牌轮换不会删除服务器历史。
+
+### HTTP 协议
+
+所有响应为直接 JSON，不使用现有其他接口的 `success/data` 包装。携带 `Authorization: Bearer <token>`，返回 `Cache-Control: no-store`。
+
+`GET /api/device-messages?conversationId=shared&limit=100` 返回指定会话的最新一页，消息按 ID 升序排列。`hasMore` 表示还有更早历史。
+
+`GET /api/device-messages?after=123&limit=100` 返回 ID 大于 123 的最早一页。`hasMore` 为真时继续使用该页最后 ID 拉取，直到追平。`after=0` 从最早历史开始。
+
+`GET /api/device-messages?before=123&limit=100` 返回该 ID 之前的最近一页。`after` 与 `before` 互斥，limit 为 1–100。
+
+```json
+{"messages":[{"id":124,"clientMessageId":"UUID","deviceId":"UUID","sender":"我的 Mac","platform":"macos","text":"你好","createdAt":1700000000000}],"hasMore":false}
+```
+
+`POST /api/device-messages`：
+
+```json
+{"clientMessageId":"生成一次并在重试时复用的 UUID","deviceId":"设备的持久 UUID","sender":"我的 Mac","platform":"macos","text":"你好"}
+```
+
+返回保存后的单条消息。platform 只能为 `macos` 或 `android`。同一 `(deviceId, clientMessageId)` 相同内容重试返回同一 ID；不同内容返回 409。可附带 `conversationId`（缺省为 `shared`）和 `mentionAgentIds` UUID 数组。群聊也会识别正文中独立的 `@标识`。设备名称长度 1–60，文本非空且长度不超过 8,000。时间为服务器 Unix 毫秒，消息顺序以 ID 为准。输入无效返回 400，认证失败返回 401/403。
+
+新增接口：
+
+- `GET /api/agents`：不含提示词和 Key 的 Agent 摘要。
+- `GET /api/conversations`：会话目录；`POST /api/conversations/direct/{agentId}` 创建或打开固定的 Agent 私聊。
+- `POST /api/conversations/groups`：提交 `{ "name": "讨论组", "agentIds": ["UUID"] }` 创建群聊。
+- `GET/POST /api/agent-admin`、`PUT /api/agent-admin/{id}`：管理页 Cookie 专用；更新提交读取到的 `version`，防止并发覆盖。
+- `POST /api/device-messages/{messageId}/agents/{agentId}/retry`：仅将失败回复任务重新排队。
+
+消息新增 `conversationId`、`role`、`agentId`、`replyTo` 字段；Agent 回复的 platform 为 `agent`。分页响应另含 `jobs` 数组（未完成 / 失败任务），客户端应持续轮询，即使本页没有新消息也要刷新任务状态。旧客户端省略会话字段时继续使用设备群聊。
+
+客户端发送确认不会跳过接收游标，防止同时收发时漏掉其他设备插入的消息。服务端在单实例进程内串行化提交和分页读取，避免增量游标越过未提交 ID；不支持把同一数据库扩展成多个应用写入实例。
+
+## 构建与验证
+
+macOS 使用 SwiftUI + URLSession，Android 使用原生 Java 界面 + HttpURLConnection。没有 Flutter、Electron 或 WebView 运行时依赖。
+
+```bash
+bash scripts/build-macos.sh
+bash scripts/build-android.sh
+```
+
+Mac 构建需要 macOS Command Line Tools（Swift 5.9+）。Android 需要 JDK 17+、SDK Platform 35、Build Tools 35；配置 `ANDROID_HOME` 或 `android/local.properties`。Gradle Wrapper 固定为 8.11.1，Android Gradle Plugin 固定为 8.7.2；首次构建需要下载依赖。
+
+```bash
+bash scripts/test-macos.sh
+```
+
+Android 构建脚本包含 `testDebugUnitTest` 和 `lintDebug`。服务端使用 Java 21：
+
+```bash
+cd /Users/leon/Documents/ChatGPT/leon_lite_workflow
+JAVA_HOME=$(/usr/libexec/java_home -v 21) mvn -Dtest=AgentChatIntegrationTest,OfficialAgentModelClientTest,DeviceMessageIntegrationTest,DeviceMessagePersistenceTest,ApiAuthenticationIntegrationTest test
+```
+
+Mac 测试直接编译实际的模型和网络源文件，兼容只有 Command Line Tools 的环境。客户端真实 HTTP 测试只对隔离测试服务执行，指定 `LEONAPP_TEST_SERVER` 和 `LEONAPP_TEST_TOKEN` 后运行 `bash scripts/test-macos.sh`。该测试会实际创建 Mac / Android 平台的测试消息，不应指向正式数据库。
+
+本机开发仅允许 HTTP 环回地址；Android 模拟器可使用 `http://10.0.2.2:8080`。手机真机连接电脑时应配置可验证证书的 HTTPS 地址，或使用 `adb reverse tcp:8080 tcp:8080` 后连接 `http://127.0.0.1:8080`。不提供跳过证书验证开关。
+
+## 0.1.0 验证（2026-11-18）
+
+- 服务端 10 项测试通过：API 收发、认证拦截、输入校验、历史分页、并发重试去重、H2 磁盘库关闭重开及现有认证回归。
+- Mac Release 构建、本机签名校验通过；实际打开检查主窗口、连接设置及无效地址提示。
+- Mac 实际 URLSession 对隔离 Spring Boot 服务的 HTTP 收发、中文换行、重试去重及第二设备回复测试通过；未连接正式数据库。
+- Android APK 构建、2 项单元测试、Lint 通过（无问题）。本机没有连接 Android 设备，尚未进行真机界面与跨设备实机联调。
+- 本次任务未部署公网服务；服务端源码已在指定项目内添加。
+
+## 0.2.0 验证（2026-11-18）
+
+- 服务端共 22 项测试通过；验证了私聊隔离、群成员限制、普通消息不调用模型、@指定 Agent、回复不递归触发、并发幂等、失败脱敏、手动重试、凭据不回显、provider 请求参数及旧版消息表迁移保留 ID 和正文。
+- Mac 实际网络源代码对本地隔离服务验证了 Agent 目录、私聊、群聊、@回复任务与历史隔离。`LEONAPP_TEST_AGENT` 可指定隔离服务中的 Agent ID，启用这部分协议检查。
+- 服务端页面实际打开检查配置回显、会话选择和 @按钮；检查时只使用临时数据库和虚构 API Key，未发出真实模型调用。
+- macOS / Android 0.2.0 安装包已生成。Android 未连接真机；模型适配器使用模拟 HTTP 响应验证，未使用真实 API Key 联调。
+- 本次任务未部署公网服务。
+
+模型协议参考：[OpenAI Chat Completions](https://developers.openai.com/api/reference/resources/chat/subresources/completions/methods/create)、[DeepSeek Chat Completions](https://api-docs.deepseek.com/api/create-chat-completion/)。
+
+## 0.3.0 验证（2026-11-18）
+
+- 服务端 28 项测试通过，新增覆盖 30 张预设原图、头像读取认证、上传 Cookie / Origin 校验、图片尺寸与格式限制、透明背景和等比缩放、去重、选择保留及数据库关闭重开。
+- 在本机临时数据库实际验证预设选择、上传文件、保存、刷新后的头像回显；未修改正式数据。
+- Mac 网络检查增加头像下载与缓存验证；Android 构建和 Lint 检查通过。Android 真机尚未连接。
+- 两端安装包更新至 0.3.0。本次任务未部署公网服务。
+
+## 0.4.0 验证（2026-11-18）
+
+- 网页 3 组单元测试通过；实际检查 @自动出现、中文筛选、箭头 + Enter、Tab、Esc、邮箱边界、群成员限制、私聊关闭候选及正文中间替换。
+- Mac 实际原生输入组件检查通过：@候选、方向键 + Enter、Tab 补全、中文筛选、Esc、邮箱及光标后正文保留。检查使用单独测试应用和虚构 Agent，没有读取连接凭据或发送消息。
+- Android 匹配与光标替换单元测试及 Lint 检查通过，尚未连接真机。两端安装包更新至 0.4.0。
+- 本次只修改客户端及网页交互，无服务端数据库或模型协议变更；未部署公网服务。
