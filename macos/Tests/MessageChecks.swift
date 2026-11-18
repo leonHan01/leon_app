@@ -11,6 +11,11 @@ struct MessageChecks {
         try endpointChecks()
         try decodingChecks()
         try mentionChecks()
+        try check(HTTPFailure.message(for: 401)?.contains("令牌") == true, "401 must explain authentication failure")
+        try check(HTTPFailure.message(for: 403)?.contains("令牌") == false, "Proxy 403 must not blame the token")
+        try check(HTTPFailure.message(for: 403)?.contains("代理") == true, "403 must explain server permissions/proxy")
+        try check(HTTPFailure.message(for: 502)?.contains("运行状态") == true, "502 must explain service failure")
+        print("PASS: authentication, proxy denial and upstream failures stay distinct")
         print("PASS: endpoint validation and Unicode/Unix-millisecond protocol decoding")
         print("PASS: @ mention caret replacement, Unicode names, email boundaries and selections")
         if let address = ProcessInfo.processInfo.environment["LEONAPP_TEST_SERVER"],
@@ -62,6 +67,7 @@ struct MessageChecks {
         let before = try await api.page()
         let cursor = before.messages.last?.id ?? 0
         let outgoing = Outgoing(clientMessageId: UUID().uuidString.lowercased(), deviceId: UUID().uuidString.lowercased(), sender: "Mac 集成测试", platform: "macos", text: "来自 Mac 的真实请求 🚀\n第二行")
+        try await api.heartbeat(deviceId: outgoing.deviceId, name: outgoing.sender)
         let sent = try await api.send(outgoing)
         try check(sent.text == outgoing.text, "HTTP send changed text")
         let retried = try await api.send(outgoing)

@@ -216,7 +216,11 @@ struct ConnectionView: View {
                     .buttonStyle(.borderedProminent).disabled(store.configuring)
             }
         }.padding(30).frame(width: 440)
-        .onAppear { draft.address = store.address; draft.sender = store.sender; draft.token = Keychain.read() }
+        .task {
+            draft.address = store.address; draft.sender = store.sender
+            let token = await Keychain.read()
+            if draft.token.isEmpty { draft.token = token }
+        }
         .interactiveDismissDisabled(store.configuring)
     }
 }

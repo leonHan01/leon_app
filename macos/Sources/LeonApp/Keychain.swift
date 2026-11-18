@@ -7,7 +7,12 @@ enum Keychain {
          kSecAttrService as String: "com.leon.device-messages",
          kSecAttrAccount as String: "access-token"]
     }
-    static func read() -> String {
+    // Security may wait for the system's keychain authorization after an app update.
+    // Never make the main/UI thread wait for that prompt.
+    static func read() async -> String {
+        await Task.detached { readStored() }.value
+    }
+    private static func readStored() -> String {
         var q = query
         q[kSecReturnData as String] = true
         q[kSecMatchLimit as String] = kSecMatchLimitOne
@@ -16,7 +21,10 @@ enum Keychain {
               let data = item as? Data else { return "" }
         return String(data: data, encoding: .utf8) ?? ""
     }
-    static func save(_ token: String) throws {
+    static func save(_ token: String) async throws {
+        try await Task.detached { try saveStored(token) }.value
+    }
+    private static func saveStored(_ token: String) throws {
         let data = Data(token.utf8)
         var status = SecItemUpdate(query as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         if status == errSecItemNotFound {

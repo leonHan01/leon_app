@@ -39,6 +39,7 @@ final class MessageApi {
     Conversation direct(String agentId) throws Exception { return new Conversation(request("/api/conversations/direct/"+agentId,new JSONObject())); }
     Conversation group(String name,List<String> ids) throws Exception { return new Conversation(request("/api/conversations/groups",new JSONObject().put("name",name).put("agentIds",new JSONArray(ids)))); }
     void retryJob(Job job) throws Exception { request("/api/device-messages/"+job.messageId+"/agents/"+job.agentId+"/retry",new JSONObject()); }
+    void heartbeat(String deviceId, String name) throws Exception { request("/api/device-messages/presence",new JSONObject().put("deviceId",deviceId).put("name",name).put("platform","android")); }
     static final class Page {
         final List<Message> messages = new ArrayList<>();
         final boolean hasMore;
@@ -81,7 +82,9 @@ final class MessageApi {
                 try (OutputStream stream = connection.getOutputStream()) { stream.write(bytes); }
             }
             int code = connection.getResponseCode();
-            if (code == 401 || code == 403) throw new IOException("访问令牌无效或已过期，请打开连接设置。");
+            if (code == 401) throw new IOException("访问令牌未通过认证，请检查令牌后重试。");
+            if (code == 403) throw new IOException("服务器拒绝访问（HTTP 403）。请检查服务端接口权限或 HTTPS 代理配置。");
+            if (code == 502 || code == 503 || code == 504) throw new IOException("服务暂时不可用（HTTP " + code + "），请检查服务端运行状态。");
             if (code == 404) throw new IOException("服务端尚未安装消息接口，请先升级服务端。");
             if (code < 200 || code >= 300) {
                 String reason = "请求失败（HTTP " + code + "），请稍后重试。";

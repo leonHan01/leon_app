@@ -79,8 +79,10 @@ final class ChatStore: ObservableObject {
     }
 
     func start() async {
-        guard api == nil else { return }
-        let token = Keychain.read()
+        guard api == nil, !configuring else { return }
+        status = "正在读取安全存储…"
+        let token = await Keychain.read()
+        guard api == nil, !configuring else { return }
         guard !token.isEmpty else { showSettings = true; return }
         do {
             let base = try Endpoint.normalize(address)
@@ -109,7 +111,7 @@ final class ChatStore: ObservableObject {
             let page = try await candidate.page()
             let directory = try await candidate.agents()
             let rooms = try await candidate.conversations()
-            try Keychain.save(secret)
+            try await Keychain.save(secret)
             generation = UUID(); connectionId = UUID(); avatarSessionKey = UUID().uuidString
             selectedConversationId = "shared"; drafts = [:]
             agents = directory; conversations = rooms; jobs = page.jobs ?? []
@@ -153,6 +155,7 @@ final class ChatStore: ObservableObject {
                     if cycle % 5 == 0 {
                         let agents = try await api.agents()
                         let rooms = try await api.conversations()
+                        try? await api.heartbeat(deviceId: self.deviceId, name: self.sender)
                         guard !Task.isCancelled, self.generation == current else { return }
                         self.agents = agents; self.conversations = rooms
                     }

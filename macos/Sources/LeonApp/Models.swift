@@ -81,6 +81,18 @@ enum ClientError: LocalizedError {
     var errorDescription: String? { if case .message(let value) = self { return value }; return nil }
 }
 
+enum HTTPFailure {
+    static func message(for status: Int) -> String? {
+        switch status {
+        case 401: return "访问令牌未通过认证，请检查令牌后重试。"
+        case 403: return "服务器拒绝访问（HTTP 403）。请检查服务端接口权限或 HTTPS 代理配置。"
+        case 404: return "服务端尚未安装消息接口，请先升级服务端。"
+        case 502, 503, 504: return "服务暂时不可用（HTTP \(status)），请检查服务端运行状态。"
+        default: return nil
+        }
+    }
+}
+
 // Credentials are never forwarded through a redirect, including redirects on the same host.
 final class NoRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask,
@@ -114,6 +126,10 @@ final class MessageAPI: @unchecked Sendable {
     }
 
     func agents() async throws -> [AgentInfo] { try await request(URLRequest(url: base.appendingPathComponent("api/agents"))) }
+    func heartbeat(deviceId: String, name: String) async throws {
+        struct Presence: Decodable { let lastSeenAt: Int64 }
+        let _: Presence = try await post("api/device-messages/presence", body: ["deviceId": deviceId, "name": name, "platform": "macos"])
+    }
     func avatarData(_ id: String) async throws -> Data {
         guard id.range(of: "^[a-z0-9-]{1,80}$", options: .regularExpression) != nil else { throw ClientError.message("头像标识无效") }
         if let cached = avatarCache.object(forKey: id as NSString) { return cached as Data }
@@ -157,10 +173,8 @@ final class MessageAPI: @unchecked Sendable {
         guard let http = response as? HTTPURLResponse else { throw ClientError.message("服务端没有返回有效响应。") }
         switch http.statusCode {
         case 200...299: return try JSONDecoder().decode(T.self, from: data)
-        case 401, 403: throw ClientError.message("访问令牌无效或已过期，请打开连接设置。")
-        case 404: throw ClientError.message("服务端尚未安装消息接口，请先升级服务端。")
         default:
-
+            if let message = HTTPFailure.message(for: http.statusCode) { throw ClientError.message(message) }
             let failure = try? JSONDecoder().decode(Failure.self, from: data)
             throw ClientError.message(failure?.detail ?? failure?.message ?? "请求失败（HTTP \(http.statusCode)），请稍后重试。")
         }

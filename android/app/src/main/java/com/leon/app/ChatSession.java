@@ -147,12 +147,14 @@ final class ChatSession {
         int epoch = generation;
         MessageApi client = api;
         String conversation = selectedConversation; boolean directoryDue = pollCycle++ % 5 == 0;
+        String deviceName = sender;
         Long after = initialLoaded ? (messages.isEmpty() ? 0L : messages.get(messages.size() - 1).id) : null;
         worker.execute(() -> {
             try {
                 MessageApi.Page page = client.page(conversation, after, null);
                 List<MessageApi.Agent> directory=directoryDue?client.agents():null;
                 List<MessageApi.Conversation> rooms=directoryDue?client.conversations():null;
+                if (directoryDue) try { client.heartbeat(deviceId,deviceName); } catch (Exception ignored) { /* Presence must not interrupt message delivery. */ }
                 main.post(() -> {
                     if (epoch != generation) return;
                     polling = false;
