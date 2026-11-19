@@ -37,7 +37,7 @@ final class ChatSession {
     }
     private void removeImageFiles(JSONObject message){for(String id:imageIds(message))ChatImage.remove(files,pendingKey,id);}
     int preparingImages;
-    boolean canSend(String text) { return configured() && !configuring && preparingImages==0 && (!text.trim().isEmpty() || !draftImages.isEmpty()) && text.length()<=8000; }
+    boolean canSend(String text) { return configured() && !openingConversation() && !configuring && preparingImages==0 && (!text.trim().isEmpty() || !draftImages.isEmpty()) && text.length()<=8000; }
     void addImage(android.net.Uri uri,Runnable release) {
         if(api==null||configuring||draftImages.size()+preparingImages>=4){release.run();report(new java.io.IOException("请先连接服务器，每条最多 4 张图片"));return;}
         int connection=connectionGeneration;String room=selectedConversation;preparingImages++;notifyChanged();
@@ -61,29 +61,63 @@ final class ChatSession {
     final List<MessageApi.Job> jobs = new ArrayList<>();
     String selectedConversation = "shared";
     private int connectionGeneration;
-    private int pollCycle;
     private final Map<String,String> drafts = new HashMap<>();
+    private final Set<String> unconfirmedRooms=new HashSet<>(), creatingRooms=new HashSet<>();
+    private final LinkedHashMap<String,RoomSnapshot> historyCache=new LinkedHashMap<>();
+    private static final class RoomSnapshot {
+        final List<MessageApi.Message> messages;
+        final List<MessageApi.Job> jobs;
+        final boolean loaded,older;
+        RoomSnapshot(ChatSession session){
+            int start=Math.max(0,session.messages.size()-300);messages=new ArrayList<>(session.messages.subList(start,session.messages.size()));
+            jobs=new ArrayList<>(session.jobs);loaded=session.initialLoaded;older=session.hasOlder||start>0;
+        }
+    }
+    boolean openingConversation(){return unconfirmedRooms.contains(selectedConversation);}
     List<JSONObject> currentPending() { List<JSONObject> result=new ArrayList<>();for(JSONObject m:pending)if(m.optString("conversationId","shared").equals(selectedConversation))result.add(m);return result; }
     MessageApi.Conversation selected() { for(MessageApi.Conversation c:conversations)if(c.id.equals(selectedConversation))return c;return null; }
     String title() { return selected()==null?"设备群聊":selected().name; }
     List<MessageApi.Agent> availableAgents() { List<MessageApi.Agent> result=new ArrayList<>();for(MessageApi.Agent a:agents)if(a.enabled&&(selectedConversation.equals("shared")||selected()!=null&&selected().agentIds.contains(a.id)))result.add(a);return result; }
     void select(String id) {
         if(id.equals(selectedConversation))return;
+        historyCache.remove(selectedConversation);historyCache.put(selectedConversation,new RoomSnapshot(this));
+        while(historyCache.size()>8)historyCache.remove(historyCache.keySet().iterator().next());
         drafts.put(selectedConversation,draft);imageDrafts.put(selectedConversation,new ArrayList<>(draftImages));selectedConversation=id;draft=drafts.getOrDefault(id,"");
         draftImages.clear();draftImages.addAll(imageDrafts.getOrDefault(id,List.of()));
-        generation++;polling=false;initialLoaded=false;loadingOlder=false;hasOlder=false;messages.clear();jobs.clear();revision++;notifyChanged();refresh();
+        generation++;polling=false;loadingOlder=false;messages.clear();jobs.clear();
+        RoomSnapshot cached=historyCache.get(id);initialLoaded=cached!=null&&cached.loaded;hasOlder=cached!=null&&cached.older;
+        if(cached!=null){messages.addAll(cached.messages);jobs.addAll(cached.jobs);}
+        revision++;notifyChanged();refresh();
     }
     void mention(MessageApi.Agent agent) { draft+=(draft.isEmpty()||Character.isWhitespace(draft.charAt(draft.length()-1))?"":" ")+"@"+agent.handle+" ";notifyChanged(); }
-    void openDirect(MessageApi.Agent agent) { roomAction(agent.id,null,null); }
-    void group(String name,List<String> ids) { roomAction(null,name,ids); }
-    private void roomAction(String agentId,String name,List<String> ids) {
-        if(api==null||configuring)return;int connection=connectionGeneration;MessageApi client=api;
-        worker.execute(()->{try {
-            MessageApi.Conversation room=agentId!=null?client.direct(agentId):client.group(name,ids);
-            List<MessageApi.Conversation> directory=client.conversations();
-            main.post(()->{if(connection!=connectionGeneration)return;conversations.clear();conversations.addAll(directory);select(room.id);notifyChanged();});
-        }catch(Exception e){main.post(()->{if(connection==connectionGeneration)report(e);});}});
+    void openDirect(MessageApi.Agent agent) {
+        MessageApi.Conversation known=null;
+        for(var room:conversations)if(room.kind.equals("direct")&&room.agentId.equals(agent.id)){known=room;break;}
+        if(known!=null&&!unconfirmedRooms.contains(known.id)){select(known.id);return;}
+        if(api==null||configuring)return;
+        String roomId=known==null?"direct:"+agent.id:known.id;
+        if(known==null)try{conversations.add(new MessageApi.Conversation(new JSONObject().put("id",roomId).put("name",agent.name).put("kind","direct").put("agentId",agent.id).put("agentIds",new JSONArray(List.of(agent.id)))));}catch(JSONException failure){report(failure);return;}
+        unconfirmedRooms.add(roomId);select(roomId);status="正在打开私聊…";notifyChanged();
+        if(!creatingRooms.add(roomId))return;
+        int connection=connectionGeneration;MessageApi client=api;
+        navigationWorkers.execute(()->{
+            try{
+                MessageApi.Conversation room=client.direct(agent.id);
+                main.post(()->{
+                    if(connection!=connectionGeneration)return;creatingRooms.remove(roomId);unconfirmedRooms.remove(roomId);upsertRoom(room);
+                    if(selectedConversation.equals(roomId)){if(!room.id.equals(roomId))select(room.id);status="正在同步…";revision++;notifyChanged();refresh();}
+                    else notifyChanged();
+                });
+            }catch(Exception failure){main.post(()->{if(connection!=connectionGeneration)return;creatingRooms.remove(roomId);if(selectedConversation.equals(roomId)){status="会话打开失败，请返回列表后重试";revision++;notifyChanged();report(failure);}});}
+        });
     }
+    void createGroup(String name,List<String> ids,java.util.function.Consumer<MessageApi.Conversation> created){
+        if(api==null||configuring)return;int connection=connectionGeneration;MessageApi client=api;
+        navigationWorkers.execute(()->{try{
+            var room=client.group(name,ids);main.post(()->{if(connection!=connectionGeneration)return;upsertRoom(room);notifyChanged();created.accept(room);});
+        }catch(Exception failure){main.post(()->{if(connection==connectionGeneration)report(failure);});}});
+    }
+    private void upsertRoom(MessageApi.Conversation room){conversations.removeIf(existing->existing.id.equals(room.id));conversations.add(room);}
     void retryJob(MessageApi.Job job) {
         if(api==null)return;MessageApi client=api;
         worker.execute(()->{try{client.retryJob(job);main.post(this::refresh);}catch(Exception e){main.post(()->report(e));}});
@@ -92,6 +126,10 @@ final class ChatSession {
     final Set<String> sending = new HashSet<>();
     Listener listener;
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
+    private final ExecutorService navigationWorkers=Executors.newFixedThreadPool(2);
+    private final ExecutorService directoryWorker=Executors.newSingleThreadExecutor();
+    private boolean directoryLoading;
+    private long lastDirectoryRefresh;
     private final ExecutorService avatarWorkers=Executors.newFixedThreadPool(2);
     private final android.util.LruCache<String,android.graphics.Bitmap> avatarCache=new android.util.LruCache<String,android.graphics.Bitmap>(4096) {
         @Override protected int sizeOf(String key,android.graphics.Bitmap bitmap){return Math.max(1,bitmap.getAllocationByteCount()/1024);}
@@ -100,7 +138,7 @@ final class ChatSession {
     String avatarFor(String agentId){for(MessageApi.Agent a:agents)if(a.id.equals(agentId))return a.avatarId;return "alfred";}
     void bindAvatar(android.widget.ImageView view,String avatarId){
         String id=avatarId==null?"alfred":avatarId;int connection=connectionGeneration;String key=connection+":"+id;
-        view.setTag(key);view.setImageResource(android.R.drawable.ic_menu_myplaces);
+        view.setTag(key);view.setImageResource(R.drawable.ic_agent_placeholder);
         android.graphics.Bitmap cached=avatarCache.get(key);if(cached!=null){view.setImageBitmap(cached);return;}
         if(api==null||avatarWorkers.isShutdown())return;
         var waiter=new java.lang.ref.WeakReference<>(view);
@@ -148,7 +186,7 @@ final class ChatSession {
     void report(Exception e) { if (listener != null) listener.error(e.getMessage() == null ? "操作未完成，请重试。" : e.getMessage()); }
     void start() { active = true; refresh(); }
     void stop() { active = false; main.removeCallbacks(tick); connected = false; status = "已暂停 · 返回后自动同步"; }
-    void close() { stop(); listener = null; worker.shutdownNow(); avatarWorkers.shutdownNow();avatarWaiters.clear();avatarCache.evictAll();imageLoader.close(); }
+    void close() { stop(); listener = null; worker.shutdownNow();navigationWorkers.shutdownNow();directoryWorker.shutdownNow(); avatarWorkers.shutdownNow();avatarWaiters.clear();avatarCache.evictAll();imageLoader.close(); }
     void refresh() { main.removeCallbacks(tick); if (active && api != null) main.post(tick); }
 
     void configure(String address, String token, String name, Runnable success) {
@@ -169,7 +207,7 @@ final class ChatSession {
                 List<MessageApi.Agent> directory=candidate.agents(); List<MessageApi.Conversation> rooms=candidate.conversations();
                 secrets.save(cleanToken, normalized, cleanName);
                 main.post(() -> {
-                    generation++; connectionGeneration++; avatarCache.evictAll();avatarWaiters.clear(); selectedConversation="shared";drafts.clear();agents.clear();agents.addAll(directory);conversations.clear();conversations.addAll(rooms);jobs.clear();jobs.addAll(page.jobs);polling = false; loadingOlder = false; api = candidate; server = normalized; sender = cleanName;
+                    generation++; connectionGeneration++; avatarCache.evictAll();avatarWaiters.clear();historyCache.clear();unconfirmedRooms.clear();creatingRooms.clear();directoryLoading=false;lastDirectoryRefresh=android.os.SystemClock.elapsedRealtime(); selectedConversation="shared";drafts.clear();agents.clear();agents.addAll(directory);conversations.clear();conversations.addAll(rooms);jobs.clear();jobs.addAll(page.jobs);polling = false; loadingOlder = false; api = candidate; server = normalized; sender = cleanName;
                     messages.clear(); messages.addAll(page.messages); initialLoaded = true; hasOlder = page.hasMore;
                     restorePending(cleanToken); reconcile();
                     connected = true; configuring = false; status = "已连接 · 自动同步"; draft = "";draftImages.clear();imageDrafts.clear();
@@ -181,22 +219,19 @@ final class ChatSession {
 
     private void poll() {
         if (!active || api == null || polling || configuring) return;
+        refreshDirectory();
+        if(openingConversation())return;
         polling = true;
         int epoch = generation;
         MessageApi client = api;
-        String conversation = selectedConversation; boolean directoryDue = pollCycle++ % 5 == 0;
-        String deviceName = sender;
+        String conversation = selectedConversation;
         Long after = initialLoaded ? (messages.isEmpty() ? 0L : messages.get(messages.size() - 1).id) : null;
         worker.execute(() -> {
             try {
                 MessageApi.Page page = client.page(conversation, after, null);
-                List<MessageApi.Agent> directory=directoryDue?client.agents():null;
-                List<MessageApi.Conversation> rooms=directoryDue?client.conversations():null;
-                if (directoryDue) try { client.heartbeat(deviceId,deviceName); } catch (Exception ignored) { /* Presence must not interrupt message delivery. */ }
                 main.post(() -> {
                     if (epoch != generation) return;
                     polling = false;
-                    if(directory!=null){String oldAvatars=avatarSignature(agents);agents.clear();agents.addAll(directory);if(!oldAvatars.equals(avatarSignature(agents)))revision++;conversations.clear();conversations.addAll(rooms);}
                     String previousSignature=jobSignature(jobs);jobs.clear();jobs.addAll(page.jobs);if(!previousSignature.equals(jobSignature(jobs)))revision++;
                     if (!initialLoaded) { hasOlder = page.hasMore; initialLoaded = true; }
                     merge(page.messages); if(!connected)revision++; connected = true; backoff = 2000; status = "已连接 · 自动同步";
@@ -209,6 +244,22 @@ final class ChatSession {
                     backoff = Math.min(backoff * 2, 30000); notifyChanged(); schedule(backoff);
                 });
             }
+        });
+    }
+    private void refreshDirectory(){
+        if(directoryLoading||api==null||directoryWorker.isShutdown()||(lastDirectoryRefresh!=0&&android.os.SystemClock.elapsedRealtime()-lastDirectoryRefresh<10_000))return;
+        directoryLoading=true;lastDirectoryRefresh=android.os.SystemClock.elapsedRealtime();int connection=connectionGeneration;MessageApi client=api;String deviceName=sender;
+        directoryWorker.execute(()->{
+            try{
+                var directory=client.agents();var rooms=client.conversations();
+                main.post(()->{if(connection!=connectionGeneration)return;
+                    String old=avatarSignature(agents);agents.clear();agents.addAll(directory);if(!old.equals(avatarSignature(agents)))revision++;
+                    for(var room:conversations)if(rooms.stream().noneMatch(known->known.id.equals(room.id)))rooms.add(room);
+                    conversations.clear();conversations.addAll(rooms);notifyChanged();
+                });
+                try{client.heartbeat(deviceId,deviceName);}catch(Exception ignored){}
+            }catch(Exception ignored){}
+            finally{main.post(()->{if(connection==connectionGeneration)directoryLoading=false;});}
         });
     }
     private void schedule(int delay) { main.removeCallbacks(tick); if (active) main.postDelayed(tick, delay); }

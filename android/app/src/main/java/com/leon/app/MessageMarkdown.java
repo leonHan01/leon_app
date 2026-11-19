@@ -48,7 +48,7 @@ final class MessageMarkdown {
 
     private static Markwon renderer(Context context, boolean mine) {
         float density = context.getResources().getDisplayMetrics().density;
-        int foreground = mine ? Color.WHITE : Color.rgb(28, 36, 55);
+        int foreground = ChatUi.INK;
         int inset = mine ? 0x22000000 : 0x0E1C2437;
         TableTheme tableTheme = TableTheme.buildWithDefaults(context)
                 .tableBorderColor(mine ? 0x66FFFFFF : 0x331C2437)
@@ -66,10 +66,10 @@ final class MessageMarkdown {
                 .usePlugin(MovementMethodPlugin.create(TableAwareMovementMethod.create()))
                 .usePlugin(new AbstractMarkwonPlugin() {
                     @Override public void configureTheme(MarkwonTheme.Builder builder) {
-                        builder.linkColor(mine ? Color.WHITE : Color.rgb(46, 92, 227))
+                        builder.linkColor(mine ? 0xFF176844 : 0xFF287A5B)
                                 .codeTextColor(foreground)
                                 .codeBackgroundColor(inset)
-                                .blockQuoteColor(mine ? 0x88FFFFFF : 0x663C5A99);
+                                .blockQuoteColor(0x667A9A88);
                     }
 
                     @Override public void configureConfiguration(MarkwonConfiguration.Builder builder) {

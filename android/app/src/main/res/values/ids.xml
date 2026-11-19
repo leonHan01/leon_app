@@ -1,0 +1,20 @@
+<resources>
+    <item name="tab_agents" type="id" />
+    <item name="tab_groups" type="id" />
+    <item name="tab_settings" type="id" />
+    <item name="home_screen" type="id" />
+    <item name="chat_screen" type="id" />
+    <item name="home_title" type="id" />
+    <item name="home_add" type="id" />
+    <item name="agent_list" type="id" />
+    <item name="group_list" type="id" />
+    <item name="settings_list" type="id" />
+    <item name="chat_back" type="id" />
+    <item name="chat_more" type="id" />
+    <item name="chat_title" type="id" />
+    <item name="chat_input" type="id" />
+    <item name="chat_add" type="id" />
+    <item name="chat_extras" type="id" />
+    <item name="chat_send" type="id" />
+    <item name="connection_settings" type="id" />
+</resources>

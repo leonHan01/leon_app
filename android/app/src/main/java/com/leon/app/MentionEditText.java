@@ -14,6 +14,7 @@ final class MentionEditText extends EditText {
     }
     @Override public android.view.inputmethod.InputConnection onCreateInputConnection(android.view.inputmethod.EditorInfo info){
         var original=super.onCreateInputConnection(info);if(original==null)return null;
+        info.imeOptions&=~android.view.inputmethod.EditorInfo.IME_FLAG_NO_ENTER_ACTION;
         info.contentMimeTypes=new String[]{"image/*"};
         return new android.view.inputmethod.InputConnectionWrapper(original,false){
             @Override public boolean commitContent(android.view.inputmethod.InputContentInfo content,int flags,android.os.Bundle options){
