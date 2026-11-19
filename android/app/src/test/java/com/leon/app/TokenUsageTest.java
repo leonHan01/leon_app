@@ -15,6 +15,14 @@ import static org.junit.Assert.*;
 @RunWith(RobolectricTestRunner.class)
 @Config(sdk=35)
 public class TokenUsageTest {
+    @Test public void pricesUseModelSpecificCacheAndPeakRanges() throws Exception {
+        var json=new org.json.JSONObject().put("provider","deepseek").put("model","deepseek-flash").put("inputTokens",1000000).put("outputTokens",1000000).put("totalTokens",2000000).put("reportedCalls",1).put("unreportedCalls",0);
+        var range=UsagePricing.estimate(new MessageApi.ModelUsage(json));
+        assertEquals(.603,range.low(),.000001);assertEquals(1.50,range.high(),.000001);
+        json.put("provider","openai").put("model","gpt-4.1-mini");range=UsagePricing.estimate(new MessageApi.ModelUsage(json));
+        assertEquals(1.70,range.low(),.000001);assertEquals(2.0,range.high(),.000001);
+        json.put("model","gpt-4.1-mini-custom");assertNull(UsagePricing.estimate(new MessageApi.ModelUsage(json)));
+    }
     @Test public void authenticatedUsagePreservesLargeTotalsEmptyStateAndUpgradeErrors() throws Exception {
         var server=new ServerSocket(0,5,InetAddress.getByName("127.0.0.1"));
         server.setSoTimeout(10000);

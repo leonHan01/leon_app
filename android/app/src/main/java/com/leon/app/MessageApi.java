@@ -11,15 +11,30 @@ final class MessageApi {
     private final String token;
     MessageApi(String base, String token) { this.base = base; this.token = token; }
 
+    record User(String id,String username) {
+        User(JSONObject json)throws JSONException{this(json.getString("id"),json.getString("username"));}
+        String home(){return username.equalsIgnoreCase("Leon")?"shared":"home:"+id;}
+    }
+    record Login(User user,String sessionToken) {}
+    static final class SessionExpired extends IOException {
+        SessionExpired(){super("登录已失效，请重新登录。");}
+    }
+    Login login(String username)throws Exception{
+        var result=request("/api/conversations/account/login",new JSONObject().put("username",username));
+        return new Login(new User(result.getJSONObject("user")),result.getString("sessionToken"));
+    }
+    void logout()throws Exception{request("/api/conversations/account/logout",new JSONObject());}
+
     static final class Message {
         final long id, createdAt;
-        final String clientMessageId, deviceId, sender, platform, text, conversationId, role, agentId;
+        final String clientMessageId, deviceId, sender, platform, text, conversationId, role, agentId, userId;
         final List<String> imageIds = new ArrayList<>();
         Message(JSONObject json) throws JSONException {
             id = json.getLong("id"); createdAt = json.getLong("createdAt");
             clientMessageId = json.getString("clientMessageId"); deviceId = json.getString("deviceId");
             sender = json.getString("sender"); platform = json.getString("platform"); text = json.getString("text");
             conversationId = json.optString("conversationId", "shared"); role = json.optString("role", "user"); agentId = json.optString("agentId", "");
+            userId=json.isNull("userId")?"":json.optString("userId");
             JSONArray images=json.optJSONArray("images");if(images!=null)for(int i=0;i<images.length();i++)imageIds.add(images.getJSONObject(i).getString("id"));
         }
     }
@@ -28,8 +43,8 @@ final class MessageApi {
         Agent(JSONObject j) throws JSONException { id=j.getString("id");name=j.getString("name");handle=j.getString("handle");provider=j.getString("provider");enabled=j.getBoolean("enabled");avatarId=j.optString("avatarId","alfred"); }
     }
     static final class Conversation {
-        final String id,name,kind,agentId; final List<String> agentIds=new ArrayList<>();
-        Conversation(JSONObject j) throws JSONException { id=j.getString("id");name=j.getString("name");kind=j.getString("kind");agentId=j.optString("agentId","");JSONArray ids=j.getJSONArray("agentIds");for(int i=0;i<ids.length();i++)agentIds.add(ids.getString(i)); }
+        final String id,name,kind,agentId,ownerId; final List<String> agentIds=new ArrayList<>();
+        Conversation(JSONObject j) throws JSONException { id=j.getString("id");name=j.getString("name");kind=j.getString("kind");agentId=j.optString("agentId","");ownerId=j.isNull("ownerId")?"":j.optString("ownerId");JSONArray ids=j.getJSONArray("agentIds");for(int i=0;i<ids.length();i++)agentIds.add(ids.getString(i)); }
     }
     static final class ModelUsage {
         final String provider,model;
@@ -45,8 +60,8 @@ final class MessageApi {
         for(int i=0;i<rows.length();i++)result.add(new ModelUsage(rows.getJSONObject(i)));return result;
     }
     static final class Job {
-        final long messageId; final String agentId,agentName,status,error;
-        Job(JSONObject j) throws JSONException { messageId=j.getLong("messageId");agentId=j.getString("agentId");agentName=j.getString("agentName");status=j.getString("status");error=j.getString("error"); }
+        final long messageId; final String agentId,agentName,status,error,userId;
+        Job(JSONObject j) throws JSONException { messageId=j.getLong("messageId");agentId=j.getString("agentId");agentName=j.getString("agentName");status=j.getString("status");error=j.getString("error");userId=j.isNull("userId")?"":j.optString("userId"); }
         String signature() { return messageId+":"+agentId+":"+status+":"+error; }
     }
     static final int MAX_BACKUP=32*1024*1024;
@@ -66,7 +81,17 @@ final class MessageApi {
     List<Agent> agents() throws Exception { JSONArray rows=new JSONArray(requestText("/api/agents",null));List<Agent> result=new ArrayList<>();for(int i=0;i<rows.length();i++)result.add(new Agent(rows.getJSONObject(i)));return result; }
     List<Conversation> conversations() throws Exception { JSONArray rows=new JSONArray(requestText("/api/conversations",null));List<Conversation> result=new ArrayList<>();for(int i=0;i<rows.length();i++)result.add(new Conversation(rows.getJSONObject(i)));return result; }
     Conversation direct(String agentId) throws Exception { return new Conversation(request("/api/conversations/direct/"+agentId,new JSONObject())); }
-    Conversation group(String name,List<String> ids) throws Exception { return new Conversation(request("/api/conversations/groups",new JSONObject().put("name",name).put("agentIds",new JSONArray(ids)))); }
+    Conversation group(String name,List<String> agents,List<String> usernames)throws Exception{
+        var body=new JSONObject().put("name",name).put("agentIds",new JSONArray(agents)).put("usernames",new JSONArray(usernames));
+        return new Conversation(request("/api/conversations/groups",body));
+    }
+    List<User> members(String room,List<String> usernames)throws Exception{
+        JSONObject body=usernames==null?null:new JSONObject().put("usernames",new JSONArray(usernames));
+        JSONArray response=new JSONArray(requestText("/api/conversations/"+encode(room)+"/members",body));
+        List<User> result=new ArrayList<>();
+        for(int i=0;i<response.length();i++)result.add(new User(response.getJSONObject(i)));
+        return result;
+    }
     void retryJob(Job job) throws Exception { request("/api/device-messages/"+job.messageId+"/agents/"+job.agentId+"/retry",new JSONObject()); }
     void heartbeat(String deviceId, String name) throws Exception { request("/api/device-messages/presence",new JSONObject().put("deviceId",deviceId).put("name",name).put("platform","android")); }
     static final class Page {
@@ -128,13 +153,16 @@ final class MessageApi {
                 try (OutputStream stream = connection.getOutputStream()) { stream.write(bytes); }
             }
             int code = connection.getResponseCode();
+            if(code==401&&token.startsWith("chat_"))throw new SessionExpired();
             if (code == 401) throw new IOException("访问令牌未通过认证，请检查令牌后重试。");
             if (code == 403) throw new IOException("服务器拒绝访问（HTTP 403）。请检查服务端接口权限或 HTTPS 代理配置。");
             if (code == 502 || code == 503 || code == 504) throw new IOException("服务暂时不可用（HTTP " + code + "），请检查服务端运行状态。");
-            if (code == 404) throw new IOException(path.equals("/api/agents/usage")?"服务端尚未支持 Token 用量，请先升级服务端。":path.startsWith("/api/conversations/")?"服务端尚未支持此聊天功能，请先升级服务端。":"服务端尚未安装消息接口，请先升级服务端。");
+
             if (code == 413) throw new IOException("备份或图片超过服务允许的大小，请检查文件大小及服务端代理配置。");
             if (code < 200 || code >= 300) {
                 String reason = "请求失败（HTTP " + code + "），请稍后重试。";
+                if(code==404)reason=path.equals("/api/agents/usage")?"服务端尚未支持 Token 用量，请先升级服务端。":
+                    path.startsWith("/api/conversations/")?"服务端尚未支持此聊天功能，请先升级服务端。":"服务端尚未安装消息接口，请先升级服务端。";
                 InputStream failure = connection.getErrorStream();
                 if (failure != null) try (InputStream stream = failure; ByteArrayOutputStream out = new ByteArrayOutputStream()) {
                     byte[] buffer = new byte[2048]; int n;

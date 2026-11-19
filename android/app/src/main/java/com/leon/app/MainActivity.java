@@ -126,13 +126,13 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         homeAdd.setImageResource(navigation.tab==ChatNavigation.Tab.GROUPS?R.drawable.ic_add:R.drawable.ic_more);
         homeAdd.setContentDescription(navigation.tab==ChatNavigation.Tab.GROUPS?"新建群聊":"列表操作");
         homeStatus.setVisibility(navigation.tab==ChatNavigation.Tab.SETTINGS||session.connected?View.GONE:View.VISIBLE);
-        homeStatus.setText(session.configured()?session.status:"请先在设置中连接服务");
+        homeStatus.setText(session.configured()?session.status:"请先在设置中注册或登录");
         for(var entry:tabViews.entrySet()){
             boolean selected=entry.getKey()==navigation.tab;LinearLayout item=entry.getValue();item.setSelected(selected);
             ((ImageView)item.getChildAt(0)).setImageTintList(ColorStateList.valueOf(selected?GREEN:INK));
             ((TextView)item.getChildAt(1)).setTextColor(selected?GREEN:MUTED);
         }
-        StringBuilder signature=new StringBuilder(navigation.tab.name()).append(session.server).append(session.sender).append(session.configured()).append(session.connected).append(session.status);
+        StringBuilder signature=new StringBuilder(navigation.tab.name()).append(session.server).append(session.sender).append(session.user).append(session.configured()).append(session.connected).append(session.status);
         for(var agent:session.agents)signature.append(agent.id).append(agent.name).append(agent.handle).append(agent.provider).append(agent.avatarId).append(agent.enabled);
         for(var room:session.conversations)signature.append(room.id).append(room.name).append(room.agentIds);
         if(signature.toString().equals(homeSignature))return;homeSignature=signature.toString();homeRows.removeAllViews();
@@ -149,7 +149,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
             for(MessageApi.Conversation room:session.conversations)if(!room.kind.equals("direct")){
                 count++;ImageView icon=new ImageView(this);icon.setImageResource(R.drawable.ic_groups);icon.setImageTintList(ColorStateList.valueOf(Color.WHITE));
                 icon.setPadding(dp(10),dp(10),dp(10),dp(10));icon.setBackground(shape(0xFF62AA88,7));
-                addDirectoryRow(icon,room.name,room.id.equals("shared")?"设备消息与 Agent 群聊":room.agentIds.size()+" 位 Agent","group:"+room.id,()->openGroup(room));
+                addDirectoryRow(icon,room.name,(room.id.equals("shared")||room.id.startsWith("home:"))?"设备消息与 Agent 群聊":room.agentIds.size()+" 位 Agent","group:"+room.id,()->openGroup(room));
             }
             if(count==0)emptyHome("还没有群聊",session.configured()?"点击右上角 ＋，选择 Agents 创建群聊。":"连接服务后即可查看和创建群聊。");
         }else{
@@ -183,8 +183,14 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         LinearLayout labels=column();TextView name=text("Leon",21,INK);name.setTypeface(null,Typeface.BOLD);labels.addView(name);
         TextView description=text("你的 Agents 与群聊",13,MUTED);LinearLayout.LayoutParams dp=new LinearLayout.LayoutParams(-2,-2);dp.topMargin=dp(7);labels.addView(description,dp);
         LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,-2,1);lp.leftMargin=dp(16);identity.addView(labels,lp);homeRows.addView(identity);sectionGap();
-        View connection=settingRow("连接设置",session.configured()?session.server:"设置服务地址与访问令牌",R.drawable.ic_settings,this::showSettings);connection.setId(R.id.connection_settings);
-        settingRow("设备名称",session.sender,R.drawable.ic_agents,this::showSettings);
+        if(session.user==null){
+            View login=settingRow("注册或登录","输入 UserName 和服务访问令牌",R.drawable.ic_agents,this::showSettings);
+            login.setId(R.id.connection_settings);
+        }else{
+            View account=settingRow(session.user.username(),session.server,R.drawable.ic_agents,this::confirmLogout);
+            account.setId(R.id.connection_settings);
+            settingRow("退出登录","",R.drawable.ic_settings,this::confirmLogout);
+        }
         View usage=settingRow("Token 用量","查看累计消耗与模型明细",R.drawable.ic_usage,this::showUsage);usage.setId(R.id.token_usage);
         sectionGap();settingRow("连接状态",session.connected?"已连接 · 自动同步":session.status,R.drawable.ic_groups,()->{
             new AlertDialog.Builder(this).setTitle("连接状态").setMessage(session.status+"\n\n应用在前台时自动同步。退出后消息保留在服务器，下次打开可继续读取。").setPositiveButton("知道了",null).show();
@@ -241,22 +247,22 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         input.addView(chatAdd,new LinearLayout.LayoutParams(dp(40),dp(40)));
         send=action("发送");send.setId(R.id.chat_send);send.setTextColor(Color.WHITE);send.setTypeface(null,Typeface.BOLD);send.setBackground(ui.ripple(GREEN,5));send.setOnClickListener(view->sendCurrent());
         LinearLayout.LayoutParams sp=new LinearLayout.LayoutParams(dp(58),dp(38));sp.leftMargin=dp(3);sp.bottomMargin=dp(1);input.addView(send,sp);inputArea.addView(input);
-        extras=column();extras.setId(R.id.chat_extras);extras.setPadding(dp(10),dp(6),dp(10),dp(8));extras.setVisibility(View.GONE);
+        extras=column();extras.setId(R.id.chat_extras);extras.setPadding(dp(12),dp(4),dp(12),dp(10));extras.setVisibility(View.GONE);
         LinearLayout first=row(),second=row();extras.addView(first);extras.addView(second);
-        imageButton=attachmentAction(first,"相册",R.drawable.ic_photo,this::chooseImages);
-        attachmentAction(first,"压缩上下文",android.R.drawable.ic_menu_sort_by_size,tools::compact).setTag("chat-tool:compact");
-        attachmentAction(first,"查看上下文",android.R.drawable.ic_menu_info_details,tools::context).setTag("chat-tool:context");
-        attachmentAction(first,"对话列表",android.R.drawable.ic_menu_recent_history,tools::conversations).setTag("chat-tool:threads");
-        attachmentAction(second,"备份记录",android.R.drawable.ic_menu_save,tools::backup).setTag("chat-tool:backup");
-        attachmentAction(second,"加载备份",android.R.drawable.ic_menu_upload,tools::load).setTag("chat-tool:load");
-        attachmentAction(second,"清理记录",android.R.drawable.ic_menu_delete,tools::clear).setTag("chat-tool:clear");
-        mentionButton=attachmentAction(second,"@ Agent",R.drawable.ic_agents,()->showAgents(true));inputArea.addView(extras);
+        imageButton=attachmentAction(first,"相册",R.drawable.ic_photo,0xFF4778B2,0xFFEAF1FA,this::chooseImages);
+        attachmentAction(first,"压缩上下文",R.drawable.ic_compact,0xFF35896A,0xFFE7F2EC,tools::compact).setTag("chat-tool:compact");
+        attachmentAction(first,"查看上下文",R.drawable.ic_context,0xFF35896A,0xFFE7F2EC,tools::context).setTag("chat-tool:context");
+        attachmentAction(first,"对话列表",R.drawable.ic_threads,0xFF35896A,0xFFE7F2EC,tools::conversations).setTag("chat-tool:threads");
+        attachmentAction(second,"备份记录",R.drawable.ic_backup,0xFF6979A4,0xFFECEDF6,tools::backup).setTag("chat-tool:backup");
+        attachmentAction(second,"加载备份",R.drawable.ic_restore,0xFF6979A4,0xFFECEDF6,tools::load).setTag("chat-tool:load");
+        attachmentAction(second,"清理记录",R.drawable.ic_clear,0xFFB56360,0xFFF8ECEA,tools::clear).setTag("chat-tool:clear");
+        mentionButton=attachmentAction(second,"@ Agent",R.drawable.ic_agents,0xFF35896A,0xFFE7F2EC,()->showAgents(true));inputArea.addView(extras);
         chatScreen.addView(inputArea);
     }
-    private Button attachmentAction(LinearLayout parent,String label,int icon,Runnable action){
-        Button button=action(label);var drawable=getDrawable(icon).mutate();drawable.setTint(INK);drawable.setBounds(0,0,dp(24),dp(24));
-        button.setCompoundDrawables(null,drawable,null,null);button.setCompoundDrawablePadding(dp(8));button.setTextSize(11);button.setTextColor(INK);button.setPadding(dp(2),dp(8),dp(2),dp(8));button.setBackground(ui.ripple(Color.WHITE,9));
-        button.setOnClickListener(view->action.run());LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,dp(72),1);params.setMargins(dp(4),dp(4),dp(4),dp(4));parent.addView(button,params);return button;
+    private Button attachmentAction(LinearLayout parent,String label,int icon,int accent,int surface,Runnable action){
+        Button button=ui.toolButton(label,icon,accent,surface);
+        button.setOnClickListener(view->action.run());LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,-2,1);params.setMargins(dp(2),dp(2),dp(2),dp(2));
+        button.setMinHeight(dp(88));parent.addView(button,params);return button;
     }
     private void chooseImages(){
         Intent picker=new Intent(Intent.ACTION_OPEN_DOCUMENT);picker.setType("image/*");picker.addCategory(Intent.CATEGORY_OPENABLE);picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true);startActivityForResult(picker,42);
@@ -264,6 +270,8 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     private void sendCurrent(){if(session.sendDraft(composer.getText().toString())){composer.setText("");navigation.attachments=false;extras.setVisibility(View.GONE);chatAdd.setRotation(0);scroll.post(()->scroll.fullScroll(View.FOCUS_DOWN));}}
     private void showChatMenu(View anchor){
         PopupMenu menu=new PopupMenu(this,anchor);menu.getMenu().add("会话信息").setOnMenuItemClickListener(item->{showConversationInfo();return true;});
+        if(session.selected()!=null&&session.selected().kind.equals("group"))
+            menu.getMenu().add("群成员").setOnMenuItemClickListener(item->{showGroupMembers();return true;});
         menu.getMenu().add("Token 用量").setOnMenuItemClickListener(item->{showUsage();return true;});
         menu.getMenu().add("快捷命令").setOnMenuItemClickListener(item->{hideKeyboard();composer.clearFocus();navigation.attachments=true;showScreen();return true;});
         menu.getMenu().add("对话列表").setOnMenuItemClickListener(item->{tools.conversations();return true;});
@@ -278,6 +286,50 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         }
         ScrollView contents=new ScrollView(this);contents.addView(content);new AlertDialog.Builder(this).setTitle(session.title()).setView(contents).setPositiveButton("关闭",null).show();
     }
+    private void showGroupMembers(){
+        if(!session.configured())return;
+        String room=session.selectedConversation;
+        session.tool("正在读取群成员…",api->api.members(room,null),this::renderGroupMembers);
+    }
+
+    private void renderGroupMembers(List<MessageApi.User> users){
+        if(isDestroyed()||isFinishing())return;
+        String[] names=users.stream().map(MessageApi.User::username).toArray(String[]::new);
+        var room=session.selected();
+        var builder=new AlertDialog.Builder(this).setTitle("群成员").setItems(names,null).setNegativeButton("关闭",null);
+        if(session.owns(room)&&!room.id.equals("shared")&&!room.id.startsWith("home:"))
+            builder.setPositiveButton("添加用户",(dialog,which)->inviteUsers(room.id));
+        builder.show();
+    }
+
+    private void inviteUsers(String roomId){
+        LinearLayout form=column();
+        form.setPadding(dp(24),dp(8),dp(24),0);
+        EditText names=field(form,"已注册的 UserName（用逗号分隔）","",false);
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle("添加群成员").setView(form)
+            .setNegativeButton("取消",null).setPositiveButton("添加",null).create();
+        dialog.setOnShowListener(ignored->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
+            var invitees=usernames(names);
+            if(invitees.isEmpty()){names.setError("请输入至少一个用户名");return;}
+            if(invitees.size()>32){names.setError("每次最多添加 32 位用户");return;}
+            if(!session.selectedConversation.equals(roomId))return;
+            session.tool("正在添加群成员…",api->api.members(roomId,invitees),members->{
+                dialog.dismiss();
+                renderGroupMembers(members);
+            });
+        }));
+        dialog.show();
+    }
+
+    private static List<String> usernames(EditText field){
+        List<String> names=new ArrayList<>();
+        for(String name:field.getText().toString().split("[,，]")){
+            String trimmed=name.trim();
+            if(!trimmed.isEmpty())names.add(trimmed);
+        }
+        return names;
+    }
+
     private void hideKeyboard(){((InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(composer.getWindowToken(),0);}
 
     private void showUsage(){
@@ -299,7 +351,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         String signature=session.configured()+":"+session.configuring+":"+session.usageBusy+":"+session.usageLoadedAt+":"+session.usageError;
         if(signature.equals(usageSignature))return;usageSignature=signature;
         usageContent.removeAllViews();
-        usageContent.addView(text("当前服务累计用量，包含所有会话、工作流、上下文压缩和归档总结调用。",13,MUTED));
+        usageContent.addView(text("当前用户触发的 Agent 回复、上下文压缩与归档用量。群聊用量计入发起者。",13,MUTED));
         usageDialog.getButton(AlertDialog.BUTTON_NEUTRAL).setEnabled(session.configured()&&!session.usageBusy&&!session.configuring);
         if(!session.configured()){usageContent.addView(text("请先在设置中连接服务",14,INK));return;}
         if(session.usageBusy)usageContent.addView(text("正在读取用量…",14,MUTED));
@@ -310,27 +362,40 @@ public final class MainActivity extends Activity implements ChatSession.Listener
             TextView sum=text("总 Token  "+usageNumber(total),22,INK);sum.setTypeface(null,Typeface.BOLD);sum.setPadding(0,dp(18),0,dp(8));usageContent.addView(sum);
             usageContent.addView(text("输入 "+usageNumber(input)+" · 输出 "+usageNumber(output),14,INK));
             usageContent.addView(text("已报告用量 "+usageNumber(reported)+" 次 · 未报告用量 "+usageNumber(unreported)+" 次",12,MUTED));
+            double costLow=0,costHigh=0;int priced=0;
+            for(var row:session.modelUsage){var cost=UsagePricing.estimate(row);if(cost!=null){costLow+=cost.low();costHigh+=cost.high();priced++;}}
+            if(priced>0){TextView cost=text("已匹配模型估算  "+UsagePricing.label(new UsagePricing.Estimate(costLow,costHigh))+" USD",15,INK);cost.setPadding(0,dp(12),0,dp(4));cost.setTypeface(null,Typeface.BOLD);usageContent.addView(cost);}
+            if(priced<session.modelUsage.size())usageContent.addView(text("部分模型暂无可匹配价格，未计入以上金额。",12,MUTED));
             if(session.modelUsage.isEmpty())usageContent.addView(text("暂无用量记录",14,MUTED));
             for(var row:session.modelUsage){
                 TextView title=text(row.provider+" · "+row.model,15,INK);title.setTypeface(null,Typeface.BOLD);title.setPadding(0,dp(20),0,dp(6));usageContent.addView(title);
                 TextView counts=text("总计 "+usageNumber(row.totalTokens)+" Token\n输入 "+usageNumber(row.inputTokens)+" · 输出 "+usageNumber(row.outputTokens),14,INK);counts.setTextIsSelectable(true);usageContent.addView(counts);
                 usageContent.addView(text("已报告 "+usageNumber(row.reportedCalls)+" 次 · 未报告 "+usageNumber(row.unreportedCalls)+" 次",12,MUTED));
+                var cost=UsagePricing.estimate(row);usageContent.addView(text(cost==null?"暂无可匹配价格":"估算 "+UsagePricing.label(cost)+" USD",14,INK));
             }
             TextView date=text("读取于 "+DateFormat.getDateTimeInstance().format(new Date(session.usageLoadedAt)),12,MUTED);date.setPadding(0,dp(18),0,0);usageContent.addView(date);
         }
-        TextView note=text("仅累计开始记录以来模型实际返回的用量；未报告的调用不计入 Token 总数。缓存与推理 Token 已包含在总量中。此处为全局累计，不代表当前会话消耗或账单金额。",12,MUTED);
+        TextView note=text("按 2026-11-19 官网公开文本价格估算：输入分别按全部缓存命中 / 全部未命中计算；DeepSeek 分别使用非高峰 / 高峰价格。历史缓存命中、计费时段、价格变动和未报告调用无法还原，金额不是账单；可能不含长上下文、工具及其他费用。\n\nOpenAI：https://developers.openai.com/api/docs/pricing\nDeepSeek：https://api-docs.deepseek.com/quick_start/pricing/",12,MUTED);
+        android.text.util.Linkify.addLinks(note,android.text.util.Linkify.WEB_URLS);
         note.setPadding(0,dp(16),0,dp(8));usageContent.addView(note);
     }
 
     @Override public void changed(){
         if(homeScreen==null)return;
         renderUsage();tools.changed();
+        if(!session.configured()&&navigation.tab!=ChatNavigation.Tab.SETTINGS&&session.status.equals("登录已失效，请重新登录。")){
+            composer.setText("");
+            navigation.tab(ChatNavigation.Tab.SETTINGS);
+            homeSignature="";
+            showScreen();
+            return;
+        }
         if(settings!=null&&settings.isShowing())settings.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(!session.configuring);
         if(!navigation.inChat){renderHome();return;}
         roomTitle.setText(session.title());
         String subtitle=session.toolsBusy?session.toolsStatus:session.openingConversation()?"正在打开会话…":!session.connected?session.status:"";
         roomStatus.setText(subtitle);roomStatus.setVisibility(subtitle.isEmpty()?View.GONE:View.VISIBLE);
-        boolean direct=session.selected()!=null&&session.selected().kind.equals("direct");mentionButton.setVisibility(direct?View.GONE:View.VISIBLE);mentionButton.setEnabled(!session.availableAgents().isEmpty());
+        boolean direct=session.selected()!=null&&session.selected().kind.equals("direct");mentionButton.setVisibility(direct?View.INVISIBLE:View.VISIBLE);mentionButton.setEnabled(!session.availableAgents().isEmpty());
         if(!composer.getText().toString().equals(session.draft)){composer.setText(session.draft);composer.setSelection(composer.length());}
         if(!renderedConversation.equals(session.selectedConversation)){renderedConversation=session.selectedConversation;hideMentionSuggestions(false);dismissedMentionKey="";mentionKey="";renderedRevision=-1;attachmentSignature="";timeline.setTag(null);timeline.removeAllViews();}
         updateSend();renderAttachments();updateMentionSuggestions();
@@ -353,7 +418,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         long lastTime=0;
         for(MessageApi.Message message:session.messages){
             if(lastTime==0||Math.abs(message.createdAt-lastTime)>5*60*1000){addTime(message.createdAt);lastTime=message.createdAt;}
-            addBubble(message.text,message.sender,"",message.deviceId.equals(session.deviceId),null,message.role.equals("assistant")?message.agentId:null,message.imageIds);
+            addBubble(message.text,message.sender,"",session.mine(message),null,message.role.equals("assistant")?message.agentId:null,message.imageIds);
         }
         for(JSONObject message:session.currentPending()){
             boolean sending=session.sending.contains(message.optString("clientMessageId"));addBubble(message.optString("text"),message.optString("sender"),sending?"发送中…":"发送未完成",true,sending?null:message,null,ChatSession.imageIds(message));
@@ -367,7 +432,9 @@ public final class MainActivity extends Activity implements ChatSession.Listener
             LinearLayout notice=row();notice.setGravity(Gravity.CENTER_VERTICAL);notice.setPadding(dp(12),dp(3),dp(6),dp(3));notice.setBackground(shape(0xFFE4E4E4,6));
             TextView info=text(job.agentName+" · "+(job.status.equals("FAILED")?job.error:job.status.equals("RUNNING")?"正在回复…":"等待回复…"),12,0xFF777777);info.setMaxLines(3);notice.addView(info,new LinearLayout.LayoutParams(0,-2,1));
             if(job.status.equals("FAILED")){
-                Button retry=action("重试");retry.setOnClickListener(view->session.retryJob(job));notice.addView(retry,new LinearLayout.LayoutParams(dp(54),dp(48)));
+                if(session.user==null||session.user.id().equals(job.userId)){
+                    Button retry=action("重试");retry.setOnClickListener(view->session.retryJob(job));notice.addView(retry,new LinearLayout.LayoutParams(dp(54),dp(48)));
+                }
                 Button dismiss=action("×");dismiss.setTextSize(20);dismiss.setTextColor(MUTED);
                 dismiss.setContentDescription("忽略 "+job.agentName+" 的失败提示");dismiss.setTag("dismiss-job:"+job.messageId+":"+job.agentId);
                 dismiss.setOnClickListener(view->session.dismissJob(job));notice.addView(dismiss,new LinearLayout.LayoutParams(dp(48),dp(48)));
@@ -431,7 +498,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         if(dismiss)dismissedMentionKey=mentionKey;
         if(mentionPanel!=null)mentionPanel.setVisibility(View.GONE);
         boolean direct=session.selected()!=null&&session.selected().kind.equals("direct");
-        if(mentionButton!=null)mentionButton.setVisibility(direct?View.GONE:View.VISIBLE);
+        if(mentionButton!=null)mentionButton.setVisibility(direct?View.INVISIBLE:View.VISIBLE);
     }
     private void updateMentionSuggestions(){
         if(composer==null||mentionPanel==null)return;
@@ -487,6 +554,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         if(!session.configured())return;
         LinearLayout form=column();form.setPadding(dp(24),dp(8),dp(24),0);
         EditText name=field(form,"群名称","",false);
+        EditText members=field(form,"群成员 UserName（用逗号分隔，可选）","",false);
         form.addView(text("选择加入群聊的 Agent（最多 32 个）",12,MUTED));
         java.util.List<CheckBox> boxes=new java.util.ArrayList<>();java.util.List<MessageApi.Agent> directory=new java.util.ArrayList<>();
         for(MessageApi.Agent agent:session.agents)if(agent.enabled){CheckBox box=new CheckBox(this);box.setText(String.format(java.util.Locale.getDefault(),"%s @%s",agent.name,agent.handle));form.addView(box);boxes.add(box);directory.add(agent);}
@@ -496,30 +564,45 @@ public final class MainActivity extends Activity implements ChatSession.Listener
             String title=name.getText().toString().trim();if(title.isEmpty()||title.length()>60){name.setError("名称应为 1–60 字");return;}
             java.util.List<String> ids=new java.util.ArrayList<>();for(int i=0;i<boxes.size();i++)if(boxes.get(i).isChecked())ids.add(directory.get(i).id);
             if(ids.size()>32){Toast.makeText(this,"最多选择 32 个 Agent",Toast.LENGTH_SHORT).show();return;}
-            session.createGroup(title,ids,room->{
+            List<String> invitees=usernames(members);
+            if(invitees.size()>32){members.setError("每次最多添加 32 位用户");return;}
+            session.createGroup(title,ids,invitees,room->{
                 if(!navigation.inChat&&navigation.tab==ChatNavigation.Tab.GROUPS)openGroup(room);
                 else Toast.makeText(this,"群聊已创建",Toast.LENGTH_SHORT).show();
             });dialog.dismiss();
         }));dialog.show();
     }
 
-    private void showSettings() {
-        if (settings != null && settings.isShowing()) return;
-        LinearLayout form = column(); form.setPadding(dp(24), dp(8), dp(24), 0);
-        TextView intro = text("两端填写相同服务地址与令牌。令牌由 Android 系统密钥库加密保存。", 13, MUTED); form.addView(intro);
-        EditText address = field(form, "服务地址", session.server, false);
-        address.setInputType(android.text.InputType.TYPE_CLASS_TEXT | android.text.InputType.TYPE_TEXT_VARIATION_URI);
-        EditText token = field(form, "访问令牌", session.token(), true);
-        EditText name = field(form, "设备名称", session.sender, false);
-        TextView note = text("应用关闭后不会推送；重新打开会同步服务器历史消息。", 12, MUTED); note.setPadding(0, dp(12), 0, 0); form.addView(note);
-        ScrollView formScroll = new ScrollView(this); formScroll.addView(form);
-        settings = new AlertDialog.Builder(this).setTitle("连接你的设备").setView(formScroll)
-                .setNegativeButton("取消", null).setPositiveButton("验证并连接", null).create();
-        settings.setOnShowListener(d -> settings.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
-            session.configure(address.getText().toString(), token.getText().toString(), name.getText().toString(), () -> {
-                if (!isDestroyed()) { composer.setText(""); if (settings != null) settings.dismiss(); navigation.tab(ChatNavigation.Tab.SETTINGS);homeSignature="";showScreen(); }
-            });
-        }));
+    private void confirmLogout(){
+        new AlertDialog.Builder(this).setTitle("退出当前账号？").setMessage("下次登录请重新输入服务访问令牌。")
+            .setNegativeButton("取消",null).setPositiveButton("退出登录",(dialog,which)->session.logout()).show();
+    }
+
+    private void showSettings(){
+        if(settings!=null&&settings.isShowing())return;
+        if(session.configured()){confirmLogout();return;}
+        LinearLayout form=column();
+        form.setPadding(dp(24),dp(8),dp(24),dp(12));
+        EditText name=field(form,"UserName",session.sender.equals(android.os.Build.MODEL)?"":session.sender,false);
+        EditText address=field(form,"服务地址",session.server,false);
+        address.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_VARIATION_URI);
+        boolean hasLegacyToken=!session.legacyServiceToken(session.server).isEmpty();
+        EditText token=field(form,hasLegacyToken?"服务访问令牌（留空沿用已保存的令牌）":"服务访问令牌","",true);
+        TextView note=text("新用户名会自动注册。App 会记住当前登录状态。",13,MUTED);
+        note.setPadding(0,dp(12),0,0);
+        form.addView(note);
+        ScrollView scroll=new ScrollView(this);
+        scroll.addView(form);
+        settings=new AlertDialog.Builder(this).setTitle("注册或登录").setView(scroll)
+            .setNegativeButton("取消",null).setPositiveButton("继续",null).create();
+        settings.setOnShowListener(ignored->settings.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->
+            session.login(address.getText().toString(),token.getText().toString(),name.getText().toString(),()->{
+                if(isDestroyed())return;
+                settings.dismiss();
+                navigation.tab(ChatNavigation.Tab.AGENTS);
+                homeSignature="";
+                showScreen();
+            })));
         settings.show();
         settings.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(!session.configuring);
     }

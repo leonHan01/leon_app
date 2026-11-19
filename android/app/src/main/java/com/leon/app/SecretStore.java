@@ -28,10 +28,13 @@ final class SecretStore {
         cipher.init(Cipher.DECRYPT_MODE, key(), new GCMParameterSpec(128, Base64.decode(iv, Base64.NO_WRAP)));
         return new String(cipher.doFinal(Base64.decode(encrypted, Base64.NO_WRAP)), java.nio.charset.StandardCharsets.UTF_8);
     }
-    void save(String token, String server, String sender) throws Exception {
+    void saveSession(String token,String server,MessageApi.User user) throws Exception {
         Cipher cipher = Cipher.getInstance("AES/GCM/NoPadding"); cipher.init(Cipher.ENCRYPT_MODE, key());
         String encrypted = Base64.encodeToString(cipher.doFinal(token.getBytes(java.nio.charset.StandardCharsets.UTF_8)), Base64.NO_WRAP);
         if (!prefs.edit().putString("encryptedToken", encrypted).putString("tokenIV", Base64.encodeToString(cipher.getIV(), Base64.NO_WRAP))
-                .putString("server", server).putString("sender", sender).commit()) throw new java.io.IOException("连接设置保存失败。");
+                .putString("server",server).putString("sender",user.username()).putString("chatUserId",user.id()).commit()) throw new java.io.IOException("连接设置保存失败。");
+    }
+    void clearSession(){
+        prefs.edit().remove("encryptedToken").remove("tokenIV").remove("chatUserId").apply();
     }
 }

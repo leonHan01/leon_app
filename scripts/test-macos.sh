@@ -4,7 +4,7 @@ project_root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$project_root/macos"
 export CLANG_MODULE_CACHE_PATH="$project_root/macos/.build/clang-cache"
 mkdir -p .build
-swiftc -parse-as-library Sources/LeonApp/Models.swift Sources/LeonApp/MentionCompletion.swift Sources/LeonApp/ChatCommand.swift Tests/MessageChecks.swift -o .build/message-checks
+swiftc -parse-as-library Sources/LeonApp/Models.swift Sources/LeonApp/UsagePricing.swift Sources/LeonApp/MentionCompletion.swift Sources/LeonApp/ChatCommand.swift Tests/MessageChecks.swift -o .build/message-checks
 .build/message-checks
 swiftc -parse-as-library Sources/LeonApp/MessageMarkdown.swift Tests/MarkdownChecks.swift -o .build/markdown-checks
 .build/markdown-checks

@@ -21,6 +21,12 @@ struct TokenUsageView: View {
                 }
                 Text("已报告用量 \(total(\.reportedCalls).formatted()) 次 · 未报告用量 \(total(\.unreportedCalls).formatted()) 次")
                     .font(.caption).foregroundStyle(.secondary)
+                let priced = store.modelUsage.compactMap(UsagePricing.estimate)
+                if !priced.isEmpty {
+                    Text("已匹配模型估算：" + UsagePricing.label(.init(low: priced.reduce(0) { $0 + $1.low }, high: priced.reduce(0) { $0 + $1.high })) + " USD")
+                        .font(.headline)
+                    if priced.count != store.modelUsage.count { Text("部分模型暂无可匹配价格，未计入以上金额。您可查看下方明细。") .font(.caption).foregroundStyle(.secondary) }
+                }
                 if store.modelUsage.isEmpty {
                     Text("暂无用量记录").frame(maxWidth: .infinity, minHeight: 110).foregroundStyle(.secondary)
                 } else {
@@ -33,6 +39,8 @@ struct TokenUsageView: View {
                                         .font(.callout).textSelection(.enabled)
                                     Text("已报告 \(row.reportedCalls.formatted()) 次 · 未报告 \(row.unreportedCalls.formatted()) 次")
                                         .font(.caption).foregroundStyle(.secondary)
+                                    Text(UsagePricing.estimate(row).map { "估算 " + UsagePricing.label($0) + " USD" } ?? "暂无可匹配价格")
+                                        .font(.callout)
                                 }
                                 Divider()
                             }
@@ -42,8 +50,9 @@ struct TokenUsageView: View {
                 Text("读取于 " + updated.formatted(date: .abbreviated, time: .standard))
                     .font(.caption).foregroundStyle(.secondary)
             }
-            Text("仅累计开始记录以来模型实际返回的用量；未报告的调用不计入 Token 总数。缓存与推理 Token 已包含在模型返回的总量中。此处为全局累计，不代表当前会话消耗或账单金额。")
+            Text("按 2026-11-19 官网公开文本价格估算：输入分别按全部缓存命中 / 全部未命中计算；DeepSeek 分别使用非高峰 / 高峰价格。历史缓存命中、计费时段、价格变动和未报告调用无法还原，金额不是账单；可能不含长上下文、工具及其他费用。")
                 .font(.caption).foregroundStyle(.secondary)
+            HStack { Link("OpenAI 价格", destination: URL(string: "https://developers.openai.com/api/docs/pricing")!); Link("DeepSeek 价格", destination: URL(string: "https://api-docs.deepseek.com/quick_start/pricing/")!) }.font(.caption)
             HStack {
                 Button("刷新") { Task { await store.loadUsage() } }.disabled(store.usageBusy)
                 Spacer()

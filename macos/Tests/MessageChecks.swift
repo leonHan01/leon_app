@@ -66,6 +66,10 @@ struct MessageChecks {
         UsageProtocol.response = #"[{"provider":"openai","model":"test-model","inputTokens":3000000000,"outputTokens":20,"totalTokens":3000000020,"reportedCalls":2,"unreportedCalls":1,"firstRecordedAt":"2026-11-19T00:00:00Z","lastRecordedAt":"2026-11-19T01:00:00Z"}]"#
         let rows = try await api.usage()
         try check(UsageProtocol.authorized, "Usage request must use the authenticated read-only endpoint")
+        try check(UsagePricing.estimate(rows[0]) == nil, "Unknown models must not be priced")
+        let priced = ModelUsage(provider: "deepseek", model: "deepseek-flash", inputTokens: 1_000_000, outputTokens: 1_000_000, totalTokens: 2_000_000, reportedCalls: 1, unreportedCalls: 0, firstRecordedAt: nil, lastRecordedAt: nil)
+        let estimate = UsagePricing.estimate(priced)!
+        try check(abs(estimate.low - 0.603) < 0.000001 && abs(estimate.high - 1.5) < 0.000001, "Cache and peak pricing ranges must be applied")
         try check(rows[0].totalTokens == 3_000_000_020 && rows[0].unreportedCalls == 1, "Usage counts must retain 64-bit totals and missing reports")
         UsageProtocol.response = "[]"
         let empty = try await api.usage()

@@ -16,6 +16,7 @@ final class ChatSession {
     final SharedPreferences prefs;
     final SecretStore secrets;
     final String deviceId;
+    MessageApi.User user;
     String server, sender, status = "尚未连接", draft = "";
     final List<ChatImage> draftImages = new ArrayList<>();
     private final Map<String,List<ChatImage>> imageDrafts = new HashMap<>();
@@ -174,7 +175,7 @@ final class ChatSession {
     List<JSONObject> currentPending() { List<JSONObject> result=new ArrayList<>();for(JSONObject m:pending)if(m.optString("conversationId","shared").equals(selectedConversation))result.add(m);return result; }
     MessageApi.Conversation selected() { for(MessageApi.Conversation c:conversations)if(c.id.equals(selectedConversation))return c;return null; }
     String title() { return selected()==null?"设备群聊":selected().name; }
-    List<MessageApi.Agent> availableAgents() { List<MessageApi.Agent> result=new ArrayList<>();for(MessageApi.Agent a:agents)if(a.enabled&&(selectedConversation.equals("shared")||selected()!=null&&selected().agentIds.contains(a.id)))result.add(a);return result; }
+    List<MessageApi.Agent> availableAgents() { List<MessageApi.Agent> result=new ArrayList<>();for(MessageApi.Agent a:agents)if(a.enabled&&(selectedConversation.equals("shared")||selectedConversation.startsWith("home:")||selected()!=null&&selected().agentIds.contains(a.id)))result.add(a);return result; }
     void select(String id) {
         if(id.equals(selectedConversation))return;
         historyCache.remove(selectedConversation);historyCache.put(selectedConversation,new RoomSnapshot(this));
@@ -188,11 +189,16 @@ final class ChatSession {
     }
     void mention(MessageApi.Agent agent) { draft+=(draft.isEmpty()||Character.isWhitespace(draft.charAt(draft.length()-1))?"":" ")+"@"+agent.handle+" ";notifyChanged(); }
     void openDirect(MessageApi.Agent agent) {
+        String primary=user==null||user.home().equals("shared")?"direct:"+agent.id:"dm:"+user.id()+":"+agent.id;
         MessageApi.Conversation known=null;
-        for(var room:conversations)if(room.kind.equals("direct")&&room.agentId.equals(agent.id)){known=room;break;}
+        for(var room:conversations){
+            if(!room.kind.equals("direct")||!room.agentId.equals(agent.id))continue;
+            if(room.id.equals(primary)){known=room;break;}
+            if(known==null)known=room;
+        }
         if(known!=null&&!unconfirmedRooms.contains(known.id)){select(known.id);return;}
         if(api==null||configuring)return;
-        String roomId=known==null?"direct:"+agent.id:known.id;
+        String roomId=known==null?primary:known.id;
         if(known==null)try{conversations.add(new MessageApi.Conversation(new JSONObject().put("id",roomId).put("name",agent.name).put("kind","direct").put("agentId",agent.id).put("agentIds",new JSONArray(List.of(agent.id)))));}catch(JSONException failure){report(failure);return;}
         unconfirmedRooms.add(roomId);select(roomId);status="正在打开私聊…";notifyChanged();
         if(!creatingRooms.add(roomId))return;
@@ -202,16 +208,16 @@ final class ChatSession {
                 MessageApi.Conversation room=client.direct(agent.id);
                 main.post(()->{
                     if(connection!=connectionGeneration)return;creatingRooms.remove(roomId);unconfirmedRooms.remove(roomId);upsertRoom(room);
-                    if(selectedConversation.equals(roomId)){if(!room.id.equals(roomId))select(room.id);status="正在同步…";revision++;notifyChanged();refresh();}
+                    if(selectedConversation.equals(roomId)){if(!room.id.equals(roomId)){conversations.removeIf(old->old.id.equals(roomId));select(room.id);}status="正在同步…";revision++;notifyChanged();refresh();}
                     else notifyChanged();
                 });
             }catch(Exception failure){main.post(()->{if(connection!=connectionGeneration)return;creatingRooms.remove(roomId);if(selectedConversation.equals(roomId)){status="会话打开失败，请返回列表后重试";revision++;notifyChanged();report(failure);}});}
         });
     }
-    void createGroup(String name,List<String> ids,java.util.function.Consumer<MessageApi.Conversation> created){
+    void createGroup(String name,List<String> ids,List<String> usernames,java.util.function.Consumer<MessageApi.Conversation> created){
         if(api==null||configuring)return;int connection=connectionGeneration;MessageApi client=api;
         navigationWorkers.execute(()->{try{
-            var room=client.group(name,ids);main.post(()->{if(connection!=connectionGeneration)return;upsertRoom(room);notifyChanged();created.accept(room);});
+            var room=client.group(name,ids,usernames);main.post(()->{if(connection!=connectionGeneration)return;upsertRoom(room);notifyChanged();created.accept(room);});
         }catch(Exception failure){main.post(()->{if(connection==connectionGeneration)report(failure);});}});
     }
     private void upsertRoom(MessageApi.Conversation room){conversations.removeIf(existing->existing.id.equals(room.id));conversations.add(room);}
@@ -274,11 +280,32 @@ final class ChatSession {
         sender = prefs.getString("sender", android.os.Build.MODEL);
         try {
             String token = secrets.read();
-            if (!token.isEmpty()) { api = new MessageApi(Endpoint.normalize(server), token); restorePending(token); }
+            String userId=prefs.getString("chatUserId","");
+            if(!userId.isEmpty()&&token.startsWith("chat_")){
+                user=new MessageApi.User(userId,sender);
+                selectedConversation=user.home();
+                api=new MessageApi(Endpoint.normalize(server),token);
+                restorePending(user.id());
+            }
         } catch (Exception e) { status = "无法读取连接设置，请重新连接。"; }
     }
     boolean configured() { return api != null; }
-    String token() { try { return secrets.read(); } catch (Exception e) { return ""; } }
+    String legacyServiceToken(String address){
+        try{
+            if(user==null&&Endpoint.normalize(address).equals(Endpoint.normalize(server))){
+                String saved=secrets.read();
+                if(!saved.startsWith("chat_"))return saved;
+            }
+        }catch(Exception ignored){}
+        return "";
+    }
+    boolean owns(MessageApi.Conversation room){
+        return room!=null&&user!=null&&(user.id().equals(room.ownerId)||room.ownerId.isEmpty()&&user.home().equals("shared"));
+    }
+    boolean mine(MessageApi.Message message){
+        if(!message.role.equals("user"))return false;
+        return user==null?message.deviceId.equals(deviceId):user.id().equals(message.userId);
+    }
     void notifyChanged() { if (listener != null) listener.changed(); }
     void report(Exception e) { if (listener != null) listener.error(e.getMessage() == null ? "操作未完成，请重试。" : e.getMessage()); }
     void start() { active = true; refresh(); }
@@ -286,35 +313,121 @@ final class ChatSession {
     void close() { stop(); listener = null; worker.shutdownNow();navigationWorkers.shutdownNow();directoryWorker.shutdownNow();usageWorker.shutdownNow(); avatarWorkers.shutdownNow();avatarWaiters.clear();avatarCache.evictAll();imageLoader.close(); }
     void refresh() { main.removeCallbacks(tick); if (active && api != null) main.post(tick); }
 
-    void configure(String address, String token, String name, Runnable success) {
-        if (configuring) return;
-        if(toolsBusy){report(new java.io.IOException("请等待当前聊天操作完成后切换连接"));return;}
-        final String normalized, cleanToken = token.trim(), cleanName = name.trim();
-        try {
-            normalized = Endpoint.normalize(address);
-            if (cleanToken.isEmpty() || cleanToken.length() > 900 || cleanToken.chars().anyMatch(c -> Character.isWhitespace(c) || Character.isISOControl(c))
-                    || cleanName.isEmpty() || cleanName.length() > 60 || cleanName.chars().anyMatch(Character::isISOControl))
-                throw new IllegalArgumentException("请填写访问令牌和 1–60 字的设备名称。");
-            if (!sending.isEmpty()) throw new IllegalArgumentException("请等待正在发送的消息完成，再切换连接。");
-        } catch (Exception e) { report(e); return; }
-        configuring = true; notifyChanged();
-        worker.execute(() -> {
-            try {
-                MessageApi candidate = new MessageApi(normalized, cleanToken);
-                MessageApi.Page page = candidate.page("shared", null, null);
-                List<MessageApi.Agent> directory=candidate.agents(); List<MessageApi.Conversation> rooms=candidate.conversations();
-                secrets.save(cleanToken, normalized, cleanName);
-                main.post(() -> {
-                    generation++; connectionGeneration++; avatarCache.evictAll();avatarWaiters.clear();historyCache.clear();unconfirmedRooms.clear();creatingRooms.clear();directoryLoading=false;lastDirectoryRefresh=android.os.SystemClock.elapsedRealtime(); selectedConversation="shared";drafts.clear();agents.clear();agents.addAll(directory);conversations.clear();conversations.addAll(rooms);jobs.clear();jobs.addAll(page.jobs);polling = false; loadingOlder = false; api = candidate; server = normalized; sender = cleanName;
-                    messages.clear(); messages.addAll(page.messages); initialLoaded = true; hasOlder = page.hasMore;
-                    modelUsage.clear();usageBusy=false;usageLoadedAt=0;usageError="";
-                    historyRevisions.clear();historyRevisions.put("shared",page.historyRevision);contextOperations=page.contextOperations;
-                    restorePending(cleanToken); receiveJobs(page.jobs); reconcile();
-                    connected = true; configuring = false; status = "已连接 · 自动同步"; draft = "";draftImages.clear();imageDrafts.clear();
-                    revision++; notifyChanged(); success.run(); refresh();
+    void login(String address,String serviceToken,String username,Runnable success){
+        if(configuring||api!=null)return;
+        final String normalized, name=username.trim();
+        String credential=serviceToken.trim();
+        if(credential.isEmpty())credential=legacyServiceToken(address);
+        final String token=credential;
+        try{
+            normalized=Endpoint.normalize(address);
+            if(token.isEmpty()||token.length()>900||token.chars().anyMatch(c->Character.isWhitespace(c)||Character.isISOControl(c))
+                    ||name.isEmpty()||name.length()>60||name.chars().anyMatch(Character::isISOControl))
+                throw new IllegalArgumentException("请填写服务访问令牌和 1–60 字的 UserName。");
+        }catch(Exception error){report(error);return;}
+        configuring=true;
+        notifyChanged();
+        worker.execute(()->{
+            try{
+                MessageApi.Login login=new MessageApi(normalized,token).login(name);
+                MessageApi candidate=new MessageApi(normalized,login.sessionToken());
+                try{
+                    secrets.saveSession(login.sessionToken(),normalized,login.user());
+                }catch(Exception error){
+                    try{candidate.logout();}catch(Exception ignored){}
+                    throw error;
+                }
+                main.post(()->{
+                    resetAccount();
+                    user=login.user();
+                    api=candidate;
+                    server=normalized;
+                    sender=user.username();
+                    selectedConversation=user.home();
+                    restorePending(user.id());
+                    configuring=false;
+                    status="正在同步…";
+                    notifyChanged();
+                    success.run();
+                    refresh();
                 });
-            } catch (Exception e) { main.post(() -> { configuring = false; notifyChanged(); report(e); refresh(); }); }
+            }catch(Exception error){
+                main.post(()->{configuring=false;notifyChanged();report(error);});
+            }
         });
+    }
+
+    void logout(){
+        if(api==null||configuring)return;
+        if(toolsBusy||!sending.isEmpty()){
+            report(new java.io.IOException("请等待当前聊天操作完成后退出。"));
+            return;
+        }
+        configuring=true;
+        MessageApi client=api;
+        notifyChanged();
+        worker.execute(()->{
+            try{
+                client.logout();
+            }catch(MessageApi.SessionExpired alreadySignedOut){
+                // The server has already rejected this session.
+            }catch(Exception error){
+                main.post(()->{configuring=false;notifyChanged();report(error);refresh();});
+                return;
+            }
+            main.post(()->signedOut("已退出登录"));
+        });
+    }
+
+    private void signedOut(String message){
+        secrets.clearSession();
+        resetAccount();
+        configuring=false;
+        status=message;
+        notifyChanged();
+    }
+
+    private void resetAccount(){
+        generation++;
+        connectionGeneration++;
+        api=null;
+        user=null;
+        connected=false;
+        polling=false;
+        initialLoaded=false;
+        hasOlder=false;
+        loadingOlder=false;
+        toolsBusy=false;
+        toolsStatus="";
+        directoryLoading=false;
+        lastDirectoryRefresh=0;
+        selectedConversation="shared";
+        avatarCache.evictAll();
+        avatarWaiters.clear();
+        historyCache.clear();
+        historyRevisions.clear();
+        unconfirmedRooms.clear();
+        creatingRooms.clear();
+        conversations.clear();
+        agents.clear();
+        messages.clear();
+        jobs.clear();
+        contextOperations=new JSONArray();
+        draft="";
+        drafts.clear();
+        imageDrafts.clear();
+        draftImages.clear();
+        pending.clear();
+        pendingKey=null;
+        dismissedJobKeys.clear();
+        modelUsage.clear();
+        usageBusy=false;
+        usageLoadedAt=0;
+        usageError="";
+        if(pendingBackup!=null)pendingBackup.delete();
+        pendingBackup=null;
+        pendingImportAgent="";
+        revision++;
     }
 
     private void poll() {
@@ -342,6 +455,10 @@ final class ChatSession {
             } catch (Exception e) {
                 main.post(() -> {
                     if (epoch != generation) return;
+                    if(e instanceof MessageApi.SessionExpired){
+                        signedOut(e.getMessage());
+                        return;
+                    }
                     polling = false; connected = false; status = e.getMessage() == null ? "连接未完成" : e.getMessage();
                     backoff = Math.min(backoff * 2, 30000); notifyChanged(); schedule(backoff);
                 });
@@ -356,7 +473,7 @@ final class ChatSession {
                 var directory=client.agents();var rooms=client.conversations();
                 main.post(()->{if(connection!=connectionGeneration)return;
                     String old=avatarSignature(agents);agents.clear();agents.addAll(directory);if(!old.equals(avatarSignature(agents)))revision++;
-                    for(var room:conversations)if(rooms.stream().noneMatch(known->known.id.equals(room.id)))rooms.add(room);
+                    for(var room:conversations)if(unconfirmedRooms.contains(room.id)&&rooms.stream().noneMatch(known->known.id.equals(room.id)))rooms.add(room);
                     conversations.clear();conversations.addAll(rooms);notifyChanged();
                 });
                 try{client.heartbeat(deviceId,deviceName);}catch(Exception ignored){}

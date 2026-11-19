@@ -44,6 +44,18 @@ public class ChatScreensTest {
     }
     @After public void finish(){controller.pause().stop().destroy();}
 
+    @Test public void signedOutSettingsOffersUsernameRegistration(){
+        view(R.id.tab_settings).performClick();
+        view(R.id.connection_settings).performClick();
+        var dialog=(android.app.AlertDialog)org.robolectric.shadows.ShadowDialog.getLatestDialog();
+        assertNotNull(dialog);
+        assertTrue(dialog.isShowing());
+        assertEquals("继续",dialog.getButton(android.app.AlertDialog.BUTTON_POSITIVE).getText().toString());
+        // The user can cancel the registration dialog without changing the local account.
+        dialog.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).performClick();
+        assertNull(session.user);
+    }
+
     @Test public void directoriesOpenDedicatedChatsAndPreserveDrafts() {
         assertEquals(View.VISIBLE,view(R.id.home_screen).getVisibility());
         assertEquals(View.GONE,view(R.id.chat_screen).getVisibility());
