@@ -31,11 +31,38 @@ final class MessageApi {
         final String id,name,kind,agentId; final List<String> agentIds=new ArrayList<>();
         Conversation(JSONObject j) throws JSONException { id=j.getString("id");name=j.getString("name");kind=j.getString("kind");agentId=j.optString("agentId","");JSONArray ids=j.getJSONArray("agentIds");for(int i=0;i<ids.length();i++)agentIds.add(ids.getString(i)); }
     }
+    static final class ModelUsage {
+        final String provider,model;
+        final long inputTokens,outputTokens,totalTokens,reportedCalls,unreportedCalls;
+        ModelUsage(JSONObject json) throws JSONException {
+            provider=json.getString("provider");model=json.getString("model");
+            inputTokens=json.getLong("inputTokens");outputTokens=json.getLong("outputTokens");totalTokens=json.getLong("totalTokens");
+            reportedCalls=json.getLong("reportedCalls");unreportedCalls=json.getLong("unreportedCalls");
+        }
+    }
+    List<ModelUsage> usage() throws Exception {
+        JSONArray rows=new JSONArray(requestText("/api/agents/usage",null));List<ModelUsage> result=new ArrayList<>();
+        for(int i=0;i<rows.length();i++)result.add(new ModelUsage(rows.getJSONObject(i)));return result;
+    }
     static final class Job {
         final long messageId; final String agentId,agentName,status,error;
         Job(JSONObject j) throws JSONException { messageId=j.getLong("messageId");agentId=j.getString("agentId");agentName=j.getString("agentName");status=j.getString("status");error=j.getString("error"); }
         String signature() { return messageId+":"+agentId+":"+status+":"+error; }
     }
+    static final int MAX_BACKUP=32*1024*1024;
+    JSONObject context(String room) throws Exception {return request("/api/conversations/context?conversationId="+encode(room),null);}
+    JSONObject contextAction(String action,JSONObject body) throws Exception {return request("/api/conversations/context/"+action,body);}
+    JSONObject clearPreview(String room) throws Exception {return request("/api/conversations/context/clear-preview?conversationId="+encode(room),null);}
+    Conversation newThread(String agentId,String requestId,String name) throws Exception {
+        return new Conversation(request("/api/conversations/direct/"+encode(agentId)+"/threads",new JSONObject().put("requestId",requestId).put("name",name)));
+    }
+    byte[] backup(String room) throws Exception {return requestBytes("/api/conversations/backups?conversationId="+encode(room),null,null,MAX_BACKUP);}
+    Conversation restoreBackup(byte[] bytes,String requestId,String agentId) throws Exception {
+        if(bytes.length==0||bytes.length>MAX_BACKUP)throw new IOException("备份不能超过 32 MB");
+        String path="/api/conversations/backups?requestId="+encode(requestId)+(agentId.isEmpty()?"":"&agentId="+encode(agentId));
+        return new Conversation(new JSONObject(new String(requestBytes(path,bytes,"application/zip",MAX_BACKUP),StandardCharsets.UTF_8)));
+    }
+    private static String encode(String value) throws Exception {return URLEncoder.encode(value,StandardCharsets.UTF_8.name());}
     List<Agent> agents() throws Exception { JSONArray rows=new JSONArray(requestText("/api/agents",null));List<Agent> result=new ArrayList<>();for(int i=0;i<rows.length();i++)result.add(new Agent(rows.getJSONObject(i)));return result; }
     List<Conversation> conversations() throws Exception { JSONArray rows=new JSONArray(requestText("/api/conversations",null));List<Conversation> result=new ArrayList<>();for(int i=0;i<rows.length();i++)result.add(new Conversation(rows.getJSONObject(i)));return result; }
     Conversation direct(String agentId) throws Exception { return new Conversation(request("/api/conversations/direct/"+agentId,new JSONObject())); }
@@ -45,11 +72,14 @@ final class MessageApi {
     static final class Page {
         final List<Message> messages = new ArrayList<>();
         final boolean hasMore;
+        final long historyRevision;
+        final JSONArray contextOperations;
         final List<Job> jobs = new ArrayList<>();
         Page(JSONObject json) throws JSONException {
             JSONArray rows = json.getJSONArray("messages");
             for (int i = 0; i < rows.length(); i++) messages.add(new Message(rows.getJSONObject(i)));
             hasMore = json.getBoolean("hasMore");
+            historyRevision=json.optLong("historyRevision",-1);contextOperations=json.optJSONArray("contextOperations")==null?new JSONArray():json.getJSONArray("contextOperations");
             JSONArray tasks=json.optJSONArray("jobs");if(tasks!=null)for(int i=0;i<tasks.length();i++)jobs.add(new Job(tasks.getJSONObject(i)));
         }
     }
@@ -81,10 +111,13 @@ final class MessageApi {
         return requestBytes(path,body==null?null:body.toString().getBytes(StandardCharsets.UTF_8),"application/json; charset=utf-8");
     }
     private byte[] requestBytes(String path, byte[] bytes, String contentType) throws Exception {
+        return requestBytes(path,bytes,contentType,5_000_000);
+    }
+    private byte[] requestBytes(String path, byte[] bytes, String contentType,int limit) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(base + path).openConnection();
         try {
             connection.setInstanceFollowRedirects(false);
-            connection.setConnectTimeout(12000); connection.setReadTimeout(15000);
+            connection.setConnectTimeout(12000); connection.setReadTimeout(path.startsWith("/api/conversations/backups")?60000:15000);
             connection.setUseCaches(false);
             connection.setRequestProperty("Authorization", "Bearer " + token);
             connection.setRequestProperty("Accept", "application/json");
@@ -98,7 +131,8 @@ final class MessageApi {
             if (code == 401) throw new IOException("访问令牌未通过认证，请检查令牌后重试。");
             if (code == 403) throw new IOException("服务器拒绝访问（HTTP 403）。请检查服务端接口权限或 HTTPS 代理配置。");
             if (code == 502 || code == 503 || code == 504) throw new IOException("服务暂时不可用（HTTP " + code + "），请检查服务端运行状态。");
-            if (code == 404) throw new IOException("服务端尚未安装消息接口，请先升级服务端。");
+            if (code == 404) throw new IOException(path.equals("/api/agents/usage")?"服务端尚未支持 Token 用量，请先升级服务端。":path.startsWith("/api/conversations/")?"服务端尚未支持此聊天功能，请先升级服务端。":"服务端尚未安装消息接口，请先升级服务端。");
+            if (code == 413) throw new IOException("备份或图片超过服务允许的大小，请检查文件大小及服务端代理配置。");
             if (code < 200 || code >= 300) {
                 String reason = "请求失败（HTTP " + code + "），请稍后重试。";
                 InputStream failure = connection.getErrorStream();
@@ -113,7 +147,7 @@ final class MessageApi {
             try (InputStream in = connection.getInputStream(); ByteArrayOutputStream out = new ByteArrayOutputStream()) {
                 byte[] buffer = new byte[8192]; int n;
                 while ((n = in.read(buffer)) != -1) {
-                    if (out.size() + n > 5_000_000) throw new IOException("服务器响应过大。");
+                    if (out.size() + n > limit) throw new IOException("服务器响应过大。");
                     out.write(buffer, 0, n);
                 }
                 return out.toByteArray();

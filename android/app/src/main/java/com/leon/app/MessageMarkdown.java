@@ -53,7 +53,7 @@ final class MessageMarkdown {
         TableTheme tableTheme = TableTheme.buildWithDefaults(context)
                 .tableBorderColor(mine ? 0x66FFFFFF : 0x331C2437)
                 .tableBorderWidth(Math.max(1, Math.round(density)))
-                .tableCellPadding(Math.round(8 * density))
+                .tableCellPadding(Math.round(6 * density))
                 .tableHeaderRowBackgroundColor(inset)
                 .tableOddRowBackgroundColor(Color.TRANSPARENT)
                 .tableEvenRowBackgroundColor(Color.TRANSPARENT)
@@ -66,7 +66,8 @@ final class MessageMarkdown {
                 .usePlugin(MovementMethodPlugin.create(TableAwareMovementMethod.create()))
                 .usePlugin(new AbstractMarkwonPlugin() {
                     @Override public void configureTheme(MarkwonTheme.Builder builder) {
-                        builder.linkColor(mine ? 0xFF176844 : 0xFF287A5B)
+                        builder.headingTextSizeMultipliers(new float[]{1.3f, 1.2f, 1.15f, 1.1f, 1.05f, 1f})
+                                .linkColor(mine ? 0xFF176844 : 0xFF287A5B)
                                 .codeTextColor(foreground)
                                 .codeBackgroundColor(inset)
                                 .blockQuoteColor(0x667A9A88);

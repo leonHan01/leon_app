@@ -71,6 +71,9 @@ struct ContentView: View {
                 }
                 Text("私聊直接回复\n群聊中 @指定 Agent").font(.caption).foregroundStyle(.secondary).lineSpacing(5)
                 Divider()
+                Button { store.showUsage = true } label: {
+                    Label("Token 用量", systemImage: "chart.bar").frame(maxWidth: .infinity, alignment: .leading)
+                }.buttonStyle(.plain).disabled(!store.hasConnection)
                 Button { store.showSettings = true } label: {
                     Label("连接设置", systemImage: "gearshape").frame(maxWidth: .infinity, alignment: .leading)
                 }.buttonStyle(.plain).padding(.bottom, 18)
@@ -125,9 +128,10 @@ struct ContentView: View {
         .sheet(isPresented: $store.showSettings) { ConnectionView(store: store) }
         .sheet(isPresented: $store.showNewGroup) { NewGroupView(store: store) }
         .sheet(isPresented: $store.showContext) { ContextSettingsView(store: store) }
+        .sheet(isPresented: $store.showUsage) { TokenUsageView(store: store) }
         .sheet(isPresented: $store.showEndRound) { EndRoundView(store: store) }
         .sheet(isPresented: $store.showClearHistory) { ClearHistoryView(store: store) }
-        .alert("暂未完成", isPresented: Binding(get: { store.error != nil && !store.showSettings && !store.showNewGroup && !store.showContext && !store.showEndRound && !store.showClearHistory }, set: { if !$0 { store.error = nil } })) {
+        .alert("暂未完成", isPresented: Binding(get: { store.error != nil && !store.showSettings && !store.showNewGroup && !store.showContext && !store.showUsage && !store.showEndRound && !store.showClearHistory }, set: { if !$0 { store.error = nil } })) {
             Button("知道了") { store.error = nil }
         } message: { Text(store.error ?? "") }
         .onAppear { NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true) }

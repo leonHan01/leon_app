@@ -41,6 +41,18 @@ struct AgentInfo: Codable, Identifiable, Equatable {
     let enabled: Bool
     let avatarId: String?
 }
+struct ModelUsage: Codable, Identifiable, Equatable {
+    var id: String { provider + ":" + model }
+    let provider: String
+    let model: String
+    let inputTokens: Int64
+    let outputTokens: Int64
+    let totalTokens: Int64
+    let reportedCalls: Int64
+    let unreportedCalls: Int64
+    let firstRecordedAt: String?
+    let lastRecordedAt: String?
+}
 struct Conversation: Codable, Identifiable, Equatable {
     let id: String
     let name: String
@@ -202,6 +214,7 @@ final class MessageAPI: @unchecked Sendable {
     }
 
     func agents() async throws -> [AgentInfo] { try await request(URLRequest(url: base.appendingPathComponent("api/agents"))) }
+    func usage() async throws -> [ModelUsage] { try await request(URLRequest(url: base.appendingPathComponent("api/agents/usage"))) }
     func heartbeat(deviceId: String, name: String) async throws {
         struct Presence: Decodable { let lastSeenAt: Int64 }
         let _: Presence = try await post("api/device-messages/presence", body: ["deviceId": deviceId, "name": name, "platform": "macos"])
@@ -303,6 +316,9 @@ final class MessageAPI: @unchecked Sendable {
         switch http.statusCode {
         case 200...299: return try JSONDecoder().decode(T.self, from: data)
         default:
+            if http.statusCode == 404, req.url?.path == "/api/agents/usage" {
+                throw ClientError.message("服务端尚未支持 Token 用量，请先升级服务端。")
+            }
             if http.statusCode == 404, req.url?.path.contains("/context/clear") == true {
                 throw ClientError.message("服务端尚未支持 /clear，请先部署本次服务端更新。")
             }

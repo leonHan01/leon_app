@@ -1,4 +1,5 @@
 <resources>
+    <item name="token_usage" type="id" />
     <item name="tab_agents" type="id" />
     <item name="tab_groups" type="id" />
     <item name="tab_settings" type="id" />

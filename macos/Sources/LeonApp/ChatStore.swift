@@ -35,6 +35,22 @@ final class ChatStore: ObservableObject {
         return try await api.imageData(id)
     }
     @Published var agents: [AgentInfo] = []
+    @Published var showUsage = false
+    @Published var modelUsage: [ModelUsage] = []
+    @Published var usageBusy = false
+    @Published var usageLoadedAt: Date?
+    @Published var usageError: String?
+    func loadUsage() async {
+        guard let api, !usageBusy else { return }
+        let connection = connectionId
+        usageBusy = true; usageError = nil
+        defer { if connection == connectionId { usageBusy = false } }
+        do {
+            let rows = try await api.usage()
+            guard connection == connectionId else { return }
+            modelUsage = rows; usageLoadedAt = Date()
+        } catch { if connection == connectionId { usageError = friendly(error) } }
+    }
     @Published var conversations: [Conversation] = []
     @Published var jobs: [AgentJob] = []
     @Published private var dismissedJobKeys = Set<String>()
@@ -466,6 +482,7 @@ final class ChatStore: ObservableObject {
             let rooms = try await candidate.conversations()
             try await Keychain.save(secret)
             generation = UUID(); connectionId = UUID(); avatarSessionKey = UUID().uuidString
+            modelUsage = []; usageError = nil; usageLoadedAt = nil; usageBusy = false
             navigationRequest = UUID(); roomCache = [:]; roomCacheOrder = []
             for creation in directCreations.values { creation.task.cancel() }
             directCreations = [:]; unconfirmedDirectRooms = []

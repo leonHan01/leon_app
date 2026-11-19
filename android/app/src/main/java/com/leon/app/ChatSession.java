@@ -37,7 +37,7 @@ final class ChatSession {
     }
     private void removeImageFiles(JSONObject message){for(String id:imageIds(message))ChatImage.remove(files,pendingKey,id);}
     int preparingImages;
-    boolean canSend(String text) { return configured() && !openingConversation() && !configuring && preparingImages==0 && (!text.trim().isEmpty() || !draftImages.isEmpty()) && text.length()<=8000; }
+    boolean canSend(String text) { return configured() && !openingConversation() && !configuring && !toolsBusy && preparingImages==0 && (!text.trim().isEmpty() || !draftImages.isEmpty()) && text.length()<=8000; }
     void addImage(android.net.Uri uri,Runnable release) {
         if(api==null||configuring||draftImages.size()+preparingImages>=4){release.run();report(new java.io.IOException("请先连接服务器，每条最多 4 张图片"));return;}
         int connection=connectionGeneration;String room=selectedConversation;preparingImages++;notifyChanged();
@@ -57,8 +57,105 @@ final class ChatSession {
     long revision;
     final List<MessageApi.Message> messages = new ArrayList<>();
     final List<MessageApi.Agent> agents = new ArrayList<>();
+    final List<MessageApi.ModelUsage> modelUsage=new ArrayList<>();
+    boolean usageBusy;
+    long usageLoadedAt;
+    String usageError="";
+    private final ExecutorService usageWorker=Executors.newSingleThreadExecutor();
+    void loadUsage(){
+        if(api==null||usageBusy||configuring)return;
+        int connection=connectionGeneration;MessageApi client=api;
+        usageBusy=true;usageError="";notifyChanged();
+        usageWorker.execute(()->{
+            try{
+                var rows=client.usage();
+                main.post(()->{
+                    if(connection!=connectionGeneration)return;
+                    modelUsage.clear();modelUsage.addAll(rows);usageLoadedAt=System.currentTimeMillis();usageBusy=false;notifyChanged();
+                });
+            }catch(Exception failure){main.post(()->{
+                if(connection!=connectionGeneration)return;
+                usageError=failure.getMessage()==null?"无法读取用量，请重试。":failure.getMessage();usageBusy=false;notifyChanged();
+            });}
+        });
+    }
     final List<MessageApi.Conversation> conversations = new ArrayList<>();
     final List<MessageApi.Job> jobs = new ArrayList<>();
+    private final Set<String> dismissedJobKeys=new HashSet<>();
+    List<MessageApi.Job> visibleJobs(){
+        List<MessageApi.Job> visible=new ArrayList<>();
+        for(var job:jobs)if(!job.status.equals("FAILED")||!dismissedJobKeys.contains(dismissalKey(job)))visible.add(job);
+        return visible;
+    }
+    int dismissedFailureCount(){return jobs.size()-visibleJobs().size();}
+    private String jobId(MessageApi.Job job){return job.messageId+":"+job.agentId;}
+    private String dismissalKey(MessageApi.Job job){
+        try{
+            byte[] hash=MessageDigest.getInstance("SHA-256").digest(job.error.getBytes(StandardCharsets.UTF_8));
+            StringBuilder hex=new StringBuilder();for(byte b:hash)hex.append(String.format(Locale.ROOT,"%02x",b));
+            return jobId(job)+"#"+hex;
+        }catch(java.security.NoSuchAlgorithmException impossible){throw new IllegalStateException(impossible);}
+    }
+    void dismissJob(MessageApi.Job job){
+        if(!job.status.equals("FAILED"))return;
+        dismissedJobKeys.add(dismissalKey(job));saveDismissals();revision++;notifyChanged();
+    }
+    void restoreDismissedJobs(){
+        for(var job:jobs)if(job.status.equals("FAILED"))dismissedJobKeys.remove(dismissalKey(job));
+        saveDismissals();revision++;notifyChanged();
+    }
+    private void saveDismissals(){
+        if(pendingKey!=null)prefs.edit().putStringSet(pendingKey+".dismissedJobs",new HashSet<>(dismissedJobKeys)).apply();
+    }
+    void receiveJobs(List<MessageApi.Job> incoming){
+        Set<String> active=new HashSet<>();for(var job:incoming)if(!job.status.equals("FAILED"))active.add(jobId(job));
+        boolean changed=dismissedJobKeys.removeIf(key->active.contains(key.split("#",2)[0]));
+        if(changed)saveDismissals();
+        String previous=jobSignature(jobs);jobs.clear();jobs.addAll(incoming);
+        if(changed||!previous.equals(jobSignature(jobs)))revision++;
+    }
+    boolean toolsBusy;
+    String toolsStatus="";
+    JSONArray contextOperations=new JSONArray();
+    private final Map<String,Long> historyRevisions=new HashMap<>();
+    java.io.File pendingBackup;
+    int pendingBackupConnection, pendingImportConnection;
+    String pendingImportAgent="";
+    int connectionStamp(){return connectionGeneration;}
+    interface Tool<T>{T run(MessageApi client)throws Exception;}
+    <T> void tool(String label,Tool<T> work,java.util.function.Consumer<T> success){
+        if(api==null||configuring||toolsBusy)return;
+        int connection=connectionGeneration;String room=selectedConversation;MessageApi client=api;
+        toolsBusy=true;toolsStatus=label;notifyChanged();
+        navigationWorkers.execute(()->{
+            try{
+                T result=work.run(client);
+                main.post(()->{if(connection!=connectionGeneration)return;toolsBusy=false;toolsStatus="";notifyChanged();if(room.equals(selectedConversation))success.accept(result);});
+            }catch(Exception failure){main.post(()->{if(connection!=connectionGeneration)return;toolsBusy=false;toolsStatus="";notifyChanged();if(room.equals(selectedConversation))report(failure);});}
+        });
+    }
+    List<MessageApi.Conversation> agentConversations(String agentId){
+        List<MessageApi.Conversation> rooms=new ArrayList<>();
+        for(var room:conversations)if(room.kind.equals("direct")&&room.agentId.equals(agentId))rooms.add(room);
+        return rooms;
+    }
+    void addConversation(MessageApi.Conversation room){upsertRoom(room);notifyChanged();}
+    void replaceConversations(List<MessageApi.Conversation> rooms){conversations.clear();conversations.addAll(rooms);notifyChanged();}
+    void clearLocalHistory(String room,long revision){
+        historyRevisions.put(room,revision);historyCache.remove(room);
+        drafts.remove(room);imageDrafts.remove(room);
+        pending.removeIf(message->{if(!message.optString("conversationId","shared").equals(room))return false;removeImageFiles(message);return true;});savePending();
+        if(room.equals(selectedConversation)){
+            generation++;polling=false;messages.clear();jobs.clear();contextOperations=new JSONArray();draft="";draftImages.clear();
+            initialLoaded=false;hasOlder=false;loadingOlder=false;this.revision++;notifyChanged();refresh();
+        }
+    }
+    private boolean historyChanged(MessageApi.Page page,String room){
+        if(page.historyRevision<0)return false;
+        Long previous=historyRevisions.put(room,page.historyRevision);
+        if(previous!=null&&previous!=page.historyRevision){clearLocalHistory(room,page.historyRevision);return true;}
+        return false;
+    }
     String selectedConversation = "shared";
     private int connectionGeneration;
     private final Map<String,String> drafts = new HashMap<>();
@@ -84,7 +181,7 @@ final class ChatSession {
         while(historyCache.size()>8)historyCache.remove(historyCache.keySet().iterator().next());
         drafts.put(selectedConversation,draft);imageDrafts.put(selectedConversation,new ArrayList<>(draftImages));selectedConversation=id;draft=drafts.getOrDefault(id,"");
         draftImages.clear();draftImages.addAll(imageDrafts.getOrDefault(id,List.of()));
-        generation++;polling=false;loadingOlder=false;messages.clear();jobs.clear();
+        generation++;polling=false;loadingOlder=false;messages.clear();jobs.clear();contextOperations=new JSONArray();
         RoomSnapshot cached=historyCache.get(id);initialLoaded=cached!=null&&cached.loaded;hasOlder=cached!=null&&cached.older;
         if(cached!=null){messages.addAll(cached.messages);jobs.addAll(cached.jobs);}
         revision++;notifyChanged();refresh();
@@ -186,11 +283,12 @@ final class ChatSession {
     void report(Exception e) { if (listener != null) listener.error(e.getMessage() == null ? "操作未完成，请重试。" : e.getMessage()); }
     void start() { active = true; refresh(); }
     void stop() { active = false; main.removeCallbacks(tick); connected = false; status = "已暂停 · 返回后自动同步"; }
-    void close() { stop(); listener = null; worker.shutdownNow();navigationWorkers.shutdownNow();directoryWorker.shutdownNow(); avatarWorkers.shutdownNow();avatarWaiters.clear();avatarCache.evictAll();imageLoader.close(); }
+    void close() { stop(); listener = null; worker.shutdownNow();navigationWorkers.shutdownNow();directoryWorker.shutdownNow();usageWorker.shutdownNow(); avatarWorkers.shutdownNow();avatarWaiters.clear();avatarCache.evictAll();imageLoader.close(); }
     void refresh() { main.removeCallbacks(tick); if (active && api != null) main.post(tick); }
 
     void configure(String address, String token, String name, Runnable success) {
         if (configuring) return;
+        if(toolsBusy){report(new java.io.IOException("请等待当前聊天操作完成后切换连接"));return;}
         final String normalized, cleanToken = token.trim(), cleanName = name.trim();
         try {
             normalized = Endpoint.normalize(address);
@@ -209,7 +307,9 @@ final class ChatSession {
                 main.post(() -> {
                     generation++; connectionGeneration++; avatarCache.evictAll();avatarWaiters.clear();historyCache.clear();unconfirmedRooms.clear();creatingRooms.clear();directoryLoading=false;lastDirectoryRefresh=android.os.SystemClock.elapsedRealtime(); selectedConversation="shared";drafts.clear();agents.clear();agents.addAll(directory);conversations.clear();conversations.addAll(rooms);jobs.clear();jobs.addAll(page.jobs);polling = false; loadingOlder = false; api = candidate; server = normalized; sender = cleanName;
                     messages.clear(); messages.addAll(page.messages); initialLoaded = true; hasOlder = page.hasMore;
-                    restorePending(cleanToken); reconcile();
+                    modelUsage.clear();usageBusy=false;usageLoadedAt=0;usageError="";
+                    historyRevisions.clear();historyRevisions.put("shared",page.historyRevision);contextOperations=page.contextOperations;
+                    restorePending(cleanToken); receiveJobs(page.jobs); reconcile();
                     connected = true; configuring = false; status = "已连接 · 自动同步"; draft = "";draftImages.clear();imageDrafts.clear();
                     revision++; notifyChanged(); success.run(); refresh();
                 });
@@ -232,7 +332,9 @@ final class ChatSession {
                 main.post(() -> {
                     if (epoch != generation) return;
                     polling = false;
-                    String previousSignature=jobSignature(jobs);jobs.clear();jobs.addAll(page.jobs);if(!previousSignature.equals(jobSignature(jobs)))revision++;
+                    if(historyChanged(page,conversation)){schedule(0);return;}
+                    String previousOperations=contextOperations.toString();contextOperations=page.contextOperations;if(!previousOperations.equals(contextOperations.toString()))revision++;
+                    receiveJobs(page.jobs);
                     if (!initialLoaded) { hasOlder = page.hasMore; initialLoaded = true; }
                     merge(page.messages); if(!connected)revision++; connected = true; backoff = 2000; status = "已连接 · 自动同步";
                     notifyChanged(); schedule(after != null && page.hasMore ? 0 : backoff);
@@ -274,7 +376,7 @@ final class ChatSession {
                 MessageApi.Page page = client.page(conversation, null, before);
                 main.post(() -> {
                     if (epoch != generation) return;
-                    loadingOlder = false; hasOlder = page.hasMore; merge(page.messages); notifyChanged();
+                    loadingOlder = false;if(historyChanged(page,conversation))return;hasOlder = page.hasMore; merge(page.messages); notifyChanged();
                 });
             } catch (Exception e) { main.post(() -> { if (epoch == generation) { loadingOlder = false; notifyChanged(); report(e); } }); }
         });
@@ -333,11 +435,12 @@ final class ChatSession {
         if (pending.removeIf(m -> {if(!confirmed.contains(m.optString("clientMessageId")))return false;removeImageFiles(m);return true;})) { revision++; savePending(); }
     }
     private void restorePending(String token) {
-        pending.clear();
+        pending.clear();dismissedJobKeys.clear();
         try {
             byte[] hash = MessageDigest.getInstance("SHA-256").digest((server + "\n" + token).getBytes(StandardCharsets.UTF_8));
             StringBuilder hex = new StringBuilder(); for (byte b : hash) hex.append(String.format(Locale.ROOT, "%02x", b));
             pendingKey = "outbox." + hex;
+            dismissedJobKeys.addAll(prefs.getStringSet(pendingKey+".dismissedJobs",Collections.emptySet()));
             JSONArray array = new JSONArray(prefs.getString(pendingKey, "[]"));
             for (int i = 0; i < array.length(); i++) pending.add(array.getJSONObject(i));
         } catch (Exception e) { status = "待发消息读取失败。"; }

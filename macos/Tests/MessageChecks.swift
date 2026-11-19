@@ -1,5 +1,20 @@
 import Foundation
 
+private final class UsageProtocol: URLProtocol, @unchecked Sendable {
+    static var status = 200
+    static var response = "[]"
+    static var authorized = false
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        Self.authorized = request.url?.path == "/api/agents/usage" && request.value(forHTTPHeaderField: "Authorization") == "Bearer usage-test-token"
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: Self.status, httpVersion: nil, headerFields: nil)!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didLoad: Data(Self.response.utf8))
+        client?.urlProtocolDidFinishLoading(self)
+    }
+    override func stopLoading() {}
+}
+
 // Standalone checks compile the real network/model source and also run with Command Line
 // Tools alone, without requiring the XCTest framework from a full Xcode installation.
 @main
@@ -11,6 +26,7 @@ struct MessageChecks {
         try commandChecks()
         try endpointChecks()
         try decodingChecks()
+        try await usageChecks()
         try mentionChecks()
         try check(HTTPFailure.message(for: 401)?.contains("令牌") == true, "401 must explain authentication failure")
         try check(HTTPFailure.message(for: 403)?.contains("令牌") == false, "Proxy 403 must not blame the token")
@@ -42,6 +58,25 @@ struct MessageChecks {
         try check(ChatCommand.isAttempt("/compact with args"), "Malformed commands must not be sent as chat")
         try check(ChatCommand.query(in: "/compact", selection: NSRange(location: 0, length: 8)) == nil, "Selected text triggered commands")
         print("PASS: slash menu, command prefixes/aliases, new/export commands and ordinary paths")
+    }
+    static func usageChecks() async throws {
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [UsageProtocol.self]
+        let api = MessageAPI(base: URL(string: "https://usage.test")!, token: "usage-test-token", configuration: config)
+        UsageProtocol.response = #"[{"provider":"openai","model":"test-model","inputTokens":3000000000,"outputTokens":20,"totalTokens":3000000020,"reportedCalls":2,"unreportedCalls":1,"firstRecordedAt":"2026-11-19T00:00:00Z","lastRecordedAt":"2026-11-19T01:00:00Z"}]"#
+        let rows = try await api.usage()
+        try check(UsageProtocol.authorized, "Usage request must use the authenticated read-only endpoint")
+        try check(rows[0].totalTokens == 3_000_000_020 && rows[0].unreportedCalls == 1, "Usage counts must retain 64-bit totals and missing reports")
+        UsageProtocol.response = "[]"
+        let empty = try await api.usage()
+        try check(empty.isEmpty, "Empty usage must be distinct from request failure")
+        for (status, hint) in [(404, "Token 用量"), (401, "令牌"), (403, "权限")] {
+            UsageProtocol.status = status
+            var message = ""
+            do { _ = try await api.usage() } catch { message = error.localizedDescription }
+            try check(message.contains(hint), "Missing usage endpoint and authorization errors must stay distinct")
+        }
+        print("PASS: authenticated usage request, 64-bit counts, empty data and upgrade/auth errors")
     }
     static func endpointChecks() throws {
         let remote = try Endpoint.normalize(" https://121.40.254.112/ ")

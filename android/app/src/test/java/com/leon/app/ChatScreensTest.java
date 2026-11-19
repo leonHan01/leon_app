@@ -80,6 +80,35 @@ public class ChatScreensTest {
         assertTrue(session.initialLoaded);assertTrue(session.hasOlder);
     }
 
+    @Test public void failedNoticesCanBeDismissedAndRestoredWithoutRemovingMessages() throws Exception {
+        view(R.id.tab_agents).performClick();tagged("agent:sol").performClick();
+        session.messages.add(message(10,"sol","我","保留这条消息",true));
+        for(int i=1;i<=3;i++)session.jobs.add(new MessageApi.Job(new JSONObject().put("messageId",i).put("agentId","sol").put("agentName","Sol").put("status","FAILED").put("error","模型请求超时，请确认后手动重试")));
+        session.revision++;session.notifyChanged();
+        tagged("dismiss-job:2:sol").performClick();
+        assertEquals(2,session.visibleJobs().size());assertEquals(3,session.jobs.size());assertEquals(1,session.messages.size());
+        assertNull(activity.getWindow().getDecorView().findViewWithTag("dismiss-job:2:sol"));
+        assertNotNull(tagged("dismiss-job:1:sol"));assertNotNull(tagged("dismiss-job:3:sol"));
+        tagged("restore-dismissed-jobs").performClick();assertEquals(3,session.visibleJobs().size());
+        assertNotNull(tagged("dismiss-job:2:sol"));
+    }
+
+    @Test public void quickCommandsFitSmallScreensAndAgentAvatarListsOnlyItsConversations() throws Exception {
+        session.conversations.add(room("thread:one","Luna 的周末计划","direct","luna"));
+        view(R.id.tab_agents).performClick();tagged("agent-avatar:luna").performClick();
+        android.app.AlertDialog dialog=(android.app.AlertDialog)org.robolectric.shadows.ShadowDialog.getLatestDialog();
+        assertTrue(dialog.isShowing());assertEquals(2,dialog.getListView().getAdapter().getCount());
+        assertEquals("Luna 的周末计划",dialog.getListView().getAdapter().getItem(1));
+        dialog.getListView().performItemClick(null,1,1);assertChat("Luna 的周末计划");
+        session.select("direct:luna");view(R.id.chat_add).performClick();
+        for(String command:List.of("compact","context","threads","backup","load","clear"))assertTrue(tagged("chat-tool:"+command).isShown());
+        snapshot("chat-quick-commands");
+        for(String command:List.of("compact","context","threads","backup","load","clear")){
+            View button=tagged("chat-tool:"+command);assertTrue(button.getWidth()>=68);assertTrue(button.getHeight()>=48);
+            int[] position=new int[2];button.getLocationOnScreen(position);assertTrue(position[0]>=0);assertTrue(position[0]+button.getWidth()<=360);
+        }
+    }
+
     @Test public void renderSmallPhoneScreens() throws Exception {
         session.connected=true;session.status="已连接 · 自动同步";
         view(R.id.tab_agents).performClick();snapshot("agents");
@@ -87,7 +116,7 @@ public class ChatScreensTest {
         view(R.id.tab_settings).performClick();snapshot("settings");
         view(R.id.tab_agents).performClick();tagged("agent:luna").performClick();
         session.messages.add(message(1,"luna","我","帮我安排一个轻松的周末",true));
-        session.messages.add(message(2,"luna","Luna","当然，给自己留一点放松的时间。\n\n**周六**\n- 上午去公园散步\n- 下午读一本喜欢的书\n\n**周日**\n和朋友吃顿饭，或者做一道新菜。",false));
+        session.messages.add(message(2,"luna","Luna","当然，给自己留一点放松的时间。\n\n# 周末安排\n\n| 星期 | 上午 | 下午 |\n| --- | --- | --- |\n| 周六 | 散步 | 读书 |\n| 周日 | 做菜 | 休息 |\n\n和朋友吃顿饭，或者做一道新菜。",false));
         session.messages.add(message(3,"luna","我","不错，就这么安排！",true));
         session.revision++;session.notifyChanged();snapshot("chat");
         input().setText("好的");snapshot("chat-composing");
@@ -101,6 +130,8 @@ public class ChatScreensTest {
         if(name.startsWith("chat")){
             assertEquals("Luna",((TextView)view(R.id.chat_title)).getText().toString());
             assertTrue("Chat title height: "+view(R.id.chat_title).getHeight(),view(R.id.chat_title).getHeight()>0);
+            TextView title=(TextView)view(R.id.chat_title);
+            assertTrue("Centered title must remain inside the header",title.getLayout().getLineRight(0)<=title.getWidth());
             TextView t=(TextView)view(R.id.chat_title);System.out.println("TITLE layout="+t.getLayout().getWidth()+" x="+t.getLayout().getLineLeft(0)+" ellipsis="+t.getLayout().getEllipsisCount(0)+" length="+t.getLayout().getText()+" scroll="+t.getScrollX()+" alpha="+t.getAlpha()+" paint="+t.getPaint().getColor());
             assertTrue(input().getWidth()>160);assertTrue(input().getHeight()>=38);
             assertTrue(view(R.id.chat_add).getWidth()>=40);
