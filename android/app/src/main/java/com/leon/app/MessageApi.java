@@ -14,11 +14,13 @@ final class MessageApi {
     static final class Message {
         final long id, createdAt;
         final String clientMessageId, deviceId, sender, platform, text, conversationId, role, agentId;
+        final List<String> imageIds = new ArrayList<>();
         Message(JSONObject json) throws JSONException {
             id = json.getLong("id"); createdAt = json.getLong("createdAt");
             clientMessageId = json.getString("clientMessageId"); deviceId = json.getString("deviceId");
             sender = json.getString("sender"); platform = json.getString("platform"); text = json.getString("text");
             conversationId = json.optString("conversationId", "shared"); role = json.optString("role", "user"); agentId = json.optString("agentId", "");
+            JSONArray images=json.optJSONArray("images");if(images!=null)for(int i=0;i<images.length();i++)imageIds.add(images.getJSONObject(i).getString("id"));
         }
     }
     static final class Agent {
@@ -58,6 +60,15 @@ final class MessageApi {
         return new Page(request(path, null));
     }
     Message send(JSONObject body) throws Exception { return new Message(request("/api/device-messages", body)); }
+    void uploadImage(String id,String room,byte[] data) throws Exception {
+        if(!id.matches("[a-fA-F0-9-]{36}")||data.length>5*1024*1024)throw new IOException("图片无效或过大");
+        requestBytes("/api/device-messages/images?id="+id+"&conversationId="+URLEncoder.encode(room,StandardCharsets.UTF_8.name()),data,"image/jpeg");
+    }
+    byte[] image(String id) throws Exception {
+        if(!id.matches("[a-fA-F0-9-]{36}"))throw new IOException("图片标识无效");
+        byte[] data=requestBytes("/api/device-messages/images/"+id,null);
+        if(data.length>1024*1024)throw new IOException("图片过大");return data;
+    }
 
     private JSONObject request(String path, JSONObject body) throws Exception { return new JSONObject(requestText(path,body)); }
     byte[] avatar(String id) throws Exception {
@@ -67,6 +78,9 @@ final class MessageApi {
     }
     private String requestText(String path, JSONObject body) throws Exception { return new String(requestBytes(path,body),StandardCharsets.UTF_8); }
     private byte[] requestBytes(String path, JSONObject body) throws Exception {
+        return requestBytes(path,body==null?null:body.toString().getBytes(StandardCharsets.UTF_8),"application/json; charset=utf-8");
+    }
+    private byte[] requestBytes(String path, byte[] bytes, String contentType) throws Exception {
         HttpURLConnection connection = (HttpURLConnection) new URL(base + path).openConnection();
         try {
             connection.setInstanceFollowRedirects(false);
@@ -74,10 +88,9 @@ final class MessageApi {
             connection.setUseCaches(false);
             connection.setRequestProperty("Authorization", "Bearer " + token);
             connection.setRequestProperty("Accept", "application/json");
-            if (body != null) {
-                byte[] bytes = body.toString().getBytes(StandardCharsets.UTF_8);
+            if (bytes != null) {
                 connection.setRequestMethod("POST"); connection.setDoOutput(true);
-                connection.setRequestProperty("Content-Type", "application/json; charset=utf-8");
+                connection.setRequestProperty("Content-Type", contentType);
                 connection.setFixedLengthStreamingMode(bytes.length);
                 try (OutputStream stream = connection.getOutputStream()) { stream.write(bytes); }
             }

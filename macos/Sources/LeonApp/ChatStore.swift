@@ -6,39 +6,388 @@ final class ChatStore: ObservableObject {
     @Published var messages: [Message] = []
     @Published var pending: [Outgoing] = []
     @Published var draft = ""
+    @Published var draftImages: [ChatImageDraft] = []
+    @Published var preparingImages = false
+    private var imageDrafts: [String: [ChatImageDraft]] = [:]
+    var canSend: Bool { !openingDirectConversation && !clearBusy && !exportBusy && hasConnection && !configuring && !preparingImages && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty) && draft.utf16.count <= 8000 }
+    func addImages(_ sources: [Data]) async {
+        guard hasConnection, !configuring, !preparingImages else { return }
+        let room = selectedConversationId, connection = connectionId
+        let available = 4 - draftImages.count
+        guard available > 0 else { error = "每条消息最多发送 4 张图片"; return }
+        preparingImages = true
+        let result = await Task.detached { () -> Result<[ChatImageDraft], Error> in
+            Result { try sources.prefix(available).map(ChatImageDraft.prepare) }
+        }.value
+        preparingImages = false
+        guard connection == connectionId else { return }
+        switch result {
+        case .success(let images):
+            if selectedConversationId == room { draftImages += images }
+            else { imageDrafts[room, default: []] += images }
+            if sources.count > available { error = "每条最多 4 张图片，超出部分未添加。" }
+        case .failure(let failure): error = friendly(failure)
+        }
+    }
+    func imageData(_ id: String) async throws -> Data {
+        if let local = ChatImageFiles.read(id, scope: pendingKey) { return local }
+        guard let api else { throw ClientError.message("请先连接服务器") }
+        return try await api.imageData(id)
+    }
     @Published var agents: [AgentInfo] = []
     @Published var conversations: [Conversation] = []
     @Published var jobs: [AgentJob] = []
+    @Published private var dismissedJobKeys = Set<String>()
+    var visibleJobs: [AgentJob] { jobs.filter { $0.status != "FAILED" || !dismissedJobKeys.contains(dismissalKey($0)) } }
+    var dismissedFailureCount: Int { jobs.filter { $0.status == "FAILED" && dismissedJobKeys.contains(dismissalKey($0)) }.count }
+    private func dismissalKey(_ job: AgentJob) -> String {
+        job.id + "#" + SHA256.hash(data: Data(job.error.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+    func dismissJob(_ job: AgentJob) {
+        guard job.status == "FAILED" else { return }
+        dismissedJobKeys.insert(dismissalKey(job)); saveDismissals()
+    }
+    func restoreDismissedJobs() {
+        dismissedJobKeys.subtract(jobs.filter { $0.status == "FAILED" }.map { dismissalKey($0) }); saveDismissals()
+    }
+    private func saveDismissals() { guard !pendingKey.isEmpty else { return }; UserDefaults.standard.set(Array(dismissedJobKeys), forKey: pendingKey + ".dismissedJobs") }
+    private func receiveJobs(_ incoming: [AgentJob]) {
+        let active = Set(incoming.filter { $0.status != "FAILED" }.map(\.id))
+        let retained = Set(dismissedJobKeys.filter { !active.contains($0.components(separatedBy: "#")[0]) })
+        if retained != dismissedJobKeys { dismissedJobKeys = retained; saveDismissals() }
+        if jobs != incoming { jobs = incoming }
+    }
+
     @Published var selectedConversationId = "shared"
+    @Published var showClearHistory = false
+    @Published var clearBusy = false
+    @Published var clearPreview: ClearHistoryPreview?
+    @Published var clearError: String?
+    private var clearRequestId: String?
+    private var historyRevision: Int64?
+    func prepareClearHistory() async {
+        guard let api else { return }
+        let room = selectedConversationId, connection = connectionId
+        clearBusy = true; clearError = nil; clearPreview = nil; clearRequestId = nil
+        defer { clearBusy = false }
+        do {
+            let preview = try await api.clearHistoryPreview(conversation: room)
+            guard connection == connectionId, room == selectedConversationId else { return }
+            clearPreview = preview; clearRequestId = UUID().uuidString.lowercased()
+        } catch { if connection == connectionId, room == selectedConversationId { clearError = friendly(error) } }
+    }
+    func clearCurrentHistory() async {
+        guard let api, let preview = clearPreview, let requestId = clearRequestId, !clearBusy, !exportBusy,
+              preview.conversationId == selectedConversationId else { return }
+        guard !preparingImages, !currentPending.contains(where: { sending.contains($0.id) }) else { clearError = "请等待图片处理和消息发送完成后再清空。"; return }
+        let connection = connectionId, room = preview.conversationId
+        clearBusy = true; clearError = nil
+        defer { clearBusy = false }
+        do {
+            let result = try await api.clearHistory(preview, requestId: requestId)
+            guard connection == connectionId else { return }
+            let ids = Set(jobs.map { $0.id })
+            dismissedJobKeys = Set(dismissedJobKeys.filter { !ids.contains($0.components(separatedBy: "#")[0]) }); saveDismissals()
+            for message in pending where (message.conversationId ?? "shared") == room { ChatImageFiles.remove(message.imageIds ?? [], scope: pendingKey) }
+            pending.removeAll { ($0.conversationId ?? "shared") == room }; savePending()
+            drafts[room] = ""; imageDrafts[room] = []
+            roomCache.removeValue(forKey: room); roomCacheOrder.removeAll { $0 == room }
+            let prefix = pendingKey + ".archive." + room + ":"
+            for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix(prefix) { UserDefaults.standard.removeObject(forKey: key) }
+            compressionRequests = compressionRequests.filter { !$0.key.hasPrefix(room + ":") }
+            api.clearImageCache()
+            if room == selectedConversationId {
+                generation = UUID(); draft = ""; draftImages = []; messages = []; jobs = []; contextOperations = []; contextInfo = nil
+                historyRevision = result.historyRevision; initialLoaded = false; hasOlder = false; loadingOlder = false
+                exportProgress = ""; exportError = nil; contextError = nil
+                showClearHistory = false; clearPreview = nil; clearRequestId = nil
+                beginPolling()
+            }
+        } catch { if connection == connectionId { clearError = friendly(error) } }
+    }
+    private func receiveHistoryRevision(_ revision: Int64?) {
+        guard let revision else { return }
+        if (historyRevision != nil && historyRevision != revision) || (historyRevision == nil && revision > 0) {
+            messages = []; jobs = []; contextOperations = []; contextInfo = nil; hasOlder = false
+            roomCache.removeValue(forKey: selectedConversationId); roomCacheOrder.removeAll { $0 == selectedConversationId }
+            api?.clearImageCache()
+        }
+        historyRevision = revision
+    }
+    @Published var showEndRound = false
+    @Published var endRoundExportOnly = false
+    @Published var exportBusy = false
+    @Published var exportProgress = ""
+    @Published var exportRoomId = ""
+    @Published var exportError: String?
+    @Published var blogDestination: LeonBlogExporter.Destination?
+    @Published var showContext = false
+    func prepareBlogDestination() async {
+        do { blogDestination = try await Task.detached { try LeonBlogExporter.destination() }.value }
+        catch { exportError = friendly(error) }
+    }
+    func startFreshRound() async {
+        guard let api, !exportBusy, !contextActionActive, currentPending.isEmpty, draftImages.isEmpty else { exportError = "请等待当前回复并处理待发送消息后再开始新对话。"; return }
+        let connection = connectionId, room = selectedConversationId
+        exportBusy = true; exportError = nil
+        defer { exportBusy = false }
+        do {
+            let info = try await api.context(conversation: room)
+            let updated = try await api.configureContext(conversation: room, rounds: info.recentRounds, reset: true)
+            guard connection == connectionId, room == selectedConversationId else { return }
+            contextInfo = updated; exportRoomId = room; exportProgress = "已开始全新上下文，历史对话保留。"; showEndRound = false
+        } catch { exportError = friendly(error) }
+    }
+    func exportCurrentRound(agentId: String, startNew: Bool) async {
+        guard let api, !exportBusy, !contextActionActive, currentPending.isEmpty, draftImages.isEmpty else { exportError = "请等待当前回复并处理待发送消息后再归档。"; if !showEndRound { error = exportError }; return }
+        let room = selectedConversationId, connection = connectionId
+        let key = pendingKey + ".archive." + room + ":" + agentId
+        let id = UserDefaults.standard.string(forKey: key) ?? UUID().uuidString.lowercased()
+        exportBusy = true; exportRoomId = room; exportProgress = "正在生成本轮对话总结…"; exportError = nil
+        defer { exportBusy = false }
+        do {
+            let destination: LeonBlogExporter.Destination
+            if let data = UserDefaults.standard.data(forKey: key + ".destination"), let saved = try? JSONDecoder().decode(LeonBlogExporter.Destination.self, from: data) { destination = saved }
+            else { destination = try await Task.detached { try LeonBlogExporter.destination() }.value }
+            UserDefaults.standard.set(id, forKey: key)
+            UserDefaults.standard.set(try JSONEncoder().encode(destination), forKey: key + ".destination")
+            blogDestination = destination
+            let operation = try await api.archiveRound(conversation: room, agentId: agentId, requestId: id)
+            if connection == connectionId, room == selectedConversationId { contextOperations.removeAll { $0.agentId == agentId }; contextOperations.append(operation); beginPolling() }
+            var archive = try await api.archive(id)
+            let deadline = Date().addingTimeInterval(900)
+            while archive.operation.active, Date() < deadline {
+                try await Task.sleep(nanoseconds: 1_000_000_000)
+                archive = try await api.archive(id)
+            }
+            if archive.operation.status == "FAILED" {
+                UserDefaults.standard.removeObject(forKey: key); UserDefaults.standard.removeObject(forKey: key + ".destination")
+            }
+            guard archive.operation.status == "SUCCEEDED", !archive.summary.isEmpty else { throw ClientError.message(archive.operation.error.isEmpty ? "总结尚未完成，可稍后重试导出；当前上下文保留。" : archive.operation.error) }
+            exportProgress = "正在通过 CLI 写入 LeonBook…"
+            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("leon-archive-images-" + UUID().uuidString)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            defer { try? FileManager.default.removeItem(at: directory) }
+            var files: [String: URL] = [:]
+            for image in archive.messages.flatMap({ $0.images ?? [] }) where files[image.id] == nil {
+                guard UUID(uuidString: image.id) != nil else { throw ClientError.message("归档图片标识无效。") }
+                let data = try await api.imageData(image.id)
+                let file = directory.appendingPathComponent(image.id + ".jpg")
+                try data.write(to: file, options: .atomic)
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+                files[image.id] = file
+            }
+            let snapshot = archive, images = files
+            let saved = try await Task.detached { try LeonBlogExporter.export(snapshot, destination: destination, imageFiles: images) }.value
+            UserDefaults.standard.removeObject(forKey: key); UserDefaults.standard.removeObject(forKey: key + ".destination")
+            exportProgress = "已保存 LeonBook 草稿「" + saved.title + "」"
+            if startNew {
+                let updated = try await api.finishArchive(id)
+                if connection == connectionId, room == selectedConversationId { contextInfo = updated }
+                exportProgress += "，已开始全新上下文。"
+            }
+            if connection == connectionId, room == selectedConversationId { showEndRound = false; beginPolling() }
+        } catch {
+            exportError = friendly(error)
+            exportProgress = exportProgress.hasPrefix("已保存") ? exportProgress + "；尚未开始新对话。" : "归档未完成，当前上下文保留。"
+            if !showEndRound { self.error = exportError }
+        }
+    }
+    @Published var contextInfo: ConversationContext?
+    @Published var contextError: String?
+    @Published var contextOperations: [ContextOperation] = []
+    @Published var compressionRequestBusy = false
+    private var compressionRequests: [String: String] = [:]
+    var contextActionActive: Bool { compressionRequestBusy || jobs.contains { $0.status == "PENDING" || $0.status == "RUNNING" } || contextOperations.contains { $0.active } }
+    func performCommand(_ command: ChatCommand) async {
+        guard hasConnection else { error = "请先连接服务器"; return }
+        if command == .context { draft = ""; showContext = true; return }
+        if command == .clear {
+            guard !exportBusy, !preparingImages, !currentPending.contains(where: { sending.contains($0.id) }) else { error = "请等待归档、图片处理和发送完成后再清空。"; return }
+            draft = ""; showClearHistory = true; return
+        }
+        if command == .newRound || command == .exportRound {
+            guard draftImages.isEmpty, !preparingImages, currentPending.isEmpty else { error = "请先处理待发送消息和图片，再结束或导出本轮。"; return }
+            draft = ""
+            endRoundExportOnly = command == .exportRound
+            if command == .exportRound, availableAgents.count == 1 { await exportCurrentRound(agentId: availableAgents[0].id, startNew: false) }
+            else { showEndRound = true }
+            return
+        }
+        guard draftImages.isEmpty, !preparingImages else { error = "请先发送或移除待发送图片，再执行压缩命令。"; return }
+        draft = ""
+        if availableAgents.count == 1 { await compactContext(agentId: availableAgents[0].id) }
+        else { showContext = true }
+    }
+    func compactContext(agentId: String) async {
+        guard let api, !compressionRequestBusy else { return }
+        guard !contextActionActive else { contextError = "请等待当前会话回复或压缩完成后再压缩上下文"; if !showContext { error = contextError }; return }
+        let connection = connectionId, room = selectedConversationId
+        let scope = room + ":" + agentId
+        let requestId = compressionRequests[scope] ?? UUID().uuidString.lowercased()
+        compressionRequests[scope] = requestId
+        compressionRequestBusy = true; contextError = nil
+        defer { compressionRequestBusy = false }
+        do {
+            let operation = try await api.compactContext(conversation: room, agentId: agentId, requestId: requestId)
+            guard connection == connectionId else { return }
+            compressionRequests.removeValue(forKey: scope)
+            if room == selectedConversationId {
+                contextOperations.removeAll { $0.agentId == operation.agentId }
+                contextOperations.append(operation)
+                beginPolling()
+            }
+        } catch {
+            if connection == connectionId, room == selectedConversationId {
+                contextError = friendly(error)
+                if !showContext { self.error = contextError }
+            }
+        }
+    }
+    @Published var contextBusy = false
+    func loadContext() async {
+        guard let api else { return }
+        let connection = connectionId, room = selectedConversationId
+        contextBusy = true; contextError = nil
+        defer { contextBusy = false }
+        do {
+            let info = try await api.context(conversation: room)
+            guard connection == connectionId, room == selectedConversationId else { return }
+            contextInfo = info
+        } catch { if connection == connectionId, room == selectedConversationId { contextError = friendly(error) } }
+    }
+    func configureContext(rounds: Int, reset: Bool) async {
+        guard let api else { return }
+        let connection = connectionId, room = selectedConversationId
+        contextBusy = true; contextError = nil
+        defer { contextBusy = false }
+        do {
+            let info = try await api.configureContext(conversation: room, rounds: rounds, reset: reset)
+            guard connection == connectionId, room == selectedConversationId else { return }
+            contextInfo = info
+            beginPolling()
+        } catch { if connection == connectionId, room == selectedConversationId { contextError = friendly(error) } }
+    }
     @Published var showNewGroup = false
     @Published private(set) var avatarSessionKey = UUID().uuidString
     func avatarId(for agentId: String?) -> String { agents.first { $0.id == agentId }?.avatarId ?? "alfred" }
     func avatarData(_ id: String) async -> Data? { guard let api else { return nil }; return try? await api.avatarData(id) }
     private var connectionId = UUID()
     private var drafts: [String:String] = [:]
+    private struct RoomSnapshot {
+        let messages: [Message]
+        let jobs: [AgentJob]
+        let operations: [ContextOperation]
+        let context: ConversationContext?
+        let loaded: Bool
+        let hasOlder: Bool
+        let historyRevision: Int64?
+    }
+    private var roomCache: [String: RoomSnapshot] = [:]
+    private var roomCacheOrder: [String] = []
+    private var navigationRequest = UUID()
+    @Published private var unconfirmedDirectRooms = Set<String>()
+    var openingDirectConversation: Bool { unconfirmedDirectRooms.contains(selectedConversationId) }
+    private struct DirectCreation {
+        let id = UUID()
+        let task: Task<Conversation, Error>
+    }
+    private struct DirectSelection {
+        let agentId: String
+        let room: Conversation
+        let connection: UUID
+        let navigation: UUID
+        let creation: DirectCreation
+    }
+    private var directCreations: [String: DirectCreation] = [:]
+    // Known private conversations live under their Agent, so each Agent has one entry.
+    var sidebarConversations: [Conversation] {
+        conversations.filter { room in room.kind != "direct" || !agents.contains { $0.id == room.agentId } }
+    }
+    var sidebarAgents: [AgentInfo] {
+        agents.filter { agent in agent.enabled || conversations.contains { $0.kind == "direct" && $0.agentId == agent.id } }
+    }
+    func isSelected(_ agent: AgentInfo) -> Bool { selectedConversation?.kind == "direct" && selectedConversation?.agentId == agent.id }
+    private func rememberRoom() {
+        let kept = Array(messages.suffix(300))
+        roomCache[selectedConversationId] = RoomSnapshot(messages: kept, jobs: jobs, operations: contextOperations,
+            context: contextInfo, loaded: initialLoaded || !messages.isEmpty, hasOlder: hasOlder || kept.count < messages.count, historyRevision: historyRevision)
+        roomCacheOrder.removeAll { $0 == selectedConversationId }; roomCacheOrder.append(selectedConversationId)
+        while roomCacheOrder.count > 12 { roomCache.removeValue(forKey: roomCacheOrder.removeFirst()) }
+    }
     var currentPending: [Outgoing] { pending.filter { ($0.conversationId ?? "shared") == selectedConversationId } }
     var selectedConversation: Conversation? { conversations.first { $0.id == selectedConversationId } }
     var title: String { selectedConversation?.name ?? "设备群聊" }
     var availableAgents: [AgentInfo] { agents.filter { $0.enabled && (selectedConversation?.agentIds.contains($0.id) ?? (selectedConversationId == "shared")) } }
 
-    func selectConversation(_ id: String) {
+    func selectConversation(_ id: String, refresh: Bool = true) {
+        navigationRequest = UUID()
         guard id != selectedConversationId else { return }
+        rememberRoom()
         drafts[selectedConversationId] = draft
+        imageDrafts[selectedConversationId] = draftImages
         selectedConversationId = id
         draft = drafts[id] ?? ""
-        generation = UUID(); messages = []; jobs = []; initialLoaded = false; hasOlder = false; loadingOlder = false
-        beginPolling()
+        draftImages = imageDrafts[id] ?? []
+        generation = UUID(); contextError = nil; loadingOlder = false
+        let cached = roomCache[id]
+        historyRevision = cached?.historyRevision
+        contextInfo = cached?.context; contextOperations = cached?.operations ?? []
+        messages = cached?.messages ?? []; jobs = cached?.jobs ?? []
+        initialLoaded = cached?.loaded ?? false; hasOlder = cached?.hasOlder ?? false
+        loadingMessages = openingDirectConversation || (!initialLoaded && hasConnection && active)
+        if refresh { beginPolling() } else { poller?.cancel() }
     }
     func mention(_ agent: AgentInfo) { draft += (draft.isEmpty || draft.last?.isWhitespace == true ? "" : " ") + "@\(agent.handle) " }
+    /// Selection happens during the button action; network work never delays click feedback.
+    func selectAgent(_ agent: AgentInfo) {
+        guard let selection = prepareDirectSelection(agent) else { return }
+        Task { await finishDirectSelection(selection) }
+    }
     func openDirect(_ agent: AgentInfo) async {
-        guard let api else { return }
-        let connection = connectionId
-        do {
-            let room = try await api.direct(agent.id); let rooms = try await api.conversations()
-            guard connection == connectionId else { return }
-            conversations = rooms; selectConversation(room.id)
+        guard let selection = prepareDirectSelection(agent) else { return }
+        await finishDirectSelection(selection)
+    }
+    private func prepareDirectSelection(_ agent: AgentInfo) -> DirectSelection? {
+        let known = conversations.first(where: { $0.kind == "direct" && $0.agentId == agent.id })
+        if let known, !unconfirmedDirectRooms.contains(known.id) {
+            selectConversation(known.id); return nil
         }
-        catch { self.error = friendly(error) }
+        guard let api else { error = "请先连接服务器"; return nil }
+        // The server's direct-conversation identity is stable: direct:<agent UUID>.
+        let room = known ?? Conversation(id: "direct:" + agent.id, name: agent.name, kind: "direct", agentId: agent.id, agentIds: [agent.id])
+        unconfirmedDirectRooms.insert(room.id)
+        if known == nil { conversations.append(room) }
+        selectConversation(room.id, refresh: false)
+        error = nil; loadingMessages = true; status = "正在打开私聊…"
+        let creation: DirectCreation
+        if let existing = directCreations[agent.id] { creation = existing }
+        else {
+            creation = DirectCreation(task: Task { try await api.direct(agent.id) })
+            directCreations[agent.id] = creation
+        }
+        return DirectSelection(agentId: agent.id, room: room, connection: connectionId, navigation: navigationRequest, creation: creation)
+    }
+    private func finishDirectSelection(_ selection: DirectSelection) async {
+        defer {
+            if directCreations[selection.agentId]?.id == selection.creation.id { directCreations.removeValue(forKey: selection.agentId) }
+        }
+        do {
+            let room = try await selection.creation.task.value
+            guard !Task.isCancelled, selection.connection == connectionId else { return }
+            if let index = conversations.firstIndex(where: { $0.id == room.id }) { conversations[index] = room }
+            else { conversations.append(room) }
+            unconfirmedDirectRooms.remove(selection.room.id)
+            if selection.room.id != room.id { conversations.removeAll { $0.id == selection.room.id } }
+            guard navigationRequest == selection.navigation, selectedConversationId == selection.room.id else { return }
+            if selectedConversationId != room.id { selectConversation(room.id) }
+            else { beginPolling() }
+        } catch {
+            guard !Task.isCancelled, selection.connection == connectionId,
+                  navigationRequest == selection.navigation, selectedConversationId == selection.room.id else { return }
+            loadingMessages = false; status = "私聊打开失败，点击此 Agent 可重试"
+            self.error = friendly(error)
+        }
     }
     func createGroup(name: String, agentIds: [String]) async {
         guard let api else { return }
@@ -59,6 +408,7 @@ final class ChatStore: ObservableObject {
     @Published var connected = false
     @Published var hasOlder = false
     @Published var loadingOlder = false
+    @Published var loadingMessages = false
     @Published var sending = Set<String>()
     @Published var configuring = false
     @Published var showSettings = false
@@ -67,13 +417,16 @@ final class ChatStore: ObservableObject {
     let deviceId: String
     private var api: MessageAPI?
     private var poller: Task<Void, Never>?
+    private var directoryRefresh: Task<Void, Never>?
+    private var lastDirectoryRefresh: Date?
     private var generation = UUID()
     private var pendingKey = ""
     private var active = true
     private var initialLoaded = false
     var hasConnection: Bool { api != nil }
 
-    init() {
+    init(api: MessageAPI? = nil) {
+        self.api = api
         deviceId = UserDefaults.standard.string(forKey: "deviceId") ?? UUID().uuidString.lowercased()
         UserDefaults.standard.set(deviceId, forKey: "deviceId")
     }
@@ -113,7 +466,11 @@ final class ChatStore: ObservableObject {
             let rooms = try await candidate.conversations()
             try await Keychain.save(secret)
             generation = UUID(); connectionId = UUID(); avatarSessionKey = UUID().uuidString
-            selectedConversationId = "shared"; drafts = [:]
+            navigationRequest = UUID(); roomCache = [:]; roomCacheOrder = []
+            for creation in directCreations.values { creation.task.cancel() }
+            directCreations = [:]; unconfirmedDirectRooms = []
+            directoryRefresh?.cancel(); directoryRefresh = nil; lastDirectoryRefresh = Date()
+            selectedConversationId = "shared"; drafts = [:]; imageDrafts = [:]; draftImages = []; contextInfo = nil; contextError = nil; contextOperations = []; compressionRequests = [:]
             agents = directory; conversations = rooms; jobs = page.jobs ?? []
             poller?.cancel()
             api = candidate
@@ -123,6 +480,7 @@ final class ChatStore: ObservableObject {
             UserDefaults.standard.set(name, forKey: "sender")
             restorePending(base: base, token: secret)
             messages = page.messages
+            historyRevision = page.historyRevision
             initialLoaded = true
             hasOlder = page.hasMore
             reconcilePending()
@@ -137,41 +495,69 @@ final class ChatStore: ObservableObject {
 
     func setActive(_ value: Bool) {
         active = value
-        if value { beginPolling() } else { poller?.cancel(); status = "已暂停 · 返回后自动同步"; connected = false }
+        if value { beginPolling() } else { poller?.cancel(); directoryRefresh?.cancel(); status = "已暂停 · 返回后自动同步"; connected = false; loadingMessages = false }
     }
 
     func reconnect() { beginPolling() }
 
+    private func refreshDirectoryIfNeeded() {
+        guard directoryRefresh == nil, let api,
+              lastDirectoryRefresh.map({ Date().timeIntervalSince($0) >= 10 }) ?? true else { return }
+        let connection = connectionId
+        lastDirectoryRefresh = Date()
+        directoryRefresh = Task { [weak self] in
+            guard let self else { return }
+            defer { if connection == self.connectionId { self.directoryRefresh = nil } }
+            async let agents = api.agents()
+            async let rooms = api.conversations()
+            async let presence: Void? = try? api.heartbeat(deviceId: self.deviceId, name: self.sender)
+            do {
+                let (directory, conversations) = try await (agents, rooms)
+                guard !Task.isCancelled, connection == self.connectionId else { return }
+                if self.agents != directory { self.agents = directory }
+                var updated = conversations
+                if let selected = self.selectedConversation, !updated.contains(where: { $0.id == selected.id }) { updated.append(selected) }
+                if self.conversations != updated { self.conversations = updated }
+            } catch { /* Directory refresh must not block the selected conversation. */ }
+            _ = await presence
+        }
+    }
+
     private func beginPolling() {
         poller?.cancel()
+        if openingDirectConversation {
+            let creating = selectedConversation?.agentId.flatMap { directCreations[$0] } != nil
+            loadingMessages = creating
+            status = creating ? "正在打开私聊…" : "私聊未打开，点击此 Agent 可重试"
+            return
+        }
         guard active, let api else { return }
-        let current = generation
+        let current = generation, conversation = selectedConversationId
+        loadingMessages = !initialLoaded
+        refreshDirectoryIfNeeded()
         poller = Task { [weak self] in
             var delay: UInt64 = 2
-            var cycle = 0
             while !Task.isCancelled {
                 guard let self, self.generation == current else { return }
                 do {
-                    if cycle % 5 == 0 {
-                        let agents = try await api.agents()
-                        let rooms = try await api.conversations()
-                        try? await api.heartbeat(deviceId: self.deviceId, name: self.sender)
-                        guard !Task.isCancelled, self.generation == current else { return }
-                        self.agents = agents; self.conversations = rooms
-                    }
-                    cycle += 1
                     let initial = !self.initialLoaded
-                    let page = try await api.page(conversation: self.selectedConversationId, after: initial ? nil : self.messages.last?.id ?? 0)
+                    let page = try await api.page(conversation: conversation, after: initial ? nil : self.messages.last?.id ?? 0)
                     guard !Task.isCancelled, self.generation == current else { return }
+                    self.receiveHistoryRevision(page.historyRevision)
                     if initial { self.hasOlder = page.hasMore; self.initialLoaded = true }
-                    self.jobs = page.jobs ?? []
+                    self.receiveJobs(page.jobs ?? [])
+                    let operations = page.contextOperations ?? []
+                    if self.contextOperations != operations { self.contextOperations = operations }
                     self.merge(page.messages)
-                    self.connected = true
-                    self.status = "已连接 · 自动同步"
+                    if self.loadingMessages { self.loadingMessages = false }
+                    if !self.connected { self.connected = true }
+                    if self.status != "已连接 · 自动同步" { self.status = "已连接 · 自动同步" }
+                    self.refreshDirectoryIfNeeded()
                     delay = 2
                     if !initial && page.hasMore { continue }
                 } catch {
                     guard !Task.isCancelled, self.generation == current else { return }
+                    self.loadingMessages = false
                     self.connected = false
                     self.status = self.friendly(error)
                     delay = min(delay * 2, 30)
@@ -185,10 +571,14 @@ final class ChatStore: ObservableObject {
         guard let api, let first = messages.first, hasOlder, !loadingOlder else { return }
         let current = generation
         loadingOlder = true
-        defer { loadingOlder = false }
+        defer { if current == generation { loadingOlder = false } }
         do {
             let page = try await api.page(conversation: selectedConversationId, before: first.id)
             guard current == generation else { return }
+            if let revision = page.historyRevision, let previous = historyRevision, revision != previous {
+                receiveHistoryRevision(revision); generation = UUID(); initialLoaded = false; beginPolling(); return
+            }
+            receiveHistoryRevision(page.historyRevision)
             merge(page.messages)
             hasOlder = page.hasMore
         } catch { if current == generation { self.error = friendly(error) } }
@@ -196,11 +586,15 @@ final class ChatStore: ObservableObject {
 
     func sendDraft() async {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard api != nil, !configuring, !text.isEmpty, text.utf16.count <= 8000 else { return }
-        let message = Outgoing(clientMessageId: UUID().uuidString.lowercased(), deviceId: deviceId, sender: sender, platform: "macos", text: text, conversationId: selectedConversationId, mentionAgentIds: [])
+        guard canSend else { return }
+        if let command = ChatCommand.exact(text) { await performCommand(command); return }
+        if ChatCommand.isAttempt(text) { error = "请选择 / 菜单中的有效命令，命令无需附加文字。"; return }
+        do { for image in draftImages { try ChatImageFiles.save(image, scope: pendingKey) } }
+        catch { self.error = "无法保存图片，请检查磁盘空间后重试。"; return }
+        let message = Outgoing(clientMessageId: UUID().uuidString.lowercased(), deviceId: deviceId, sender: sender, platform: "macos", text: text, conversationId: selectedConversationId, mentionAgentIds: [], imageIds: draftImages.map(\.id))
         pending.append(message)
         savePending()
-        draft = ""
+        draft = ""; draftImages = []; imageDrafts[selectedConversationId] = []
         await retry(message)
     }
 
@@ -210,11 +604,17 @@ final class ChatStore: ObservableObject {
         sending.insert(message.id)
         defer { sending.remove(message.id) }
         do {
+            for id in message.imageIds ?? [] {
+                if let data = ChatImageFiles.read(id, scope: pendingKey) {
+                    _ = try await api.uploadImage(id: id, conversation: message.conversationId ?? "shared", data: data)
+                }
+            }
             // Sending must not advance the receive cursor: fetch all intervening messages first.
             _ = try await api.send(message)
             guard current == connectionId else { return }
             pending.removeAll { $0.id == message.id }
             savePending()
+            ChatImageFiles.remove(message.imageIds ?? [], scope: pendingKey)
             beginPolling()
         } catch { if current == connectionId { self.error = friendly(error) } }
     }
@@ -222,17 +622,22 @@ final class ChatStore: ObservableObject {
     private func merge(_ incoming: [Message]) {
         var byId = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
         for message in incoming { byId[message.id] = message }
-        messages = byId.values.sorted { $0.id < $1.id }
+        let merged = byId.values.sorted { $0.id < $1.id }
+        if messages != merged { messages = merged }
         reconcilePending()
     }
     private func reconcilePending() {
+        guard !pending.isEmpty else { return }
         let confirmed = Set(messages.filter { $0.deviceId == deviceId }.map(\.clientMessageId))
+        let count = pending.count
+        for message in pending where confirmed.contains(message.clientMessageId) { ChatImageFiles.remove(message.imageIds ?? [], scope: pendingKey) }
         pending.removeAll { confirmed.contains($0.clientMessageId) }
-        savePending()
+        if count != pending.count { savePending() }
     }
     private func restorePending(base: URL, token: String) {
         pendingKey = "outbox." + SHA256.hash(data: Data((base.absoluteString + "\n" + token).utf8)).map { String(format: "%02x", $0) }.joined()
         pending = UserDefaults.standard.data(forKey: pendingKey).flatMap { try? JSONDecoder().decode([Outgoing].self, from: $0) } ?? []
+        dismissedJobKeys = Set(UserDefaults.standard.stringArray(forKey: pendingKey + ".dismissedJobs") ?? [])
     }
     private func savePending() { UserDefaults.standard.set(try? JSONEncoder().encode(pending), forKey: pendingKey) }
     private func friendly(_ error: Error) -> String {

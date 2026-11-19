@@ -44,26 +44,27 @@ struct ContentView: View {
                                 .buttonStyle(.borderless).disabled(!store.hasConnection).help("新建群聊")
                         }
                         if store.conversations.isEmpty { Text("连接后显示会话").font(.caption).foregroundStyle(.secondary) }
-                        ForEach(store.conversations) { room in
+                        ForEach(store.sidebarConversations) { room in
                             Button { store.selectConversation(room.id) } label: {
                                 HStack(spacing: 8) {
                                     if room.kind == "direct" { AgentAvatarView(store: store, avatarId: store.avatarId(for: room.agentId), size: 28) }
                                     else { Image(systemName: "number").frame(width: 28) }
                                     Text(room.name).lineLimit(1)
-                                }.frame(maxWidth: .infinity, alignment: .leading).padding(10)
+                                }.frame(maxWidth: .infinity, alignment: .leading).padding(10).contentShape(Rectangle())
                                     .background(store.selectedConversationId == room.id ? accent.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 9))
                             }.buttonStyle(.plain)
                         }
                         Text("AGENTS · 私聊").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary).padding(.top, 18)
-                        ForEach(store.agents.filter { $0.enabled }) { agent in
-                            Button { Task { await store.openDirect(agent) } } label: {
+                        ForEach(store.sidebarAgents) { agent in
+                            Button { store.selectAgent(agent) } label: {
                                 HStack(spacing: 9) {
                                     AgentAvatarView(store: store, avatarId: agent.avatarId ?? "alfred")
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(agent.name).lineLimit(1)
-                                        Text("@\(agent.handle) · \(agent.provider)").font(.system(size: 10)).foregroundStyle(.secondary)
+                                        Text("@\(agent.handle) · \(agent.enabled ? agent.provider : "已停用")").font(.system(size: 10)).foregroundStyle(.secondary)
                                     }
-                                }.padding(.vertical, 7)
+                                }.padding(9).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
+                                    .background(store.isSelected(agent) ? accent.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 9))
                             }.buttonStyle(.plain)
                         }
                     }
@@ -88,6 +89,10 @@ struct ContentView: View {
                         }
                     }
                     Spacer()
+                    Button { store.endRoundExportOnly = false; store.showEndRound = true } label: { Label("新对话", systemImage: "plus.bubble") }
+                        .disabled(!store.hasConnection || store.exportBusy || store.openingDirectConversation).help("结束本轮，可导出到 LeonBook 后开始新对话")
+                    Button { store.showContext = true } label: { Label("上下文", systemImage: "brain") }
+                        .disabled(!store.hasConnection || store.openingDirectConversation).help("查看对话摘要与上下文设置")
                     Button { store.reconnect() } label: { Image(systemName: "arrow.clockwise") }.help("立即同步")
                     Button { store.showSettings = true } label: { Image(systemName: "slider.horizontal.3") }.help("连接设置")
                 }.buttonStyle(.borderless).padding(.horizontal, 26).padding(.vertical, 24)
@@ -106,20 +111,23 @@ struct ContentView: View {
                     } else { Text("私聊 · Agent 将直接回复").font(.caption).foregroundStyle(.secondary) }
                     MentionComposer(store: store)
                     HStack {
-                        Text("⌘ ↵ 发送 · 文字最多 8,000 字符").font(.caption).foregroundStyle(.secondary)
+                        Text("/ 命令 · ↵ 发送 · Shift+↵ 换行 · 最多 8,000 字符").font(.caption).foregroundStyle(.secondary)
                         Spacer()
                         if store.draft.utf16.count > 8000 { Text("已超出字数限制").font(.caption).foregroundStyle(.red) }
                         Button { Task { await store.sendDraft() } } label: {
                             Label("发送", systemImage: "arrow.up").padding(.horizontal, 10)
                         }.buttonStyle(.borderedProminent).tint(accent).keyboardShortcut(.return, modifiers: .command)
-                            .disabled(store.configuring || !store.hasConnection || store.draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || store.draft.utf16.count > 8000)
+                            .disabled(!store.canSend)
                     }
                 }.padding(20)
             }.background(Color(nsColor: .windowBackgroundColor))
         }
         .sheet(isPresented: $store.showSettings) { ConnectionView(store: store) }
         .sheet(isPresented: $store.showNewGroup) { NewGroupView(store: store) }
-        .alert("暂未完成", isPresented: Binding(get: { store.error != nil && !store.showSettings && !store.showNewGroup }, set: { if !$0 { store.error = nil } })) {
+        .sheet(isPresented: $store.showContext) { ContextSettingsView(store: store) }
+        .sheet(isPresented: $store.showEndRound) { EndRoundView(store: store) }
+        .sheet(isPresented: $store.showClearHistory) { ClearHistoryView(store: store) }
+        .alert("暂未完成", isPresented: Binding(get: { store.error != nil && !store.showSettings && !store.showNewGroup && !store.showContext && !store.showEndRound && !store.showClearHistory }, set: { if !$0 { store.error = nil } })) {
             Button("知道了") { store.error = nil }
         } message: { Text(store.error ?? "") }
         .onAppear { NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true) }
@@ -128,12 +136,15 @@ struct ContentView: View {
     private var timeline: some View {
         ScrollViewReader { proxy in
             ScrollView {
-                LazyVStack(spacing: 18) {
+                LazyVStack(spacing: 12) {
                     if store.hasOlder {
                         Button(store.loadingOlder ? "正在加载…" : "加载更早的消息") { Task { await store.loadOlder() } }
                             .disabled(store.loadingOlder).buttonStyle(.borderless).padding(.top, 12)
                     }
-                    if store.messages.isEmpty && store.currentPending.isEmpty {
+                    if store.messages.isEmpty && store.currentPending.isEmpty && store.loadingMessages {
+                        ProgressView("正在加载会话…").padding(.vertical, 80)
+                    }
+                    if store.messages.isEmpty && store.currentPending.isEmpty && !store.loadingMessages {
                         VStack(spacing: 14) {
                             Image(systemName: "bubble.left.and.bubble.right").font(.system(size: 44, weight: .light)).foregroundStyle(accent)
                             Text("从一句话开始").font(.title3.bold())
@@ -141,34 +152,66 @@ struct ContentView: View {
                         }.frame(maxWidth: .infinity).padding(.vertical, 100)
                     }
                     ForEach(store.messages) { message in
-                        bubble(text: message.text, sender: message.sender, detail: (message.role == "assistant" ? "Agent · " : "") + message.date.formatted(date: .abbreviated, time: .shortened), mine: message.deviceId == store.deviceId, agentId: message.agentId)
+                        bubble(text: message.text, sender: message.sender, detail: (message.role == "assistant" ? "Agent · " : "") + message.date.formatted(date: .abbreviated, time: .shortened), mine: message.deviceId == store.deviceId, agentId: message.agentId, imageIds: (message.images ?? []).map(\.id))
                             .id(message.id)
                     }
                     ForEach(store.currentPending) { message in
                         VStack(alignment: .trailing, spacing: 6) {
-                            bubble(text: message.text, sender: message.sender, detail: store.sending.contains(message.id) ? "发送中…" : "尚未确认送达服务器", mine: true)
+                            bubble(text: message.text, sender: message.sender, detail: store.sending.contains(message.id) ? "发送中…" : "尚未确认送达服务器", mine: true, imageIds: message.imageIds ?? [])
                             if !store.sending.contains(message.id) {
                                 Button("重试发送") { Task { await store.retry(message) } }.buttonStyle(.borderless)
                             }
                         }
                     }
-                    ForEach(store.jobs) { job in
-                        HStack(alignment: .top) {
-                            Image(systemName: job.status == "FAILED" ? "exclamationmark.bubble" : "ellipsis.bubble")
-                            Text("\(job.agentName) · \(job.status == "FAILED" ? job.error : job.status == "RUNNING" ? "正在回复…" : "等待回复…")").font(.caption)
+                    if store.exportRoomId == store.selectedConversationId, !store.exportProgress.isEmpty {
+                        HStack {
+                            if store.exportBusy { ProgressView().controlSize(.small) }
+                            Text(store.exportProgress).font(.caption)
                             Spacer()
-                            if job.status == "FAILED" { Button("重试回复") { Task { await store.retryJob(job) } }.buttonStyle(.borderless) }
+                        }.padding(12).background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
+                    }
+                    ForEach(store.contextOperations) { operation in
+                        HStack(alignment: .top) {
+                            if operation.active { ProgressView().controlSize(.small) }
+                            else { Image(systemName: operation.status == "FAILED" ? "exclamationmark.bubble" : "checkmark.circle") }
+                            Text("\(operation.agentName) · \(operation.progressText)").font(.caption)
+                            Spacer()
+                            if operation.status == "FAILED", operation.kind != "ARCHIVE" {
+                                Button("重试压缩") { Task { await store.compactContext(agentId: operation.agentId) } }
+                                    .buttonStyle(.borderless).disabled(store.contextActionActive)
+                            }
+                            Button("查看摘要") { store.showContext = true }.buttonStyle(.borderless)
                         }.foregroundStyle(.secondary).padding(12).background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
                     }
+                    ForEach(store.visibleJobs) { job in
+                        HStack(alignment: .top) {
+                            Image(systemName: job.status == "FAILED" ? "exclamationmark.bubble" : "ellipsis.bubble")
+                            if job.status == "RUNNING" { ProgressView().controlSize(.small) }
+                            Text("\(job.agentName) · \(job.progressText)").font(.caption)
+                                .accessibilityLabel("\(job.agentName) · \(job.progressText)")
+                            Spacer()
+                            if job.status == "FAILED" {
+                                Button("重试回复") { Task { await store.retryJob(job) } }.buttonStyle(.borderless)
+                                Button { store.dismissJob(job) } label: { Image(systemName: "xmark") }
+                                    .buttonStyle(.borderless)
+                                    .help("忽略此失败提示（仅这台 Mac，保留原消息）")
+                                    .accessibilityLabel("忽略 \(job.agentName) 的失败提示")
+                            }
+                        }.foregroundStyle(.secondary).padding(12).background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
+                    }
+                    if store.dismissedFailureCount > 0 {
+                        Button("恢复已忽略的失败提示（\(store.dismissedFailureCount)）") { store.restoreDismissedJobs() }
+                            .buttonStyle(.borderless).font(.caption).foregroundStyle(.secondary)
+                    }
                     Color.clear.frame(height: 1).id("bottom")
-                }.padding(26)
+                }.padding(.horizontal, 12).padding(.vertical, 14)
             }
             .onChange(of: store.messages.last?.id) { _ in proxy.scrollTo("bottom", anchor: .bottom) }
             .onChange(of: store.currentPending.count) { _ in proxy.scrollTo("bottom", anchor: .bottom) }
         }
     }
 
-    private func bubble(text: String, sender: String, detail: String, mine: Bool, agentId: String? = nil) -> some View {
+    private func bubble(text: String, sender: String, detail: String, mine: Bool, agentId: String? = nil, imageIds: [String] = []) -> some View {
         HStack {
             if mine { Spacer(minLength: 70) }
             VStack(alignment: mine ? .trailing : .leading, spacing: 6) {
@@ -176,12 +219,14 @@ struct ContentView: View {
                     if let agentId { AgentAvatarView(store: store, avatarId: store.avatarId(for: agentId), size: 28) }
                     Text(sender).font(.caption).foregroundStyle(.secondary)
                 }
-                Text(text).textSelection(.enabled).font(.system(size: 14)).lineSpacing(5).padding(.horizontal, 16).padding(.vertical, 12)
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(imageIds, id: \.self) { id in ChatImageView(store: store, imageId: id) }
+                    if !text.isEmpty { MarkdownMessageView(text, mine: mine).equatable() }
+                }.padding(.horizontal, mine ? 16 : 6).padding(.vertical, mine ? 12 : 8)
                     .foregroundStyle(mine ? Color.white : Color.primary)
                     .background(mine ? accent : Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
                 Text(detail).font(.system(size: 10)).foregroundStyle(.secondary)
-            }.frame(maxWidth: 540, alignment: mine ? .trailing : .leading)
-            if !mine { Spacer(minLength: 70) }
+            }.frame(maxWidth: mine ? 540 : .infinity, alignment: mine ? .trailing : .leading)
         }
     }
 }
@@ -257,5 +302,136 @@ struct NewGroupView: View {
                 }.buttonStyle(.borderedProminent).disabled(draft.creating || draft.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || draft.name.utf16.count > 60 || draft.agentIds.count > 32)
             }
         }.padding(28).frame(width: 380).interactiveDismissDisabled(draft.creating)
+    }
+}
+
+
+@MainActor
+final class ContextDraft: ObservableObject {
+    @Published var rounds = 10
+    @Published var confirmReset = false
+}
+struct ContextSettingsView: View {
+    @ObservedObject var store: ChatStore
+    @Environment(\.dismiss) private var dismiss
+    @StateObject private var draft = ContextDraft()
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("对话上下文 · \(store.title)").font(.title2.bold())
+            Text("每轮回复会携带近期完整对话。较早内容由 AI 压缩成摘要，保留目标、决定和未完成事项。").font(.callout).foregroundStyle(.secondary)
+            if store.contextBusy { ProgressView("正在处理…").controlSize(.small) }
+            if let error = store.contextError { Text(error).font(.callout).foregroundStyle(.red) }
+            if let info = store.contextInfo {
+                Stepper("保留最近 \(draft.rounds) 轮完整对话", value: $draft.rounds, in: 1...20)
+                Text("默认 10 轮；较早内容累积 4 轮或接近长度预算时压缩。长对话会优先保留最近完整轮次。").font(.caption).foregroundStyle(.secondary)
+                Text("上下文输入预算：约 \(info.inputTokenBudget.formatted()) Token，另为回复预留空间。").font(.caption).foregroundStyle(.secondary)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        ForEach(info.agents) { agent in
+                            VStack(alignment: .leading, spacing: 7) {
+                                HStack {
+                                    Text(agent.agentName).font(.headline)
+                                    Spacer()
+                                    Button("压缩上下文") { Task { await store.compactContext(agentId: agent.agentId) } }
+                                        .disabled(store.contextActionActive || store.contextBusy)
+                                }
+                                if store.jobs.contains(where: { $0.agentId == agent.id && $0.status == "RUNNING" && $0.phase == "COMPRESSING" }) || store.contextOperations.contains(where: { $0.agentId == agent.id && $0.active }) { Label("上下文压缩中…", systemImage: "arrow.triangle.2.circlepath").font(.caption) }
+                                if agent.estimatedInputTokens > 0 {
+                                    Text("最近请求：携带 \(agent.retainedRounds) 轮原文，估算输入 \(agent.estimatedInputTokens.formatted()) Token").font(.caption).foregroundStyle(.secondary)
+                                }
+                                if agent.lastCompressedAt > 0 {
+                                    Text("摘要更新于 " + Date(timeIntervalSince1970: Double(agent.lastCompressedAt) / 1000).formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
+                                }
+                                DisclosureGroup("历史摘要") {
+                                    Text(agent.summary.isEmpty ? "尚未需要压缩，当前使用原始对话。" : agent.summary)
+                                        .font(.callout).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+                                }
+                                Divider()
+                            }
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(minHeight: 100, maxHeight: 300)
+                Text("可用 /compact 主动压缩，保留最近一轮原文。群聊请选择 Agent。开启新话题保留聊天记录；等待回复或压缩完成后才可更改设置。").font(.caption).foregroundStyle(.secondary)
+            }
+            HStack {
+                Button("开启新话题…") { draft.confirmReset = true }.disabled(store.contextInfo == nil || store.contextBusy || store.contextActionActive)
+                Button("刷新") { Task { await store.loadContext() } }.disabled(store.contextBusy)
+                Spacer()
+                Button("完成") { dismiss() }.keyboardShortcut(.cancelAction).disabled(store.contextBusy)
+                Button("保存设置") { Task { await store.configureContext(rounds: draft.rounds, reset: false) } }
+                    .buttonStyle(.borderedProminent).disabled(store.contextBusy || store.contextActionActive || store.contextInfo == nil || draft.rounds == store.contextInfo?.recentRounds)
+            }
+        }.padding(28).frame(width: 560)
+        .task { await store.loadContext(); draft.rounds = store.contextInfo?.recentRounds ?? 10 }
+        .onChange(of: store.jobs.filter { $0.phase == "COMPRESSING" && $0.status == "RUNNING" }.count) { _ in
+            if !store.contextBusy { Task { await store.loadContext() } }
+        }
+        .onChange(of: store.contextOperations.map { $0.id + $0.status }.joined()) { _ in
+            if !store.contextBusy { Task { await store.loadContext() } }
+        }
+        .interactiveDismissDisabled(store.contextBusy)
+        .alert("开启新话题？", isPresented: $draft.confirmReset) {
+            Button("取消", role: .cancel) {}
+            Button("开启新话题") { Task { await store.configureContext(rounds: draft.rounds, reset: true) } }
+        } message: { Text("后续回复将从新的上下文开始，旧摘要不再使用。聊天记录不会删除。") }
+    }
+}
+
+
+@MainActor
+final class EndRoundDraft: ObservableObject { @Published var agentId = "" }
+struct EndRoundView: View {
+    @ObservedObject var store: ChatStore
+    @StateObject private var draft = EndRoundDraft()
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(store.endRoundExportOnly ? "导出本轮对话" : "结束本轮对话").font(.title2.bold())
+            Text("LeonBook 文章会先展示 AI 总结，再展示本轮原始对话和图片，并附完整原文文件。文章保存为草稿。").foregroundStyle(.secondary)
+            if !store.endRoundExportOnly { Text("归档成功后开始完全新的上下文。也可以仅开始新对话，历史记录保留。").font(.callout) }
+            Picker("总结使用的 Agent", selection: $draft.agentId) {
+                Text("请选择 Agent").tag("")
+                ForEach(store.availableAgents) { Text($0.name + " · " + $0.model).tag($0.id) }
+            }.disabled(store.exportBusy)
+            if let destination = store.blogDestination { Text("资料库：" + destination.root + " · 用户：" + destination.user).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+            if store.exportBusy { ProgressView(store.exportProgress).controlSize(.small) }
+            if let error = store.exportError { Text(error).font(.callout).foregroundStyle(.red) }
+            HStack {
+                Button("取消") { dismiss() }.disabled(store.exportBusy)
+                if !store.endRoundExportOnly { Button("仅开始新对话") { Task { await store.startFreshRound() } }.disabled(store.exportBusy || store.contextActionActive) }
+                Spacer()
+                Button(store.endRoundExportOnly ? "导出到 LeonBook" : "导出并开始新对话") { Task { await store.exportCurrentRound(agentId: draft.agentId, startNew: !store.endRoundExportOnly) } }
+                    .buttonStyle(.borderedProminent).disabled(draft.agentId.isEmpty || store.exportBusy || store.contextActionActive)
+            }
+        }.padding(28).frame(width: 600)
+        .task { store.exportError = nil; if store.availableAgents.count == 1 { draft.agentId = store.availableAgents[0].id }; await store.prepareBlogDestination() }
+        .interactiveDismissDisabled(store.exportBusy)
+    }
+}
+
+
+struct ClearHistoryView: View {
+    @ObservedObject var store: ChatStore
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Label("清空当前会话记录", systemImage: "trash").font(.title2.bold())
+            if let preview = store.clearPreview {
+                Text("将永久删除「\(preview.conversationName)」中的 \(preview.messageCount) 条已保存消息，以及本会话图片和 AI 对话上下文。").font(.callout)
+                if preview.hasActiveWork { Text("当前仍有回复、压缩或总结任务，请完成后刷新。").foregroundStyle(.orange) }
+            }
+            Text("当前设备的未发送内容也会丢弃。其他会话、Agent 设置和已导出的 LeonBook 文章保留。此操作无法撤销；需要保留时，请先用 /export 导出。").font(.callout).foregroundStyle(.secondary)
+            if store.clearBusy { ProgressView(store.clearPreview == nil ? "正在读取会话状态…" : "正在清空记录…").controlSize(.small) }
+            if let error = store.clearError { Text(error).foregroundStyle(.red).font(.callout) }
+            HStack {
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction).disabled(store.clearBusy)
+                Button("刷新") { Task { await store.prepareClearHistory() } }.disabled(store.clearBusy)
+                Spacer()
+                Button("永久清空", role: .destructive) { Task { await store.clearCurrentHistory() } }
+                    .disabled(store.clearBusy || store.clearPreview == nil || store.clearPreview?.hasActiveWork == true)
+            }
+        }.padding(28).frame(width: 560)
+        .task { await store.prepareClearHistory() }
+        .interactiveDismissDisabled(store.clearBusy)
     }
 }

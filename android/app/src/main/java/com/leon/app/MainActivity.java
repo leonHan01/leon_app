@@ -8,8 +8,6 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.text.*;
-import android.text.method.LinkMovementMethod;
-import android.text.util.Linkify;
 import android.view.*;
 import android.view.inputmethod.EditorInfo;
 import android.widget.*;
@@ -20,10 +18,14 @@ import java.util.Date;
 public final class MainActivity extends Activity implements ChatSession.Listener {
     private static final int BLUE = Color.rgb(46, 92, 227), INK = Color.rgb(28, 36, 55), MUTED = Color.rgb(112, 122, 140);
     private ChatSession session;
+    private MessageMarkdown markdown;
     private TextView status, roomTitle;
     private Button mentionButton;
     private String renderedConversation = "";
     private MentionEditText composer;
+    private LinearLayout attachmentRows;
+    private Button imageButton;
+    private String attachmentSignature = "";
     private LinearLayout mentionPanel, mentionRows;
     private final java.util.List<MessageApi.Agent> mentionCandidates = new java.util.ArrayList<>();
     private int mentionIndex;
@@ -39,6 +41,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         session = (ChatSession) getLastNonConfigurationInstance();
         if (session == null) session = new ChatSession(getApplicationContext());
         session.listener = this;
+        markdown = new MessageMarkdown(this);
         buildUI();
         changed();
         if (!session.configured() || savedState != null && savedState.getBoolean("settings")) showSettings();
@@ -84,12 +87,20 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         Button group=action("＋ 群聊");group.setOnClickListener(v->showNewGroup());roomActions.addView(group);
         roomBar.addView(roomActions);root.addView(roomBar);
         scroll = new ScrollView(this); scroll.setFillViewport(true);
+        scroll.setOnScrollChangeListener((v,x,y,oldX,oldY)->session.refreshImages());
         timeline = column(); timeline.setPadding(dp(18), dp(12), dp(18), dp(18)); scroll.addView(timeline);
         root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
 
         LinearLayout inputArea = column(); inputArea.setPadding(dp(16), dp(12), dp(16), dp(10)); inputArea.setBackgroundColor(Color.WHITE);
         mentionButton=action("@ Agent");mentionButton.setOnClickListener(v->showAgents(true));
         inputArea.addView(mentionButton);
+        imageButton=action("选择图片");imageButton.setOnClickListener(v->{
+            android.content.Intent picker=new android.content.Intent(android.content.Intent.ACTION_OPEN_DOCUMENT);
+            picker.setType("image/*");picker.addCategory(android.content.Intent.CATEGORY_OPENABLE);
+            picker.putExtra(android.content.Intent.EXTRA_ALLOW_MULTIPLE,true);startActivityForResult(picker,42);
+        });
+        inputArea.addView(imageButton);
+        attachmentRows=row();inputArea.addView(attachmentRows);
         mentionPanel=column();mentionPanel.setPadding(dp(6),dp(6),dp(6),dp(6));mentionPanel.setBackground(shape(Color.rgb(246,248,255),12));mentionPanel.setVisibility(View.GONE);
         TextView mentionTitle=text("提及 Agent · ↑↓选择，Enter/Tab 确认，Esc 关闭",10,MUTED);mentionTitle.setPadding(dp(6),dp(3),dp(6),dp(5));mentionPanel.addView(mentionTitle);
         ScrollView mentionScroll=new ScrollView(this);mentionRows=column();mentionScroll.addView(mentionRows);mentionPanel.addView(mentionScroll,new LinearLayout.LayoutParams(-1,dp(120)));inputArea.addView(mentionPanel);
@@ -100,6 +111,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         composer.setPadding(dp(12), dp(10), dp(12), dp(10)); composer.setBackground(shape(Color.rgb(246, 247, 251), 14));
         composer.setImeOptions(EditorInfo.IME_FLAG_NO_EXTRACT_UI);
         composer.setText(session.draft);
+        composer.imageInput=(uri,release)->session.addImage(uri,release);
         composer.addTextChangedListener(new TextWatcher() {
             public void beforeTextChanged(CharSequence s, int a, int c, int f) {}
             public void onTextChanged(CharSequence s, int start, int before, int count) { session.draft = s.toString(); updateSend(); composer.post(MainActivity.this::updateMentionSuggestions); }
@@ -122,7 +134,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         inputRow.addView(send, sendParams);
         send.setOnClickListener(v -> { if (session.sendDraft(composer.getText().toString())) { composer.setText(""); scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN)); } });
         inputArea.addView(inputRow);
-        TextView hint = text("仅前台自动同步 · 最多 8,000 字符 · 长按复制", 10, MUTED); hint.setPadding(0, dp(8), 0, 0); inputArea.addView(hint);
+        TextView hint = text("最多 4 张图片 · 可粘贴图片 · 长按消息复制文字", 10, MUTED); hint.setPadding(0, dp(8), 0, 0); inputArea.addView(hint);
         root.addView(inputArea); setContentView(root);
     }
 
@@ -135,6 +147,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         if (!composer.getText().toString().equals(session.draft)) { composer.setText(session.draft);composer.setSelection(composer.length()); }
         if(!renderedConversation.equals(session.selectedConversation)){renderedConversation=session.selectedConversation;hideMentionSuggestions(false);dismissedMentionKey="";mentionKey="";renderedRevision=-1;timeline.setTag(null);timeline.removeAllViews();}
         updateSend();
+        renderAttachments();
         updateMentionSuggestions();
         if (settings != null && settings.isShowing()) settings.getButton(AlertDialog.BUTTON_POSITIVE).setEnabled(!session.configuring);
         if (renderedRevision != session.revision) { renderMessages(); renderedRevision = session.revision; }
@@ -143,7 +156,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     private void updateSend() {
         if (send == null) return;
         int length = composer.getText().length();
-        boolean enabled = session.configured() && !session.configuring && !composer.getText().toString().trim().isEmpty() && length <= 8000;
+        boolean enabled = session.canSend(composer.getText().toString());
         send.setEnabled(enabled); send.setAlpha(enabled ? 1f : .45f);
         composer.setError(length > 8000 ? "消息最多 8,000 字符" : null);
     }
@@ -171,11 +184,11 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         }
         for (MessageApi.Message m : session.messages) {
             String date = DateFormat.getDateTimeInstance(DateFormat.SHORT, DateFormat.SHORT).format(new Date(m.createdAt));
-            addBubble(m.text, m.sender + (m.role.equals("assistant") ? " · Agent" : ""), date, m.deviceId.equals(session.deviceId), null, m.role.equals("assistant")?m.agentId:null);
+            addBubble(m.text, m.sender + (m.role.equals("assistant") ? " · Agent" : ""), date, m.deviceId.equals(session.deviceId), null, m.role.equals("assistant")?m.agentId:null,m.imageIds);
         }
         for (JSONObject m : session.currentPending()) {
             boolean busy = session.sending.contains(m.optString("clientMessageId"));
-            addBubble(m.optString("text"), m.optString("sender"), busy ? "发送中…" : "尚未确认送达服务器", true, busy ? null : m);
+            addBubble(m.optString("text"), m.optString("sender"), busy ? "发送中…" : "尚未确认送达服务器", true, busy ? null : m,null,ChatSession.imageIds(m));
         }
         for(MessageApi.Job job:session.jobs){
             LinearLayout jobRow=column();jobRow.setPadding(dp(10),dp(8),dp(10),dp(8));
@@ -189,26 +202,54 @@ public final class MainActivity extends Activity implements ChatSession.Listener
             else scroll.scrollTo(0, previousY);
         });
     }
-    private void addBubble(String body, String sender, String detail, boolean mine, JSONObject retry) { addBubble(body,sender,detail,mine,retry,null); }
-    private void addBubble(String body, String sender, String detail, boolean mine, JSONObject retry, String agentId) {
+    private void addBubble(String body, String sender, String detail, boolean mine, JSONObject retry,String agentId,java.util.List<String> images) {
         LinearLayout wrapper = column(); wrapper.setGravity(mine ? Gravity.END : Gravity.START);
         LinearLayout.LayoutParams wp = new LinearLayout.LayoutParams(-1, -2); wp.bottomMargin = dp(18);
         wrapper.setPadding(mine ? dp(42) : 0, 0, mine ? 0 : dp(42), 0);
         TextView name = text(sender, 11, MUTED); name.setPadding(dp(4), 0, dp(4), dp(5));
         if(agentId!=null&&!agentId.isEmpty()){LinearLayout identity=row();identity.setGravity(Gravity.CENTER_VERTICAL);identity.addView(avatar(session.avatarFor(agentId),28));identity.addView(name);wrapper.addView(identity);}else wrapper.addView(name);
+        for(String id:images){
+            ImageView image=new ImageView(this);image.setScaleType(ImageView.ScaleType.FIT_CENTER);image.setPadding(dp(4),dp(4),dp(4),dp(4));image.setBackground(shape(mine?BLUE:Color.WHITE,12));
+            LinearLayout.LayoutParams ip=new LinearLayout.LayoutParams(dp(240),dp(180));ip.bottomMargin=dp(6);wrapper.addView(image,ip);session.bindImage(image,id);
+            image.setOnClickListener(v->{
+                ImageView large=new ImageView(this);large.setScaleType(ImageView.ScaleType.FIT_CENTER);large.setAdjustViewBounds(true);
+                session.bindImage(large,id,true);
+                new AlertDialog.Builder(this).setTitle("图片预览").setView(large).setPositiveButton("关闭",null).show();
+            });
+        }
         TextView bubble = text(body, 16, mine ? Color.WHITE : INK);
         bubble.setPadding(dp(15), dp(12), dp(15), dp(12)); bubble.setLineSpacing(dp(3), 1);
         bubble.setBackground(shape(mine ? BLUE : Color.WHITE, 16));
-        Linkify.addLinks(bubble, Linkify.WEB_URLS); bubble.setLinkTextColor(mine ? Color.WHITE : BLUE);
-        bubble.setMovementMethod(LinkMovementMethod.getInstance());
+        bubble.setLinkTextColor(mine ? Color.WHITE : BLUE);
+        boolean hasTable = markdown.setText(bubble, body, mine);
         bubble.setOnLongClickListener(v -> {
             ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("消息", body));
             Toast.makeText(this, "已复制", Toast.LENGTH_SHORT).show(); return true;
         });
-        wrapper.addView(bubble, new LinearLayout.LayoutParams(-2, -2));
+        // Table spans measure against the TextView width, including table-only messages.
+        if(!body.isEmpty())wrapper.addView(bubble, new LinearLayout.LayoutParams(hasTable ? -1 : -2, -2));
         TextView time = text(detail, 10, MUTED); time.setPadding(dp(4), dp(5), dp(4), 0); wrapper.addView(time);
         if (retry != null) { Button button = action("重试发送"); button.setOnClickListener(v -> session.retry(retry)); wrapper.addView(button); }
         timeline.addView(wrapper, wp);
+    }
+
+    @Override protected void onActivityResult(int requestCode,int resultCode,android.content.Intent data){
+        super.onActivityResult(requestCode,resultCode,data);
+        if(requestCode!=42||resultCode!=RESULT_OK||data==null)return;
+        if(data.getClipData()!=null){var clip=data.getClipData();for(int i=0;i<Math.min(clip.getItemCount(),5);i++)session.addImage(clip.getItemAt(i).getUri(),()->{});}
+        else if(data.getData()!=null)session.addImage(data.getData(),()->{});
+    }
+    private void renderAttachments(){
+        imageButton.setEnabled(session.configured()&&!session.configuring&&session.draftImages.size()+session.preparingImages<4);
+        imageButton.setText(session.preparingImages>0?"正在处理图片…":"选择图片");
+        String signature=session.selectedConversation+session.draftImages.stream().map(image->image.id).collect(java.util.stream.Collectors.joining());
+        if(signature.equals(attachmentSignature))return;attachmentSignature=signature;attachmentRows.removeAllViews();
+        for(ChatImage image:session.draftImages){
+            LinearLayout item=column();ImageView preview=new ImageView(this);preview.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            var options=new android.graphics.BitmapFactory.Options();options.inSampleSize=8;
+            preview.setImageBitmap(android.graphics.BitmapFactory.decodeByteArray(image.data,0,image.data.length,options));item.addView(preview,new LinearLayout.LayoutParams(dp(60),dp(48)));
+            Button remove=action("移除");remove.setOnClickListener(v->session.removeImage(image.id));item.addView(remove);attachmentRows.addView(item);
+        }
     }
 
     private boolean isComposing(){return android.view.inputmethod.BaseInputConnection.getComposingSpanStart(composer.getText())>=0;}

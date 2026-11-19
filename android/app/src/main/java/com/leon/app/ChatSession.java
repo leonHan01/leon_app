@@ -17,6 +17,42 @@ final class ChatSession {
     final SecretStore secrets;
     final String deviceId;
     String server, sender, status = "尚未连接", draft = "";
+    final List<ChatImage> draftImages = new ArrayList<>();
+    private final Map<String,List<ChatImage>> imageDrafts = new HashMap<>();
+    private final java.io.File files;
+    private final android.content.ContentResolver resolver;
+    private final ChatImageLoader imageLoader = new ChatImageLoader();
+    void refreshImages(){imageLoader.refresh();}
+    void bindImage(android.widget.ImageView view,String id){bindImage(view,id,false);}
+    void bindImage(android.widget.ImageView view,String id,boolean large){
+        MessageApi client=api;String scope=pendingKey;int connection=connectionGeneration;
+        imageLoader.bind(view,connection+":"+id,()->{
+            byte[] local=ChatImage.local(files,scope,id);if(local!=null)return local;
+            if(client==null)throw new java.io.IOException("请先连接服务器");return client.image(id);
+        },large);
+    }
+    static List<String> imageIds(JSONObject message){
+        var ids=message.optJSONArray("imageIds");var result=new ArrayList<String>();
+        if(ids!=null)for(int i=0;i<ids.length();i++)result.add(ids.optString(i));return result;
+    }
+    private void removeImageFiles(JSONObject message){for(String id:imageIds(message))ChatImage.remove(files,pendingKey,id);}
+    int preparingImages;
+    boolean canSend(String text) { return configured() && !configuring && preparingImages==0 && (!text.trim().isEmpty() || !draftImages.isEmpty()) && text.length()<=8000; }
+    void addImage(android.net.Uri uri,Runnable release) {
+        if(api==null||configuring||draftImages.size()+preparingImages>=4){release.run();report(new java.io.IOException("请先连接服务器，每条最多 4 张图片"));return;}
+        int connection=connectionGeneration;String room=selectedConversation;preparingImages++;notifyChanged();
+        avatarWorkers.execute(()->{
+            ChatImage image=null;Exception failure=null;
+            try{image=ChatImage.read(resolver,uri);}catch(Exception e){failure=e;}finally{release.run();}
+            ChatImage result=image;Exception error=failure;
+            main.post(()->{
+                preparingImages--;if(connection!=connectionGeneration){notifyChanged();return;}
+                if(result!=null){if(room.equals(selectedConversation))draftImages.add(result);else imageDrafts.computeIfAbsent(room,k->new ArrayList<>()).add(result);}
+                else report(error);notifyChanged();
+            });
+        });
+    }
+    void removeImage(String id){draftImages.removeIf(image->image.id.equals(id));notifyChanged();}
     boolean connected, hasOlder, loadingOlder, configuring, active, initialLoaded;
     long revision;
     final List<MessageApi.Message> messages = new ArrayList<>();
@@ -33,7 +69,8 @@ final class ChatSession {
     List<MessageApi.Agent> availableAgents() { List<MessageApi.Agent> result=new ArrayList<>();for(MessageApi.Agent a:agents)if(a.enabled&&(selectedConversation.equals("shared")||selected()!=null&&selected().agentIds.contains(a.id)))result.add(a);return result; }
     void select(String id) {
         if(id.equals(selectedConversation))return;
-        drafts.put(selectedConversation,draft);selectedConversation=id;draft=drafts.getOrDefault(id,"");
+        drafts.put(selectedConversation,draft);imageDrafts.put(selectedConversation,new ArrayList<>(draftImages));selectedConversation=id;draft=drafts.getOrDefault(id,"");
+        draftImages.clear();draftImages.addAll(imageDrafts.getOrDefault(id,List.of()));
         generation++;polling=false;initialLoaded=false;loadingOlder=false;hasOlder=false;messages.clear();jobs.clear();revision++;notifyChanged();refresh();
     }
     void mention(MessageApi.Agent agent) { draft+=(draft.isEmpty()||Character.isWhitespace(draft.charAt(draft.length()-1))?"":" ")+"@"+agent.handle+" ";notifyChanged(); }
@@ -93,6 +130,7 @@ final class ChatSession {
     private final Runnable tick = this::poll;
 
     ChatSession(Context context) {
+        files=context.getFilesDir();resolver=context.getContentResolver();
         prefs = context.getSharedPreferences("connection", Context.MODE_PRIVATE);
         secrets = new SecretStore(context);
         deviceId = prefs.getString("deviceId", UUID.randomUUID().toString());
@@ -110,7 +148,7 @@ final class ChatSession {
     void report(Exception e) { if (listener != null) listener.error(e.getMessage() == null ? "操作未完成，请重试。" : e.getMessage()); }
     void start() { active = true; refresh(); }
     void stop() { active = false; main.removeCallbacks(tick); connected = false; status = "已暂停 · 返回后自动同步"; }
-    void close() { stop(); listener = null; worker.shutdownNow(); avatarWorkers.shutdownNow();avatarWaiters.clear();avatarCache.evictAll(); }
+    void close() { stop(); listener = null; worker.shutdownNow(); avatarWorkers.shutdownNow();avatarWaiters.clear();avatarCache.evictAll();imageLoader.close(); }
     void refresh() { main.removeCallbacks(tick); if (active && api != null) main.post(tick); }
 
     void configure(String address, String token, String name, Runnable success) {
@@ -134,7 +172,7 @@ final class ChatSession {
                     generation++; connectionGeneration++; avatarCache.evictAll();avatarWaiters.clear(); selectedConversation="shared";drafts.clear();agents.clear();agents.addAll(directory);conversations.clear();conversations.addAll(rooms);jobs.clear();jobs.addAll(page.jobs);polling = false; loadingOlder = false; api = candidate; server = normalized; sender = cleanName;
                     messages.clear(); messages.addAll(page.messages); initialLoaded = true; hasOlder = page.hasMore;
                     restorePending(cleanToken); reconcile();
-                    connected = true; configuring = false; status = "已连接 · 自动同步"; draft = "";
+                    connected = true; configuring = false; status = "已连接 · 自动同步"; draft = "";draftImages.clear();imageDrafts.clear();
                     revision++; notifyChanged(); success.run(); refresh();
                 });
             } catch (Exception e) { main.post(() -> { configuring = false; notifyChanged(); report(e); refresh(); }); }
@@ -193,13 +231,15 @@ final class ChatSession {
 
     boolean sendDraft(String text) {
         text = text.trim();
-        if (api == null || configuring || text.isEmpty() || text.length() > 8000) return false;
+        if (!canSend(text)) return false;
         try {
+            JSONArray imageIds=new JSONArray();
+            for(ChatImage image:draftImages){image.save(files,pendingKey);imageIds.put(image.id);}
             JSONObject message = new JSONObject().put("clientMessageId", UUID.randomUUID().toString()).put("deviceId", deviceId)
                     .put("sender", sender).put("platform", "android").put("text", text).put("conversationId",selectedConversation).put("mentionAgentIds",new JSONArray());
-            pending.add(message);
+            message.put("imageIds",imageIds);pending.add(message);
             if (!savePending()) { pending.remove(message); throw new java.io.IOException("无法保存待发消息，请检查设备存储后重试。"); }
-            draft = ""; revision++; retry(message); return true;
+            draft = "";draftImages.clear();imageDrafts.remove(selectedConversation); revision++; retry(message); return true;
         } catch (Exception e) { report(e); return false; }
     }
     void retry(JSONObject message) {
@@ -209,10 +249,14 @@ final class ChatSession {
         int epoch = connectionGeneration; MessageApi client = api;
         worker.execute(() -> {
             try {
+                for(String imageId:imageIds(message)){
+                    byte[] data=ChatImage.local(files,pendingKey,imageId);
+                    if(data!=null)client.uploadImage(imageId,message.optString("conversationId","shared"),data);
+                }
                 client.send(message);
                 main.post(() -> {
                     if (epoch != connectionGeneration) return;
-                    sending.remove(id); pending.remove(message); savePending(); revision++; notifyChanged(); refresh();
+                    sending.remove(id); pending.remove(message); savePending();removeImageFiles(message); revision++; notifyChanged(); refresh();
                 });
             } catch (Exception e) {
                 main.post(() -> {
@@ -235,7 +279,7 @@ final class ChatSession {
     private void reconcile() {
         Set<String> confirmed = new HashSet<>();
         for (MessageApi.Message m : messages) if (m.deviceId.equals(deviceId)) confirmed.add(m.clientMessageId);
-        if (pending.removeIf(m -> confirmed.contains(m.optString("clientMessageId")))) { revision++; savePending(); }
+        if (pending.removeIf(m -> {if(!confirmed.contains(m.optString("clientMessageId")))return false;removeImageFiles(m);return true;})) { revision++; savePending(); }
     }
     private void restorePending(String token) {
         pending.clear();

@@ -22,9 +22,9 @@ struct AgentAvatarView: View {
         }
         .frame(width: size, height: size).clipShape(RoundedRectangle(cornerRadius: size * 0.23))
         .accessibilityLabel("Agent 头像")
-        .task(id: store.avatarSessionKey + ":" + avatarId + (store.connected ? ":online" : ":offline")) {
+        .task(id: store.avatarSessionKey + ":" + avatarId + (store.hasConnection ? ":configured" : ":unconfigured")) {
             loaded.image = nil
-            guard store.connected else { return }
+            guard store.hasConnection else { return }
             let data = await store.avatarData(avatarId)
             guard !Task.isCancelled else { return }
             loaded.image = data.flatMap(NSImage.init(data:))

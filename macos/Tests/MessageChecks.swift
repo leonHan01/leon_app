@@ -8,6 +8,7 @@ struct MessageChecks {
         if !condition() { throw ClientError.message(message) }
     }
     static func main() async throws {
+        try commandChecks()
         try endpointChecks()
         try decodingChecks()
         try mentionChecks()
@@ -28,6 +29,20 @@ struct MessageChecks {
             }
         } else { print("SKIP: isolated HTTP checks (set LEONAPP_TEST_SERVER and LEONAPP_TEST_TOKEN)") }
     }
+    static func commandChecks() throws {
+        try check(ChatCommand.query(in: "/", selection: NSRange(location: 1, length: 0)) == "", "Slash did not open commands")
+        try check(ChatCommand.matching("").count == 5, "Commands missing")
+        try check(ChatCommand.matching("clear") == [.clear] && ChatCommand.exact("/clear") == .clear, "Clear command missing")
+        try check(ChatCommand.matching("comp") == [.compact], "Command prefix matching failed")
+        try check(ChatCommand.exact(" /new ") == .newRound && ChatCommand.exact("/export") == .exportRound, "Round commands missing")
+        try check(ChatCommand.exact("/compress") == .compact, "Compression alias failed")
+        for text in ["https://example.com/", "请看 /", "/usr/local/bin", "/compact with args"] {
+            try check(ChatCommand.query(in: text, selection: NSRange(location: (text as NSString).length, length: 0)) == nil, "Unrelated text opened commands")
+        }
+        try check(ChatCommand.isAttempt("/compact with args"), "Malformed commands must not be sent as chat")
+        try check(ChatCommand.query(in: "/compact", selection: NSRange(location: 0, length: 8)) == nil, "Selected text triggered commands")
+        print("PASS: slash menu, command prefixes/aliases, new/export commands and ordinary paths")
+    }
     static func endpointChecks() throws {
         let remote = try Endpoint.normalize(" https://121.40.254.112/ ")
         try check(remote.absoluteString == "https://121.40.254.112", "HTTPS normalization failed")
@@ -44,6 +59,16 @@ struct MessageChecks {
         let page = try JSONDecoder().decode(MessagePage.self, from: data)
         try check(page.messages[0].text == "你好 🚀\n第二行", "Unicode/newline decoding failed")
         try check(abs(page.messages[0].date.timeIntervalSince1970 - 1700000000.123) < 0.001, "Millisecond date decoding failed")
+        let jobData = Data(#"{"messageId":1,"agentId":"agent","agentName":"Sol","status":"RUNNING","error":"","phase":"COMPRESSING"}"#.utf8)
+        let job = try JSONDecoder().decode(AgentJob.self, from: jobData)
+        try check(job.progressText == "上下文压缩中…", "Compression must be shown separately from replying")
+        let oldData = Data(#"{"messageId":1,"agentId":"agent","agentName":"Sol","status":"RUNNING","error":""}"#.utf8)
+        let oldJob = try JSONDecoder().decode(AgentJob.self, from: oldData)
+        try check(oldJob.progressText == "正在回复…", "Old servers must remain compatible")
+        let contextData = Data(#"{"conversationId":"direct:agent","recentRounds":10,"inputTokenBudget":12000,"topicStartedAfter":0,"agents":[{"agentId":"agent","agentName":"Sol","summary":"记住偏好","lastCompressedAt":1700000000123,"estimatedInputTokens":1234,"retainedRounds":10,"phase":""}]}"#.utf8)
+        let context = try JSONDecoder().decode(ConversationContext.self, from: contextData)
+        try check(context.recentRounds == 10 && context.agents[0].summary == "记住偏好", "Server context metadata decoding failed")
+
     }
     static func mentionChecks() throws {
         let bare = MentionCompletion.token(in: "你好 @", selection: NSRange(location: 4, length: 0))
