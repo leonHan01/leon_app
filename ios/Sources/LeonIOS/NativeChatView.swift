@@ -12,7 +12,7 @@ struct ZipDocument: FileDocument {
 @MainActor
 struct NativeChatView: View {
     enum Panel {
-        case photos(ImageOrigin,Int),imageFiles(ImageOrigin),context(String),members(Conversation,Bool),new(AgentInfo,String,ImageOrigin),clear(ClearHistoryPreview),restore(BackupPreview,Data,String?,String,ImageOrigin)
+        case photos(ImageOrigin,Int),imageFiles(ImageOrigin),context(String),members(Conversation,Bool),inviteUsers(Conversation),inviteAgents(Conversation),new(AgentInfo,String,ImageOrigin),clear(ClearHistoryPreview),restore(BackupPreview,Data,String?,String,ImageOrigin)
     }
     @ObservedObject var store:ChatStore
     var openRoom:(Conversation)->Void
@@ -20,6 +20,8 @@ struct NativeChatView: View {
     var openUsage:()->Void
     @Environment(\.dismiss) private var dismiss
     @State private var extras = false
+    @State private var searching = false
+    @State private var favorites = false
     @State private var selection = NSRange(location:0,length:0)
     @State private var composing = false
     @State private var inputHeight:CGFloat = 40
@@ -56,6 +58,14 @@ struct NativeChatView: View {
             }
         }.background(MobileStyle.bar.ignoresSafeArea()).foregroundStyle(MobileStyle.ink).toolbar(.hidden,for:.navigationBar)
             .overlay {toolDialogs}
+            .sheet(item:$store.branchMessage) {message in BranchConversationView(store:store,message:message,sourceName:store.selected?.name ?? "聊天") {room in openRoom(room)}}
+            .fullScreenCover(isPresented:$favorites) {FavoritesView(store:store,openRoom:openRoom)}
+            .fullScreenCover(isPresented:$searching) {
+                ChatSearchView(store:store,room:store.roomID,title:store.selected?.name ?? "当前聊天") {id in
+                    if let room = store.conversations.first(where:{$0.id == id}) {openRoom(room)}
+                    else {Task {await store.refreshDirectory();if let room = store.conversations.first(where:{$0.id == id}) {openRoom(room)}}}
+                }
+            }
             .sheet(isPresented:systemImagePickerPresented) {
                 if case .photos(let origin,let limit) = panel {PhotoPicker(store:store,origin:origin,limit:limit)}
                 else if case .imageFiles(let origin) = panel {ImageFilePicker(store:store,origin:origin)}
@@ -68,19 +78,22 @@ struct NativeChatView: View {
                 document = nil
             }
             .fileImporter(isPresented:$importing,allowedContentTypes:[.zip],allowsMultipleSelection:false, onCompletion:importBackup)
+            .onChange(of:store.quotedMessage?.id) {_ in if store.quotedMessage != nil {extras=false}}
             .onReceive(NotificationCenter.default.publisher(for:UIResponder.keyboardWillShowNotification)) {_ in extras = false}
             .onAppear {visible = true;selection = NSRange(location:(store.draft as NSString).length,length:0);firstMessageID = store.room.messages.first?.id}
             .onDisappear {visible = false}
     }
     private var chatMenu:some View {
         Menu {
-            Button("查看 Agent 信息") {
-                if store.selected?.direct == true,let id = store.selected?.agentId,!id.isEmpty {showAgentProfile(id)}
-                else if store.availableAgents.isEmpty {store.error = "当前会话暂无可查看的 Agent"}
-                else {choosingAgent = "profile"}
-            }.accessibilityIdentifier("chat_agent_info")
+            Button("查看 Agent 信息",action:showConversationList).accessibilityIdentifier("chat_agent_info")
+            Button("收藏") {hideKeyboard();favorites = true}
+            Button("查找聊天记录") {hideKeyboard();searching = true}.accessibilityIdentifier("find_chat_history")
             Button("会话信息") {panel = .members(store.selected ?? Conversation(id:store.roomID,name:"聊天",kind:"group",agentId:nil,agentIds:[]),false)}
             if store.selected?.kind == "group" {Button("群成员") {if let room = store.selected {panel = .members(room,true)}}}
+            if let room = store.selected,store.managesGroup(room) {
+                Button("添加用户") {panel = .inviteUsers(room)}.disabled(store.busy != nil).accessibilityIdentifier("chat_invite_users")
+                Button("添加 Agent") {panel = .inviteAgents(room)}.disabled(store.busy != nil).accessibilityIdentifier("chat_invite_agents")
+            }
             Button("Token 用量",action:openUsage)
             Button("快捷命令") {hideKeyboard();extras = true}
             Button("新建对话") {chooseAgent(for:"new")}
@@ -145,6 +158,7 @@ struct NativeChatView: View {
     private var composer:some View {
         VStack(spacing:0) {
             MobileDivider()
+            DocumentDraftsView(store:store).padding(.horizontal,12)
             if mentionVisible {mentionPanel}
             if !store.draftImages.isEmpty {
                 ScrollView(.horizontal,showsIndicators:false) {HStack(spacing:8) {
@@ -157,8 +171,11 @@ struct NativeChatView: View {
                 }.padding(.horizontal,12).padding(.top,6)}
             }
             if store.preparingImages>0 {Text("正在处理图片…").font(.system(size:12)).foregroundStyle(MobileStyle.muted).padding(.top,6)}
+            if let quote=store.quotedMessage {
+                QuoteCard(store:store,quote:quote,room:store.roomID,title:store.selected?.name ?? "聊天",cancel:store.cancelQuote).padding(.horizontal,12).padding(.top,7)
+            }
             HStack(alignment:.bottom,spacing:0) {
-                NativeComposer(text:$store.draft,selection:$selection,composing:$composing,height:$inputHeight,suggestionCount:candidates.count,submit:send,choose:{if !candidates.isEmpty {complete(candidates[candidateIndex % candidates.count])}},move:{step in if !candidates.isEmpty {candidateIndex = (candidateIndex+step+candidates.count)%candidates.count}},dismissSuggestions:{dismissedMention = mentionKey},pasteProvider:{receiveImage(provider:$0,origin:store.imageOrigin,store:store)},beganEditing:{extras = false})
+                NativeComposer(text:$store.draft,selection:$selection,composing:$composing,height:$inputHeight,suggestionCount:candidates.count,submit:send,choose:{if !candidates.isEmpty {complete(candidates[candidateIndex % candidates.count])}},move:{step in if !candidates.isEmpty {candidateIndex = (candidateIndex+step+candidates.count)%candidates.count}},dismissSuggestions:{dismissedMention = mentionKey},pasteProvider:{receiveImage(provider:$0,origin:store.imageOrigin,store:store)},beganEditing:{extras = false},focusRequest:store.quotedMessage?.id)
                     .frame(height:inputHeight).disabled(!store.loggedIn)
                 Button {hideKeyboard();extras.toggle()} label:{MobileIcon(symbol:.plus).rotationEffect(.degrees(extras ? 45 : 0)).frame(width:40,height:40).contentShape(Rectangle())}.buttonStyle(MobilePressStyle(radius:20)).accessibilityLabel("附件与快捷命令").accessibilityIdentifier("chat_add")
                 if !store.draft.isEmpty || !store.draftImages.isEmpty || store.preparingImages>0 {
@@ -186,26 +203,29 @@ struct NativeChatView: View {
         }.padding(.horizontal,10).padding(.vertical,6).background(.white)
     }
     private var commandPanel:some View {
-        VStack(spacing:4) {
-            HStack(spacing:4) {
-                Menu {
-                    Button("从相册选择") {panel = .photos(store.imageOrigin,4-store.draftImages.count-store.preparingImages)}
-                    Button("从文件选择") {panel = .imageFiles(store.imageOrigin)}
-                } label:{MobileToolArtwork(title:"相册",symbol:.photo,accent:0x4778B2,surface:0xEAF1FA)}
-                    .disabled(commandsDisabled || store.draftImages.count+store.preparingImages>=4).accessibilityIdentifier("chat_tool_images")
-                command("压缩上下文",.compact,0x35896A,0xE7F2EC) {chooseAgent(for:"compact")}
-                command("查看上下文",.context,0x35896A,0xE7F2EC) {panel = .context(store.roomID)}
-                command("新建对话",.plus,0x35896A,0xE7F2EC) {chooseAgent(for:"new")}
+        GeometryReader {geometry in
+            let width = max(64,geometry.size.width / CGFloat(store.selected?.direct == true ? 6 : 7))
+            ScrollView(.horizontal,showsIndicators:false) {
+                HStack(spacing:0) {
+                    Menu {
+                        Button("从相册选择") {panel = .photos(store.imageOrigin,4-store.draftImages.count-store.preparingImages)}
+                        Button("从文件选择") {panel = .imageFiles(store.imageOrigin)}
+                    } label:{MobileToolArtwork(title:"相册",symbol:.photo)}
+                        .disabled(commandsDisabled || store.draftImages.count+store.preparingImages>=4).accessibilityIdentifier("chat_tool_images").frame(width:width)
+                    DocumentPickerButton(store:store).frame(width:width)
+                    command("压缩上下文",.compact) {chooseAgent(for:"compact")}.frame(width:width)
+                    command("查看上下文",.context) {panel = .context(store.roomID)}.frame(width:width)
+                    command("新建对话",.newChat) {chooseAgent(for:"new")}.frame(width:width)
+                    command("会话列表",.threads) {showConversationList()}.accessibilityIdentifier("chat_tool_threads").frame(width:width)
+                    if store.selected?.direct != true {
+                        command("@ Agent",.mention) {chooseAgent(for:"mention")}.disabled(store.availableAgents.isEmpty).frame(width:width)
+                    }
+                }
             }
-            HStack(spacing:4) {
-                command("加载备份",.restore,0x6979A4,0xECEDF6) {importOrigin = store.imageOrigin;importAgent = store.selected?.direct == true ? store.selected?.agentId : nil;importing = true}
-                command("清理记录",.clear,0xB56360,0xF8ECEA) {Task {await clear()}}
-                command("@ Agent",.agents,0x35896A,0xE7F2EC) {chooseAgent(for:"mention")}.opacity(store.selected?.direct == true ? 0 : 1).disabled(store.selected?.direct == true || store.availableAgents.isEmpty).accessibilityHidden(store.selected?.direct == true)
-            }
-        }.padding(.horizontal,14).padding(.top,6).padding(.bottom,12).accessibilityIdentifier("chat_extras")
+        }.frame(height:96).padding(.horizontal,12).padding(.top,4).padding(.bottom,10).accessibilityIdentifier("chat_extras")
     }
-    private func command(_ title:String,_ symbol:MobileSymbol,_ accent:UInt32,_ surface:UInt32,action:@escaping ()->Void) -> some View {
-        Button(action:action) {MobileToolArtwork(title:title,symbol:symbol,accent:accent,surface:surface)}
+    private func command(_ title:String,_ symbol:MobileSymbol,action:@escaping ()->Void) -> some View {
+        Button(action:action) {MobileToolArtwork(title:title,symbol:symbol)}
             .buttonStyle(MobilePressStyle(radius:16)).disabled(commandsDisabled)
     }
     private var commandsDisabled:Bool {!store.loggedIn || store.configuring || store.busy != nil || store.savingDraft || store.opening.contains(store.roomID)}
@@ -220,7 +240,9 @@ struct NativeChatView: View {
                 switch panel {
                 case .photos,.imageFiles:EmptyView()
                 case .context(let room):ContextPanel(store:store,room:room,close:{self.panel = nil})
-                case .members(let room,let showMembers):MembersPanel(store:store,room:room,showMembers:showMembers,close:{self.panel = nil})
+                case .members(let room,let showMembers):MembersPanel(store:store,room:room,showMembers:showMembers,close:{self.panel = nil},addUsers:{self.panel = .inviteUsers(room)},addAgents:{self.panel = .inviteAgents(room)})
+                case .inviteUsers(let room):InviteUsersPanel(store:store,room:room,close:{self.panel = nil})
+                case .inviteAgents(let room):InviteAgentsPanel(store:store,room:room,close:{self.panel = nil})
                 case .new(let agent,let request,let origin):NamePrompt(title:"与 \(agent.name) 新建对话",note:"新对话将从空白开始，不携带当前对话的消息和上下文。原对话可从 Agent 主页查看。",close:{self.panel = nil}) {name in
                     guard let result = await store.tool("正在新建对话…",work:{try await $0.newThread(agent:agent.id,name:name,requestId:request)}) else {return false}
                     store.upsert(result);store.showNotice("独立对话已创建");if visible && origin == store.imageOrigin {openRoom(result)};return true
@@ -243,6 +265,12 @@ struct NativeChatView: View {
         }
     }
     private func hideKeyboard() {UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),to:nil,from:nil,for:nil)}
+    private func showConversationList() {
+        hideKeyboard();extras = false
+        if store.selected?.direct == true,let id = store.selected?.agentId,!id.isEmpty {showAgentProfile(id)}
+        else if store.availableAgents.isEmpty {store.error = "当前会话暂无可查看的 Agent"}
+        else {choosingAgent = "profile"}
+    }
     private func showAgentProfile(_ id:String) {hideKeyboard();extras = false;openAgent(id)}
     private func back() {if extras {extras = false} else {hideKeyboard();dismiss()}}
     private func send() {
@@ -304,5 +332,5 @@ struct NativeChatView: View {
         let date = Date(timeIntervalSince1970:Double(timestamp)/1000)
         return Calendar.current.isDateInToday(date) ? date.formatted(.dateTime.hour().minute()) : date.formatted(.dateTime.month().day().hour().minute())
     }
-    private func pendingMessage(_ out:Outgoing) -> Message {Message(id:0,clientMessageId:out.id,deviceId:out.deviceId,sender:out.sender,platform:"ios",text:out.text,createdAt:0,conversationId:out.conversationId,role:"user",agentId:nil,replyTo:nil,images:nil,userId:store.user?.id)}
+    private func pendingMessage(_ out:Outgoing) -> Message {Message(id:0,clientMessageId:out.id,deviceId:out.deviceId,sender:out.sender,platform:"ios",text:out.text,createdAt:0,conversationId:out.conversationId,role:"user",agentId:nil,replyTo:nil,images:nil,userId:store.user?.id,quote:out.quote,documents:out.documents)}
 }

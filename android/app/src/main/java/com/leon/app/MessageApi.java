@@ -29,7 +29,10 @@ final class MessageApi {
         final long id, createdAt;
         final String clientMessageId, deviceId, sender, platform, text, conversationId, role, agentId, userId;
         final List<String> imageIds = new ArrayList<>();
+        final Quote quote;final List<ChatDocument> documents;
         Message(JSONObject json) throws JSONException {
+            documents=ChatDocument.parse(json.optJSONArray("documents"));
+            quote=json.isNull("quote")?null:json.has("quote")?new Quote(json.getJSONObject("quote")):null;
             id = json.getLong("id"); createdAt = json.getLong("createdAt");
             clientMessageId = json.getString("clientMessageId"); deviceId = json.getString("deviceId");
             sender = json.getString("sender"); platform = json.getString("platform"); text = json.getString("text");
@@ -37,6 +40,30 @@ final class MessageApi {
             userId=json.isNull("userId")?"":json.optString("userId");
             JSONArray images=json.optJSONArray("images");if(images!=null)for(int i=0;i<images.length();i++)imageIds.add(images.getJSONObject(i).getString("id"));
         }
+    }
+    static final class Quote {
+        final long id;final String sender,text;final JSONObject json;
+        Quote(JSONObject value)throws JSONException{json=value;id=value.getLong("id");sender=value.getString("sender");text=value.getString("text");}
+        Quote(Message message)throws JSONException{
+            id=message.id;sender=message.sender;text=message.text;JSONArray images=new JSONArray();for(String image:message.imageIds)images.put(new JSONObject().put("id",image));
+            json=new JSONObject().put("documents",new JSONArray(message.documents.stream().map(d->{try{return d.json();}catch(Exception e){throw new IllegalStateException(e);}}).collect(java.util.stream.Collectors.toList()))).put("id",id).put("sender",sender).put("text",text).put("images",images);
+        }
+        String preview(){return (json.optJSONArray("images")!=null&&json.optJSONArray("images").length()>0?"[图片] ":"")+(json.optJSONArray("documents")!=null&&json.optJSONArray("documents").length()>0?"[文件] ":"")+text.replace('\n',' ');}
+    }
+    static final class Favorite {
+        final long id,savedAt;final Message message;final String conversationName;
+        Favorite(JSONObject value)throws JSONException{id=value.getLong("id");savedAt=value.getLong("savedAt");message=new Message(value.getJSONObject("message"));conversationName=value.getString("conversationName");}
+    }
+    static final class FavoritePage {
+        final List<Favorite> results=new ArrayList<>();final boolean hasMore;final Long nextBefore;
+        FavoritePage(JSONObject value)throws JSONException{var rows=value.getJSONArray("results");for(int i=0;i<rows.length();i++)results.add(new Favorite(rows.getJSONObject(i)));hasMore=value.getBoolean("hasMore");nextBefore=value.isNull("nextBefore")?null:value.getLong("nextBefore");}
+    }
+    Favorite addFavorite(long message)throws Exception{return new Favorite(request("/api/device-messages/"+message+"/favorite",new JSONObject()));}
+    FavoritePage favorites(String query,Long before)throws Exception{return new FavoritePage(request("/api/device-messages/favorites?q="+encode(query)+(before==null?"":"&before="+before),null));}
+    void removeFavorite(long id)throws Exception{request("/api/device-messages/favorites/"+id+"/remove",new JSONObject());}
+    byte[] favoriteImage(long favorite,String image)throws Exception{
+        if(!image.matches("[a-fA-F0-9-]{36}"))throw new IOException("图片标识无效");
+        return requestBytes("/api/device-messages/favorites/"+favorite+"/images/"+image,null,"application/json",1024*1024);
     }
     static final class Agent {
         final String id, name, handle, provider, model, description, avatarId; final boolean enabled;
@@ -80,6 +107,10 @@ final class MessageApi {
     private static String encode(String value) throws Exception {return URLEncoder.encode(value,StandardCharsets.UTF_8.name());}
     List<Agent> agents() throws Exception { JSONArray rows=new JSONArray(requestText("/api/agents",null));List<Agent> result=new ArrayList<>();for(int i=0;i<rows.length();i++)result.add(new Agent(rows.getJSONObject(i)));return result; }
     List<Conversation> conversations() throws Exception { JSONArray rows=new JSONArray(requestText("/api/conversations",null));List<Conversation> result=new ArrayList<>();for(int i=0;i<rows.length();i++)result.add(new Conversation(rows.getJSONObject(i)));return result; }
+    Conversation branch(String room,long message,String requestId,String name)throws Exception {
+        if(message<=0||room==null||!room.matches("[A-Za-z0-9:-]{1,80}"))throw new IOException("分支消息标识无效");
+        return new Conversation(request("/api/conversations/"+room+"/branches",new JSONObject().put("messageId",message).put("requestId",requestId).put("name",name)));
+    }
     Conversation direct(String agentId) throws Exception { return new Conversation(request("/api/conversations/direct/"+agentId,new JSONObject())); }
     Conversation group(String name,List<String> agents,List<String> usernames)throws Exception{
         var body=new JSONObject().put("name",name).put("agentIds",new JSONArray(agents)).put("usernames",new JSONArray(usernames));
@@ -91,6 +122,9 @@ final class MessageApi {
         List<User> result=new ArrayList<>();
         for(int i=0;i<response.length();i++)result.add(new User(response.getJSONObject(i)));
         return result;
+    }
+    Conversation addAgents(String room,List<String> agentIds)throws Exception{
+        return new Conversation(request("/api/conversations/"+encode(room)+"/agents",new JSONObject().put("agentIds",new JSONArray(agentIds))));
     }
     void retryJob(Job job) throws Exception { request("/api/device-messages/"+job.messageId+"/agents/"+job.agentId+"/retry",new JSONObject()); }
     void heartbeat(String deviceId, String name) throws Exception { request("/api/device-messages/presence",new JSONObject().put("deviceId",deviceId).put("name",name).put("platform","android")); }
@@ -114,7 +148,49 @@ final class MessageApi {
         if (before != null) path += "&before=" + before;
         return new Page(request(path, null));
     }
-    Message send(JSONObject body) throws Exception { return new Message(request("/api/device-messages", body)); }
+    static final class SearchHit {
+        final Message message;final String conversationName;
+        SearchHit(Message message,String name){this.message=message;conversationName=name;}
+        SearchHit(JSONObject value)throws JSONException{message=new Message(value.getJSONObject("message"));conversationName=value.getString("conversationName");}
+    }
+    static final class SearchPage {
+        final List<SearchHit> results=new ArrayList<>();final boolean hasMore;final Long nextBefore;
+        SearchPage(JSONObject value)throws JSONException{
+            JSONArray rows=value.getJSONArray("results");for(int i=0;i<rows.length();i++)results.add(new SearchHit(rows.getJSONObject(i)));
+            hasMore=value.getBoolean("hasMore");nextBefore=value.isNull("nextBefore")?null:value.getLong("nextBefore");
+        }
+    }
+    static final class SearchContext {
+        final List<Message> messages=new ArrayList<>();final boolean hasOlder,hasNewer;final long historyRevision;
+        SearchContext(JSONObject value)throws JSONException{
+            JSONArray rows=value.getJSONArray("messages");for(int i=0;i<rows.length();i++)messages.add(new Message(rows.getJSONObject(i)));
+            hasOlder=value.getBoolean("hasOlder");hasNewer=value.getBoolean("hasNewer");historyRevision=value.getLong("historyRevision");
+        }
+    }
+    SearchPage search(String query,String room,Long before)throws Exception{
+        String path="/api/device-messages/search?q="+encode(query);
+        if(room!=null)path+="&conversationId="+encode(room);if(before!=null)path+="&before="+before;
+        return new SearchPage(request(path,null));
+    }
+    SearchContext searchContext(String room,long message,String direction)throws Exception{
+        return new SearchContext(request("/api/device-messages/context?conversationId="+encode(room)+"&messageId="+message+"&direction="+encode(direction),null));
+    }
+    Message send(JSONObject body) throws Exception {
+        if(body.has("quoteMessageId")&&!request("/api/device-messages/features",null).optBoolean("quotes"))throw new IOException("服务端尚未支持引用回复，请先升级服务端。");
+        var payload=new JSONObject(body.toString());payload.remove("quote");payload.remove("documents");return new Message(request("/api/device-messages",payload));
+    }
+    JSONObject notificationStatus()throws Exception{return request("/api/device-messages/notifications/status",null);}
+    JSONObject notifications(String device,Long after,boolean preview)throws Exception{return request("/api/device-messages/notifications?deviceId="+encode(device)+"&preview="+preview+(after==null?"":"&after="+after),null);}
+    void registerNotifications(JSONObject registration)throws Exception{request("/api/device-messages/notifications/devices",registration);}
+    void removeNotifications(String device)throws Exception{request("/api/device-messages/notifications/devices/"+encode(device)+"/remove",new JSONObject());}
+    void uploadDocument(ChatDocument doc,String room,byte[] data)throws Exception{
+        if(data.length>ChatDocument.MAX_BYTES)throw new IOException("文件超过 10 MB。");
+        requestBytes("/api/device-messages/documents?id="+encode(doc.id)+"&conversationId="+encode(room)+"&name="+encode(doc.name),data,"application/octet-stream");
+    }
+    byte[] document(String id,Long favorite)throws Exception{
+        if(!id.matches("[a-fA-F0-9-]{36}"))throw new IOException("文档标识无效。");
+        return requestBytes((favorite==null?"/api/device-messages/documents/":"/api/device-messages/favorites/"+favorite+"/documents/")+id,null,"application/octet-stream",ChatDocument.MAX_BYTES);
+    }
     void uploadImage(String id,String room,byte[] data) throws Exception {
         if(!id.matches("[a-fA-F0-9-]{36}")||data.length>5*1024*1024)throw new IOException("图片无效或过大");
         requestBytes("/api/device-messages/images?id="+id+"&conversationId="+URLEncoder.encode(room,StandardCharsets.UTF_8.name()),data,"image/jpeg");
@@ -142,7 +218,7 @@ final class MessageApi {
         HttpURLConnection connection = (HttpURLConnection) new URL(base + path).openConnection();
         try {
             connection.setInstanceFollowRedirects(false);
-            connection.setConnectTimeout(12000); connection.setReadTimeout(path.startsWith("/api/conversations/backups")?60000:15000);
+            connection.setConnectTimeout(12000); connection.setReadTimeout(path.endsWith("/branches")?90000:path.startsWith("/api/conversations/backups")?60000:15000);
             connection.setUseCaches(false);
             connection.setRequestProperty("Authorization", "Bearer " + token);
             connection.setRequestProperty("Accept", "application/json");
@@ -161,7 +237,7 @@ final class MessageApi {
             if (code == 413) throw new IOException("备份或图片超过服务允许的大小，请检查文件大小及服务端代理配置。");
             if (code < 200 || code >= 300) {
                 String reason = "请求失败（HTTP " + code + "），请稍后重试。";
-                if(code==404)reason=path.equals("/api/agents/usage")?"服务端尚未支持 Token 用量，请先升级服务端。":
+                if(code==404)reason=path.startsWith("/api/device-messages/search")?"服务端尚未支持聊天记录搜索，请先升级服务端。":path.equals("/api/agents/usage")?"服务端尚未支持 Token 用量，请先升级服务端。":
                     path.startsWith("/api/conversations/")?"服务端尚未支持此聊天功能，请先升级服务端。":"服务端尚未安装消息接口，请先升级服务端。";
                 InputStream failure = connection.getErrorStream();
                 if (failure != null) try (InputStream stream = failure; ByteArrayOutputStream out = new ByteArrayOutputStream()) {

@@ -15,6 +15,8 @@ struct Message: Codable, Identifiable, Equatable {
     let sender: String; let platform: String; let text: String; let createdAt: Int64
     var conversationId: String?; var role: String?; var agentId: String?; var replyTo: Int64?
     var images: [ChatImage]?; var userId: String?
+    var quote: MessageQuote? = nil
+    var documents:[DocumentAttachment]? = nil
     var date: Date { Date(timeIntervalSince1970: Double(createdAt) / 1000) }
 }
 struct AgentInfo: Codable, Identifiable, Equatable {
@@ -47,6 +49,10 @@ struct Outgoing: Codable, Identifiable, Equatable {
     var id: String { clientMessageId }
     let clientMessageId: String; let deviceId: String; let sender: String; let platform: String
     let text: String; let conversationId: String; var mentionAgentIds: [String] = []; var imageIds: [String] = []
+    var quoteMessageId: Int64? = nil
+    var documentIds:[String]? = nil
+    var quote: MessageQuote? = nil
+    var documents:[DocumentAttachment]? = nil
 }
 struct DraftImage: Identifiable, Equatable, Sendable { let id: String; let data: Data }
 struct ImageOrigin: Equatable, Sendable { let connection: UUID; let room: String }
@@ -59,11 +65,20 @@ struct ModelUsage: Codable, Identifiable, Equatable {
 struct ConversationContext: Codable {
     let conversationId: String; let recentRounds: Int; let inputTokenBudget: Int; let topicStartedAfter: Int64
     let agents: [AgentContextInfo]
+    var compressionMode: String? = nil
+}
+struct ContextFact: Codable, Identifiable {
+    var id: String { subjectId + ":" + kind + ":" + key }
+    let subjectId: String; let speaker: String; let kind: String; let key: String
+    let value: String; let sourceMessageId: Int64
 }
 struct AgentContextInfo: Codable, Identifiable {
     var id: String { agentId }
     let agentId: String; let agentName: String; let summary: String
     let lastCompressedAt: Int64; let estimatedInputTokens: Int; let retainedRounds: Int; let phase: String
+    var facts: [ContextFact]? = nil
+    var retrievedRounds: Int? = nil
+    var compressionFallback: Bool? = nil
 }
 struct ClearHistoryPreview: Codable {
     let conversationId: String; let conversationName: String; let messageCount: Int64
@@ -98,4 +113,45 @@ enum Endpoint {
         components.path = ""; components.host = host.lowercased()
         return components.url!
     }
+}
+
+
+struct ChatSearchHit: Codable, Identifiable {
+    let message: Message
+    let conversationName: String
+    var id: Int64 { message.id }
+}
+struct ChatSearchPage: Codable {
+    let results: [ChatSearchHit]
+    let hasMore: Bool
+    let nextBefore: Int64?
+}
+struct ChatSearchContext: Codable {
+    let messages: [Message]
+    let hasOlder: Bool
+    let hasNewer: Bool
+    let historyRevision: Int64
+}
+
+
+struct MessageQuote: Codable, Identifiable, Equatable {
+    let id: Int64
+    let sender: String
+    let text: String
+    let images: [ChatImage]
+    var documents:[DocumentAttachment]? = nil
+    var preview: String { (images.isEmpty ? "" : "[图片] ") + ((documents ?? []).map {"[文件] "+$0.name}.joined(separator:" ")) + text.replacingOccurrences(of:"\n",with:" ") }
+    init(message: Message) { id=message.id;sender=message.sender;text=message.text;images=message.images ?? [];documents=message.documents }
+    init(id:Int64,sender:String,text:String,images:[ChatImage]) {self.id=id;self.sender=sender;self.text=text;self.images=images}
+}
+struct FavoriteItem: Codable, Identifiable, Equatable {
+    let id: Int64
+    let message: Message
+    let conversationName: String
+    let savedAt: Int64
+}
+struct FavoritePage: Codable {
+    let results: [FavoriteItem]
+    let hasMore: Bool
+    let nextBefore: Int64?
 }

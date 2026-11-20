@@ -265,6 +265,7 @@ struct MentionComposer: View {
                 .frame(height: 82).background(Color(nsColor: .textBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(.secondary.opacity(0.15)))
         }
+        .onChange(of:store.quotedMessage?.id) {_ in if store.quotedMessage != nil,let editor=state.editor {editor.window?.makeFirstResponder(editor)}}
     }
     private func chooseImages() {
         let panel = NSOpenPanel()

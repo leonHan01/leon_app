@@ -3,13 +3,99 @@ import CryptoKit
 
 @MainActor
 final class ChatStore: ObservableObject {
+    func openQuotedRoom(_ id:String) {selectConversation(id)}
+    @Published var branchMessage:Message?
+    func beginBranch(_ message:Message) {
+        guard message.id>0,message.conversationId == selectedConversationId,api != nil else {return}
+        branchMessage=message
+    }
+    func createBranch(_ message:Message,name:String,requestId:String) async throws -> Conversation {
+        guard message.id>0,let room=message.conversationId,let api else {throw ClientError.message("请先连接服务器并选择已发送成功的消息。")}
+        let connection=connectionId
+        do {
+            let result=try await api.branch(room:room,message:message.id,name:name,requestId:requestId)
+            guard connection==connectionId,!Task.isCancelled else {throw CancellationError()}
+            if !conversations.contains(where:{$0.id==result.id}) {conversations.append(result)}
+            return result
+        } catch {
+            throw error
+        }
+    }
+    @Published var quotedMessage: MessageQuote?
+    private var quoteDrafts: [String:MessageQuote] = [:]
+    @Published var collectionNotice = ""
+    private var favoriteRequests = Set<Int64>()
+    func quoteMessage(_ message:Message) {
+        guard message.id>0, message.conversationId == selectedConversationId else {return}
+        quotedMessage=MessageQuote(message:message)
+    }
+    func cancelQuote(){quotedMessage=nil}
+    func favoriteMessage(_ message:Message) async {
+        guard message.id>0,let api,!favoriteRequests.contains(message.id) else {return}
+        let connection=connectionId;favoriteRequests.insert(message.id)
+        defer {if connection==connectionId {favoriteRequests.remove(message.id)}}
+        do {_ = try await api.addFavorite(message.id);guard connection==connectionId else {return};collectionNotice="已收藏";Task {try? await Task.sleep(nanoseconds:2_000_000_000);if connection==self.connectionId {self.collectionNotice=""}}}
+        catch {if connection==connectionId {self.error=error.localizedDescription}}
+    }
+    func favoritePage(query:String,before:Int64?) async throws -> FavoritePage {
+        guard let api else {throw ClientError.message("请先连接服务器。")}
+        let result=try await api.favorites(query:query,before:before)
+        guard self.api === api else {throw CancellationError()};return result
+    }
+    func deleteFavorite(_ id:Int64) async throws {
+        guard let api else {throw ClientError.message("请先连接服务器。")};try await api.removeFavorite(id)
+        guard self.api === api else {throw CancellationError()}
+    }
+    func favoriteImage(_ favorite:Int64,image:String) async throws -> Data {
+        guard let api else {throw ClientError.message("请先连接服务器。")};let data=try await api.favoriteImage(favorite,image:image)
+        guard self.api === api else {throw CancellationError()};return data
+    }
+    var searchConnectionID: ObjectIdentifier? { api.map { ObjectIdentifier($0) } }
+    func searchMessages(query: String, room: String?, before: Int64?) async throws -> ChatSearchPage {
+        guard let api else { throw ClientError.message("请先连接服务器。") }
+        let result = try await api.search(query:query,room:room,before:before)
+        guard self.api === api else { throw CancellationError() }
+        return result
+    }
+    func searchHistory(room: String, message: Int64, direction: String) async throws -> ChatSearchContext {
+        guard let api else { throw ClientError.message("请先连接服务器。") }
+        let result = try await api.searchContext(room:room,message:message,direction:direction)
+        guard self.api === api else { throw CancellationError() }
+        return result
+    }
     @Published var messages: [Message] = []
     @Published var pending: [Outgoing] = []
     @Published var draft = ""
+    @Published var draftDocuments:[DraftDocument]=[]
+    @Published var importingDocuments=false
+    private var documentDrafts:[String:[DraftDocument]]=[:]
+    private var documentGeneration=UUID()
+    var notificationAPI:(any NotificationAPI)? {api as? any NotificationAPI}
+    var notificationDevice:String {deviceId}
+    var documentRoom:String {selectedConversationId}
+    func addDocuments(_ urls:[URL],room:String,connection:ObjectIdentifier?){
+        guard hasConnection,!importingDocuments,!clearBusy,searchConnectionID==connection else {return}
+        let count=room==selectedConversationId ? draftDocuments.count : documentDrafts[room]?.count ?? 0
+        guard count+urls.count<=4 else {error="每条消息最多发送 4 个文档。";return}
+        let stamp=documentGeneration;importingDocuments=true
+        Task {
+            do {
+                let docs=try await Task.detached(priority:.userInitiated){try urls.map {try DraftDocument.read($0)}}.value
+                guard stamp==documentGeneration,searchConnectionID==connection else {return}
+                if room==selectedConversationId {draftDocuments+=docs}else{documentDrafts[room,default:[]]+=docs}
+            }catch {if stamp==documentGeneration {self.error=error.localizedDescription}}
+            if stamp==documentGeneration {importingDocuments=false}
+        }
+    }
+    func removeDocument(_ id:String){draftDocuments.removeAll {$0.id==id}}
+    func documentData(_ id:String,favorite:Int64?=nil) async throws -> Data {
+        guard let api else {throw ClientError.message("请先连接服务器。")};let data=try await api.document(id,favorite:favorite)
+        guard self.api === api else {throw CancellationError()};return data
+    }
     @Published var draftImages: [ChatImageDraft] = []
     @Published var preparingImages = false
     private var imageDrafts: [String: [ChatImageDraft]] = [:]
-    var canSend: Bool { !openingDirectConversation && !clearBusy && !exportBusy && hasConnection && !configuring && !preparingImages && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty) && draft.utf16.count <= 8000 }
+    var canSend: Bool { !openingDirectConversation && !clearBusy && !exportBusy && hasConnection && !configuring && !preparingImages && !importingDocuments && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty || !draftDocuments.isEmpty) && draft.utf16.count <= 8000 }
     func addImages(_ sources: [Data]) async {
         guard hasConnection, !configuring, !preparingImages else { return }
         let room = selectedConversationId, connection = connectionId
@@ -127,15 +213,17 @@ final class ChatStore: ObservableObject {
             guard connection == connectionId else { return }
             let ids = Set(jobs.map { $0.id })
             dismissedJobKeys = Set(dismissedJobKeys.filter { !ids.contains($0.components(separatedBy: "#")[0]) }); saveDismissals()
-            for message in pending where (message.conversationId ?? "shared") == room { ChatImageFiles.remove(message.imageIds ?? [], scope: pendingKey) }
+            for message in pending where (message.conversationId ?? "shared") == room { ChatImageFiles.remove(message.imageIds ?? [], scope: pendingKey);DocumentFiles.remove(message.documentIds ?? [],scope:pendingKey) }
             pending.removeAll { ($0.conversationId ?? "shared") == room }; savePending()
-            drafts[room] = ""; imageDrafts[room] = []
+            drafts[room] = ""; imageDrafts[room] = [];documentDrafts.removeValue(forKey:room);documentGeneration=UUID();importingDocuments=false
             roomCache.removeValue(forKey: room); roomCacheOrder.removeAll { $0 == room }
             let prefix = pendingKey + ".archive." + room + ":"
             for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix(prefix) { UserDefaults.standard.removeObject(forKey: key) }
             compressionRequests = compressionRequests.filter { !$0.key.hasPrefix(room + ":") }
             api.clearImageCache()
             if room == selectedConversationId {
+                quotedMessage=nil;quoteDrafts.removeValue(forKey:room)
+                draftDocuments=[]
                 generation = UUID(); draft = ""; draftImages = []; messages = []; jobs = []; contextOperations = []; contextInfo = nil
                 historyRevision = result.historyRevision; initialLoaded = false; hasOlder = false; loadingOlder = false
                 exportProgress = ""; exportError = nil; contextError = nil
@@ -147,6 +235,7 @@ final class ChatStore: ObservableObject {
     private func receiveHistoryRevision(_ revision: Int64?) {
         guard let revision else { return }
         if (historyRevision != nil && historyRevision != revision) || (historyRevision == nil && revision > 0) {
+            quotedMessage=nil;quoteDrafts.removeValue(forKey:selectedConversationId)
             messages = []; jobs = []; contextOperations = []; contextInfo = nil; hasOlder = false
             roomCache.removeValue(forKey: selectedConversationId); roomCacheOrder.removeAll { $0 == selectedConversationId }
             api?.clearImageCache()
@@ -364,11 +453,13 @@ final class ChatStore: ObservableObject {
         navigationRequest = UUID()
         guard id != selectedConversationId else { return }
         rememberRoom()
+        quoteDrafts[selectedConversationId]=quotedMessage
         drafts[selectedConversationId] = draft
-        imageDrafts[selectedConversationId] = draftImages
+        imageDrafts[selectedConversationId] = draftImages;documentDrafts[selectedConversationId]=draftDocuments
         selectedConversationId = id
+        quotedMessage=quoteDrafts[id]
         draft = drafts[id] ?? ""
-        draftImages = imageDrafts[id] ?? []
+        draftImages = imageDrafts[id] ?? [];draftDocuments=documentDrafts[id] ?? []
         generation = UUID(); contextError = nil; loadingOlder = false
         let cached = roomCache[id]
         historyRevision = cached?.historyRevision
@@ -512,6 +603,8 @@ final class ChatStore: ObservableObject {
             for creation in directCreations.values { creation.task.cancel() }
             directCreations = [:]; unconfirmedDirectRooms = []
             directoryRefresh?.cancel(); directoryRefresh = nil; lastDirectoryRefresh = Date()
+            quotedMessage=nil;quoteDrafts=[:];favoriteRequests=[];collectionNotice=""
+            documentGeneration=UUID();importingDocuments=false;draftDocuments=[];documentDrafts=[:]
             selectedConversationId = "shared"; drafts = [:]; imageDrafts = [:]; draftImages = []; contextInfo = nil; contextError = nil; contextOperations = []; compressionRequests = [:]
             agents = directory; conversations = rooms; jobs = page.jobs ?? []
             poller?.cancel()
@@ -629,14 +722,15 @@ final class ChatStore: ObservableObject {
     func sendDraft() async {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canSend else { return }
-        if let command = ChatCommand.exact(text) { await performCommand(command); return }
-        if ChatCommand.isAttempt(text) { error = "请选择 / 菜单中的有效命令，命令无需附加文字。"; return }
-        do { for image in draftImages { try ChatImageFiles.save(image, scope: pendingKey) } }
+        if quotedMessage == nil,draftDocuments.isEmpty, let command = ChatCommand.exact(text) { await performCommand(command); return }
+        if quotedMessage == nil,draftDocuments.isEmpty, ChatCommand.isAttempt(text) { error = "请选择 / 菜单中的有效命令，命令无需附加文字。"; return }
+        do {for doc in draftDocuments {try DocumentFiles.save(doc,scope:pendingKey)}; for image in draftImages { try ChatImageFiles.save(image, scope: pendingKey) } }
         catch { self.error = "无法保存图片，请检查磁盘空间后重试。"; return }
-        let message = Outgoing(clientMessageId: UUID().uuidString.lowercased(), deviceId: deviceId, sender: sender, platform: "macos", text: text, conversationId: selectedConversationId, mentionAgentIds: [], imageIds: draftImages.map(\.id))
+        let message = Outgoing(clientMessageId: UUID().uuidString.lowercased(), deviceId: deviceId, sender: sender, platform: "macos", text: text, conversationId: selectedConversationId, mentionAgentIds: [], imageIds: draftImages.map(\.id), quoteMessageId:quotedMessage?.id, documentIds:draftDocuments.map(\.id), quote:quotedMessage, documents:draftDocuments.map(\.attachment))
         pending.append(message)
         savePending()
-        draft = ""; draftImages = []; imageDrafts[selectedConversationId] = []
+        quotedMessage=nil;quoteDrafts.removeValue(forKey:selectedConversationId)
+        draft = ""; draftImages = []; imageDrafts[selectedConversationId] = [];draftDocuments=[];documentDrafts[selectedConversationId]=[]
         await retry(message)
     }
 
@@ -646,6 +740,10 @@ final class ChatStore: ObservableObject {
         sending.insert(message.id)
         defer { sending.remove(message.id) }
         do {
+            for document in message.documents ?? [] {
+                let data=try DocumentFiles.read(document.id,scope:pendingKey)
+                guard current==connectionId else {return};try await api.uploadDocument(document,room:message.conversationId ?? "shared",data:data)
+            }
             for id in message.imageIds ?? [] {
                 if let data = ChatImageFiles.read(id, scope: pendingKey) {
                     _ = try await api.uploadImage(id: id, conversation: message.conversationId ?? "shared", data: data)
@@ -656,7 +754,7 @@ final class ChatStore: ObservableObject {
             guard current == connectionId else { return }
             pending.removeAll { $0.id == message.id }
             savePending()
-            ChatImageFiles.remove(message.imageIds ?? [], scope: pendingKey)
+            ChatImageFiles.remove(message.imageIds ?? [], scope: pendingKey);DocumentFiles.remove(message.documentIds ?? [],scope:pendingKey)
             beginPolling()
         } catch { if current == connectionId { self.error = friendly(error) } }
     }
@@ -672,7 +770,7 @@ final class ChatStore: ObservableObject {
         guard !pending.isEmpty else { return }
         let confirmed = Set(messages.filter { $0.deviceId == deviceId }.map(\.clientMessageId))
         let count = pending.count
-        for message in pending where confirmed.contains(message.clientMessageId) { ChatImageFiles.remove(message.imageIds ?? [], scope: pendingKey) }
+        for message in pending where confirmed.contains(message.clientMessageId) { ChatImageFiles.remove(message.imageIds ?? [], scope: pendingKey);DocumentFiles.remove(message.documentIds ?? [],scope:pendingKey) }
         pending.removeAll { confirmed.contains($0.clientMessageId) }
         if count != pending.count { savePending() }
     }

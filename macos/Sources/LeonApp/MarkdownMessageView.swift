@@ -5,17 +5,21 @@ struct MarkdownMessageView: View, Equatable {
     @Environment(\.colorScheme) private var colorScheme
     let source: String
     let mine: Bool
+    var onQuote: (() -> Void)?
+    var onFavorite: (() -> Void)?
+    var onBranch: (() -> Void)?
 
-    init(_ source: String, mine: Bool) {
+    init(_ source: String, mine: Bool, onQuote:(()->Void)? = nil, onFavorite:(()->Void)? = nil, onBranch:(()->Void)? = nil) {
         self.source = source
         self.mine = mine
+        self.onQuote=onQuote;self.onFavorite=onFavorite;self.onBranch=onBranch
     }
 
     static func == (lhs: Self, rhs: Self) -> Bool { lhs.source == rhs.source && lhs.mine == rhs.mine }
 
     var body: some View {
         if RichMarkdown.isRequired(source) {
-            RichMarkdownMessageView(source: source, mine: mine)
+            RichMarkdownMessageView(source: source, mine: mine, onQuote:onQuote,onFavorite:onFavorite,onBranch:onBranch)
         } else {
             nativeBody
         }
@@ -46,6 +50,9 @@ struct MarkdownMessageView: View, Equatable {
         })
         .contextMenu {
             Button("复制原文") { copy(source) }
+            if let onQuote {Button("引用",action:onQuote)}
+            if let onFavorite {Button("收藏",action:onFavorite)}
+                if let onBranch {Button("从这里创建分支",action:onBranch)}
         }
     }
 

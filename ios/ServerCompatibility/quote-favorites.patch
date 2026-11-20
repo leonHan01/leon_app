@@ -1,0 +1,361 @@
+--- a/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java
++++ b/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java
+@@ -17,12 +17,16 @@
+         this.jdbc=jdbc; transaction=new TransactionTemplate(new DataSourceTransactionManager(Objects.requireNonNull(jdbc.getDataSource())));
+     }
+     public record Message(long id,String clientMessageId,String deviceId,String sender,String platform,String text,long createdAt,
+-                          String conversationId,String role,String agentId,Long replyTo,List<Image> images,String userId) {
++                          String conversationId,String role,String agentId,Long replyTo,List<Image> images,String userId,Quote quote) {
++        public Message(long id,String clientMessageId,String deviceId,String sender,String platform,String text,long createdAt,String conversationId,String role,String agentId,Long replyTo,List<Image> images,String userId){this(id,clientMessageId,deviceId,sender,platform,text,createdAt,conversationId,role,agentId,replyTo,images,userId,null);}
++        String modelText(){return quote==null?text:"[引用 · "+quote.sender()+"]\n"+quote.text()+(quote.images().isEmpty()?"":"\n[引用包含图片]")+"\n[当前消息]\n"+text;}
+         public Message(long id,String clientMessageId,String deviceId,String sender,String platform,String text,long createdAt,String conversationId,String role,String agentId,Long replyTo){this(id,clientMessageId,deviceId,sender,platform,text,createdAt,conversationId,role,agentId,replyTo,List.of(),null);}
+     }
++    public record Quote(long id,String sender,String text,List<Image> images) {}
+     public record Image(String id,String mimeType,int width,int height,int byteCount) {}
+     public record Send(String clientMessageId,String deviceId,String sender,String platform,String text,
+-                       String conversationId,List<String> mentionAgentIds,List<String> imageIds) {
++                       String conversationId,List<String> mentionAgentIds,List<String> imageIds,Long quoteMessageId) {
++        public Send(String clientMessageId,String deviceId,String sender,String platform,String text,String conversationId,List<String> mentionAgentIds,List<String> imageIds){this(clientMessageId,deviceId,sender,platform,text,conversationId,mentionAgentIds,imageIds,null);}
+         public Send(String clientMessageId,String deviceId,String sender,String platform,String text,String conversationId,List<String> mentionAgentIds){this(clientMessageId,deviceId,sender,platform,text,conversationId,mentionAgentIds,List.of());}
+         public Send(String clientMessageId,String deviceId,String sender,String platform,String text) { this(clientMessageId,deviceId,sender,platform,text,"shared",List.of()); }
+     }
+@@ -37,7 +41,7 @@
+     public record Work(long messageId,String agentId,String conversationId,String userId) {
+         Work(long messageId,String agentId,String conversationId){this(messageId,agentId,conversationId,null);}
+     }
+-    private final RowMapper<Message> ROW=(rs,n)->new Message(rs.getLong("id"),rs.getString("client_message_id"),rs.getString("device_id"),rs.getString("sender"),rs.getString("platform"),rs.getString("body"),rs.getLong("created_at"),rs.getString("conversation_id"),rs.getString("message_role"),rs.getString("agent_id"),rs.getObject("reply_to",Long.class),images(rs.getString("image_ids")),rs.getString("user_id"));
++    private final RowMapper<Message> ROW=(rs,n)->new Message(rs.getLong("id"),rs.getString("client_message_id"),rs.getString("device_id"),rs.getString("sender"),rs.getString("platform"),rs.getString("body"),rs.getLong("created_at"),rs.getString("conversation_id"),rs.getString("message_role"),rs.getString("agent_id"),rs.getObject("reply_to",Long.class),images(rs.getString("image_ids")),rs.getString("user_id"),rs.getObject("quote_message_id",Long.class)==null?null:new Quote(rs.getLong("quote_message_id"),rs.getString("quote_sender"),rs.getString("quote_body"),images(rs.getString("quote_image_ids"))));
+     private static final RowMapper<Conversation> CONVERSATION=(rs,n)->new Conversation(rs.getString("id"),rs.getString("name"),rs.getString("kind"),rs.getString("agent_id"),split(rs.getString("agent_ids")),rs.getString("owner_id"));
+     private List<Image> images(String ids) {
+         if(ids==null||ids.isBlank())return List.of();
+@@ -67,6 +71,10 @@
+         jdbc.execute("ALTER TABLE device_message ADD COLUMN IF NOT EXISTS image_ids VARCHAR(200) DEFAULT '' NOT NULL");
+         jdbc.execute("ALTER TABLE device_message ADD COLUMN IF NOT EXISTS mention_ids VARCHAR(1500) DEFAULT '' NOT NULL");
+         jdbc.execute("ALTER TABLE device_message ADD COLUMN IF NOT EXISTS user_id VARCHAR(36)");
++        jdbc.execute("ALTER TABLE device_message ADD COLUMN IF NOT EXISTS quote_message_id BIGINT");
++        jdbc.execute("ALTER TABLE device_message ADD COLUMN IF NOT EXISTS quote_sender VARCHAR(60) DEFAULT '' NOT NULL");
++        jdbc.execute("ALTER TABLE device_message ADD COLUMN IF NOT EXISTS quote_body VARCHAR(8000) DEFAULT '' NOT NULL");
++        jdbc.execute("ALTER TABLE device_message ADD COLUMN IF NOT EXISTS quote_image_ids VARCHAR(200) DEFAULT '' NOT NULL");
+         jdbc.execute("CREATE INDEX IF NOT EXISTS idx_device_message_conversation ON device_message(conversation_id,id)");
+         jdbc.execute("CREATE TABLE IF NOT EXISTS chat_conversation (id VARCHAR(80) PRIMARY KEY,name VARCHAR(60) NOT NULL,kind VARCHAR(16) NOT NULL,agent_id VARCHAR(36),agent_ids VARCHAR(1500) NOT NULL)");
+         jdbc.execute("ALTER TABLE chat_conversation ADD COLUMN IF NOT EXISTS owner_id VARCHAR(36)");
+@@ -148,7 +156,8 @@
+         return String.join(",",input.mentionAgentIds().stream().map(DeviceMessageStore::uuid).distinct().sorted().toList());
+     }
+     private static void validate(Send input) {
+-        if(input==null) throw bad("消息不能为空"); uuid(input.clientMessageId()); uuid(input.deviceId()); mentions(input);
++        if(input==null) throw bad("消息不能为空");
++        if(input.quoteMessageId()!=null&&input.quoteMessageId()<=0)throw bad("引用消息标识无效"); uuid(input.clientMessageId()); uuid(input.deviceId()); mentions(input);
+         String name=input.sender()==null?"":input.sender().strip();
+         if(name.isBlank()||name.length()>60||name.codePoints().anyMatch(Character::isISOControl)) throw bad("设备名称应为 1–60 字且不能含控制字符");
+         if(!Set.of("macos","android","ios").contains(input.platform()==null?"":input.platform())) throw bad("设备平台无效");
+@@ -164,7 +173,7 @@
+         if(userId!=null && !userId.equals(jdbc.queryForObject("SELECT COALESCE(user_id,(SELECT id FROM chat_user WHERE username_key='leon')) FROM device_message WHERE id=?",String.class,saved.id())))
+             throw failure(HttpStatus.CONFLICT,"消息标识已被使用");
+         String previous=jdbc.queryForObject("SELECT mention_ids FROM device_message WHERE id=?",String.class,saved.id());
+-        if(!saved.text().equals(input.text())||!saved.sender().equals(input.sender().strip())||!saved.platform().equals(input.platform())||!saved.conversationId().equals(conversationId(input))||!Objects.equals(previous,mentions(input))||!saved.images().stream().map(Image::id).toList().equals(imageIds(input)))
++        if(!Objects.equals(saved.quote()==null?null:saved.quote().id(),input.quoteMessageId())||!saved.text().equals(input.text())||!saved.sender().equals(input.sender().strip())||!saved.platform().equals(input.platform())||!saved.conversationId().equals(conversationId(input))||!Objects.equals(previous,mentions(input))||!saved.images().stream().map(Image::id).toList().equals(imageIds(input)))
+             throw failure(HttpStatus.CONFLICT,"相同消息标识不能发送不同内容或会话");
+         return saved;
+     }
+@@ -178,9 +187,11 @@
+         Long queued=jdbc.queryForObject("SELECT COUNT(*) FROM chat_agent_job WHERE status IN ('PENDING','RUNNING')",Long.class);
+         if(queued+targets.size()>256) throw failure(HttpStatus.TOO_MANY_REQUESTS,"Agent 队列已满，请稍后发送");
+         var ids=imageIds(input);
++        var quote=input.quoteMessageId()==null?null:message(input.quoteMessageId());
++        if(quote!=null&&!quote.conversationId().equals(conversation))throw bad("只能引用当前会话中的消息");
+         for(String id:ids)if(jdbc.queryForObject("SELECT COUNT(*) FROM chat_message_image WHERE id=? AND conversation_id=?",Integer.class,id,conversation)!=1)throw bad("图片未上传或不属于当前会话，请重新添加图片");
+         return transaction.execute(status -> {
+-            jdbc.update("INSERT INTO device_message(client_message_id,device_id,sender,platform,body,created_at,conversation_id,mention_ids,image_ids,user_id) VALUES(?,?,?,?,?,?,?,?,?,?)",uuid(input.clientMessageId()),uuid(input.deviceId()),input.sender().strip(),input.platform(),input.text(),System.currentTimeMillis(),conversation,mentions(input),String.join(",",ids),userId);
++            jdbc.update("INSERT INTO device_message(client_message_id,device_id,sender,platform,body,created_at,conversation_id,mention_ids,image_ids,user_id,quote_message_id,quote_sender,quote_body,quote_image_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",uuid(input.clientMessageId()),uuid(input.deviceId()),input.sender().strip(),input.platform(),input.text(),System.currentTimeMillis(),conversation,mentions(input),String.join(",",ids),userId,quote==null?null:quote.id(),quote==null?"":quote.sender(),quote==null?"":quote.text(),quote==null?"":String.join(",",quote.images().stream().map(Image::id).toList()));
+             Message inserted=jdbc.query("SELECT * FROM device_message WHERE device_id=? AND client_message_id=?",ROW,uuid(input.deviceId()),uuid(input.clientMessageId())).getFirst();
+             for(var target:targets) jdbc.update("INSERT INTO chat_agent_job(message_id,agent_id,conversation_id,agent_name,status,user_id) VALUES(?,?,?,?,'PENDING',?)",inserted.id(),target.id(),conversation,target.name(),userId);
+             return inserted;
+@@ -201,6 +212,11 @@
+             jdbc.update("INSERT INTO device_message(client_message_id,device_id,sender,platform,body,created_at,conversation_id,message_role,agent_id) VALUES(?,?,?,?,?,?,?,'assistant',?)",messageId,agent.id(),agent.name(),"agent",text,System.currentTimeMillis(),room,agent.id());
+             return jdbc.query("SELECT * FROM device_message WHERE device_id=? AND client_message_id=?",ROW,agent.id(),messageId).getFirst();
+         });
++    }
++    public synchronized Message message(long id) {
++        var rows=jdbc.query("SELECT * FROM device_message WHERE id=?",ROW,id);
++        if(rows.isEmpty())throw failure(HttpStatus.NOT_FOUND,"原消息已删除或不存在");
++        return rows.getFirst();
+     }
+     public synchronized Page page(Long after,Long before,int limit) { return page("shared",after,before,limit); }
+     public synchronized Page page(String conversation,Long after,Long before,int limit) {
+@@ -323,6 +339,6 @@
+         if(value==null||!value.matches("(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")) throw bad("消息或设备标识必须为 UUID");
+         return value.toLowerCase(Locale.ROOT);
+     }
+-    private static ResponseStatusException bad(String message) { return failure(HttpStatus.BAD_REQUEST,message); }
++    static ResponseStatusException bad(String message) { return failure(HttpStatus.BAD_REQUEST,message); }
+     static ResponseStatusException failure(HttpStatus status,String message) { return new ResponseStatusException(status,message); }
+ }
+--- a/src/main/java/com/leon/workflow/messaging/AgentContextManager.java
++++ b/src/main/java/com/leon/workflow/messaging/AgentContextManager.java
+@@ -343,8 +343,10 @@
+         var messages=new ArrayList<Map<String,String>>();
+         for(var row:rows) {
+             boolean mine="assistant".equals(row.role())&&agent.id().equals(row.agentId());
+-            String content=mine?row.text():("assistant".equals(row.role())?"[其他 Agent · ":"[用户 · ")+row.sender()+"]："+row.text();
+-            messages.add(ChatImageService.message(mine?"assistant":"user",clean(content,key),row.images()));
++            String content=mine?row.modelText():("assistant".equals(row.role())?"[其他 Agent · ":"[用户 · ")+row.sender()+"]："+row.modelText();
++            var attachments=new ArrayList<>(row.images());
++            if(row.quote()!=null)for(var image:row.quote().images())if(attachments.stream().noneMatch(i->i.id().equals(image.id())))attachments.add(image);
++            messages.add(ChatImageService.message(mine?"assistant":"user",clean(content,key),attachments));
+         }
+         return new Turn(anchor,List.copyOf(messages));
+     }
+--- a/src/main/java/com/leon/workflow/messaging/ChatBackupService.java
++++ b/src/main/java/com/leon/workflow/messaging/ChatBackupService.java
+@@ -112,6 +112,11 @@
+                     jdbc.update("INSERT INTO device_message(client_message_id,device_id,sender,platform,body,created_at,conversation_id,message_role,agent_id,reply_to,image_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?)",clientId,message.deviceId(),message.sender(),message.platform(),message.text(),message.createdAt(),room,message.role(),agent,reply,imageIds);
+                     long id=jdbc.queryForObject("SELECT id FROM device_message WHERE device_id=? AND client_message_id=?",Long.class,message.deviceId(),clientId);idMap.put(message.id(),id);
+                 }
++                for(var message:backup.messages())if(message.quote()!=null){
++                    var q=message.quote();Long targetId=idMap.get(q.id());
++                    if(targetId==null)throw bad("备份引用消息不存在");
++                    jdbc.update("UPDATE device_message SET quote_message_id=?,quote_sender=?,quote_body=?,quote_image_ids=? WHERE id=?",targetId,q.sender(),q.text(),String.join(",",q.images().stream().map(image->imageMap.get(image.id())).toList()),idMap.get(message.id()));
++                }
+                 jdbc.update("INSERT INTO chat_context_policy(conversation_id,recent_rounds,after_id,epoch) VALUES(?,?,?,0)",room,backup.recentRounds(),boundary(idMap,backup.topicStartedAfter()));
+                 for(var memory:backup.memories())jdbc.update("INSERT INTO chat_context_summary(conversation_id,agent_id,epoch,through_id,summary,created_at) VALUES(?,?,0,?,?,?)",room,remapAgent(memory.agentId(),source,directAgent),boundary(idMap,memory.throughId()),memory.summary(),memory.createdAt());
+                 jdbc.update("INSERT INTO chat_backup_import(request_id,source_hash,target_agent,conversation_id) VALUES(?,?,?,?)",request,hash,target,room);
+@@ -142,6 +147,10 @@
+             for(var image:m.images()){
+                 String id=DeviceMessageStore.uuid(image.id());if(!files.containsKey(id)||!perMessage.add(id))throw bad("备份缺少图片或图片重复");usedImages.add(id);
+             }
++            if(m.quote()!=null){
++                var q=m.quote();var original=ids.get(q.id());
++                if(original==null||!Objects.equals(q.sender(),original.sender())||!Objects.equals(q.text(),original.text())||!Objects.equals(q.images(),original.images()))throw bad("备份引用消息无效");
++            }
+             previous=m.id();ids.put(m.id(),m);
+         }
+         if(!files.keySet().equals(usedImages))throw bad("备份图片与消息不匹配");
+--- a/src/main/java/com/leon/workflow/messaging/DeviceMessageController.java
++++ b/src/main/java/com/leon/workflow/messaging/DeviceMessageController.java
+@@ -12,8 +12,9 @@
+     private final DeviceMessageStore store;
+     private final AgentChatService chat;
+     private final ChatAccess access;
+-    public DeviceMessageController(DeviceMessageStore store,AgentChatService chat,ChatAccess access){
+-        this.store=store;this.chat=chat;this.access=access;
++    private final ChatFavorites favorites;
++    public DeviceMessageController(DeviceMessageStore store,AgentChatService chat,ChatAccess access,ChatFavorites favorites){
++        this.store=store;this.chat=chat;this.access=access;this.favorites=favorites;
+     }
+ 
+     @GetMapping
+@@ -41,13 +42,31 @@
+             .body(store.searchContext(access.room(request,conversationId,false),messageId,direction,limit));
+     }
+ 
++    @GetMapping("/features") public ResponseEntity<?> features(){
++        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(java.util.Map.of("quotes",true,"favorites",true));
++    }
++    @GetMapping("/favorites") public ResponseEntity<ChatFavorites.Page> favorites(@RequestParam(defaultValue="") String q,@RequestParam(required=false) Long before,@RequestParam(defaultValue="30") int limit,HttpServletRequest request){
++        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(favorites.page(access.user(request).id(),q,before,limit));
++    }
++    @PostMapping("/{messageId}/favorite") public ResponseEntity<ChatFavorites.Item> favorite(@PathVariable long messageId,HttpServletRequest request){
++        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(favorites.add(access.user(request),messageId));
++    }
++    @PostMapping("/favorites/{id}/remove") public ResponseEntity<?> removeFavorite(@PathVariable long id,HttpServletRequest request){
++        favorites.remove(access.user(request).id(),id);
++        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(java.util.Map.of("removed",true));
++    }
++    @GetMapping("/favorites/{id}/images/{imageId}") public ResponseEntity<byte[]> favoriteImage(@PathVariable long id,@PathVariable String imageId,HttpServletRequest request){
++        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).contentType(org.springframework.http.MediaType.IMAGE_JPEG)
++            .header("X-Content-Type-Options","nosniff").body(favorites.image(access.user(request).id(),id,imageId));
++    }
++
+     @PostMapping
+     public ResponseEntity<DeviceMessageStore.Message> send(@RequestBody DeviceMessageStore.Send input,HttpServletRequest request) {
+         var user=access.user(request);
+         String room=access.room(request,DeviceMessageStore.conversationId(input),false);
+         String sender=ChatUserRegistry.requestUser(request)==null?input.sender():user.username();
+         var scoped=new DeviceMessageStore.Send(input.clientMessageId(),input.deviceId(),sender,input.platform(),
+-            input.text(),room,input.mentionAgentIds(),input.imageIds());
++            input.text(),room,input.mentionAgentIds(),input.imageIds(),input.quoteMessageId());
+         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(chat.send(scoped,user.id()));
+     }
+     @PostMapping("/{messageId}/agents/{agentId}/retry") public ResponseEntity<?> retry(@PathVariable long messageId,@PathVariable String agentId,HttpServletRequest request) {
+--- /dev/null
++++ b/src/main/java/com/leon/workflow/messaging/ChatFavorites.java
+@@ -0,0 +1,69 @@
++package com.leon.workflow.messaging;
++
++import jakarta.annotation.PostConstruct;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.stereotype.Service;
++import org.springframework.http.HttpStatus;
++import tools.jackson.databind.ObjectMapper;
++import java.util.*;
++
++/** Account-owned snapshots. Images remain private and survive clearing the source chat. */
++@Service
++public class ChatFavorites {
++    public record Item(long id,DeviceMessageStore.Message message,String conversationName,long savedAt) {}
++    public record Page(List<Item> results,boolean hasMore,Long nextBefore) {}
++    private final JdbcTemplate jdbc;private final DeviceMessageStore store;private final ChatAccess access;private final ObjectMapper json;
++    public ChatFavorites(JdbcTemplate jdbc,DeviceMessageStore store,ChatAccess access,ObjectMapper json){this.jdbc=jdbc;this.store=store;this.access=access;this.json=json;}
++    @PostConstruct void initialize(){
++        jdbc.execute("CREATE TABLE IF NOT EXISTS chat_favorite (id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,user_id VARCHAR(36) NOT NULL,source_message_id BIGINT NOT NULL,conversation_name VARCHAR(60) NOT NULL,sender VARCHAR(60) NOT NULL,body VARCHAR(8000) NOT NULL,snapshot_json CLOB NOT NULL,saved_at BIGINT NOT NULL,CONSTRAINT uq_chat_favorite UNIQUE(user_id,source_message_id))");
++        jdbc.execute("CREATE INDEX IF NOT EXISTS idx_chat_favorite_user ON chat_favorite(user_id,id)");
++        jdbc.execute("CREATE TABLE IF NOT EXISTS chat_favorite_image (favorite_id BIGINT NOT NULL,image_id VARCHAR(36) NOT NULL,image_data BLOB NOT NULL,PRIMARY KEY(favorite_id,image_id))");
++    }
++    public Item add(ChatUserRegistry.User user,long messageId){
++        if(messageId<=0)throw DeviceMessageStore.bad("消息标识无效");
++        synchronized(store){
++            var old=jdbc.queryForList("SELECT id FROM chat_favorite WHERE user_id=? AND source_message_id=?",Long.class,user.id(),messageId);
++            if(!old.isEmpty())return item(user.id(),old.getFirst());
++            var message=store.message(messageId);access.require(user,message.conversationId(),false);
++            String snapshot=json.writeValueAsString(message),name=store.conversation(message.conversationId()).name();
++            return store.atomic(()->{
++                jdbc.update("INSERT INTO chat_favorite(user_id,source_message_id,conversation_name,sender,body,snapshot_json,saved_at) VALUES(?,?,?,?,?,?,?)",user.id(),messageId,name,message.sender(),message.text(),snapshot,System.currentTimeMillis());
++                long id=jdbc.queryForObject("SELECT id FROM chat_favorite WHERE user_id=? AND source_message_id=?",Long.class,user.id(),messageId);
++                for(var image:message.images()){
++                    int count=jdbc.update("INSERT INTO chat_favorite_image(favorite_id,image_id,image_data) SELECT ?,id,image_data FROM chat_message_image WHERE id=? AND conversation_id=?",id,image.id(),message.conversationId());
++                    if(count!=1)throw DeviceMessageStore.bad("原图片已不可用，请重新加载后收藏");
++                }
++                return item(user.id(),id);
++            });
++        }
++    }
++    private Item item(String user,long id){
++        var rows=jdbc.query("SELECT * FROM chat_favorite WHERE user_id=? AND id=?",(rs,n)->new Item(rs.getLong("id"),json.readValue(rs.getString("snapshot_json"),DeviceMessageStore.Message.class),rs.getString("conversation_name"),rs.getLong("saved_at")),user,id);
++        if(rows.isEmpty())throw missing();return rows.getFirst();
++    }
++    public Page page(String user,String query,Long before,int limit){
++        String q=query==null?"":query.strip();
++        if(q.length()>100||q.codePoints().anyMatch(Character::isISOControl)||before!=null&&before<=0||limit<1||limit>50)throw DeviceMessageStore.bad("收藏搜索或分页参数无效");
++        String sql="SELECT id FROM chat_favorite WHERE user_id=? AND (LOCATE(LOWER(?),LOWER(body))>0 OR LOCATE(LOWER(?),LOWER(sender))>0 OR LOCATE(LOWER(?),LOWER(conversation_name))>0)";
++        var args=new ArrayList<Object>(List.of(user,q,q,q));if(before!=null){sql+=" AND id<?";args.add(before);}sql+=" ORDER BY id DESC LIMIT ?";args.add(limit+1);
++        synchronized(store){
++            var ids=jdbc.queryForList(sql,Long.class,args.toArray());boolean more=ids.size()>limit;
++            var selected=ids.subList(0,Math.min(limit,ids.size()));var result=selected.stream().map(id->item(user,id)).toList();
++            return new Page(result,more,more?selected.getLast():null);
++        }
++    }
++    public void remove(String user,long id){
++        synchronized(store){store.atomic(()->{
++            jdbc.update("DELETE FROM chat_favorite_image WHERE favorite_id=? AND EXISTS(SELECT 1 FROM chat_favorite WHERE id=? AND user_id=?)",id,id,user);
++            jdbc.update("DELETE FROM chat_favorite WHERE id=? AND user_id=?",id,user);return true;
++        });}
++    }
++    public byte[] image(String user,long id,String image){
++        image=DeviceMessageStore.uuid(image);
++        synchronized(store){
++            var rows=jdbc.query("SELECT i.image_data FROM chat_favorite_image i JOIN chat_favorite f ON f.id=i.favorite_id WHERE f.user_id=? AND f.id=? AND i.image_id=?",(rs,n)->rs.getBytes(1),user,id,image);
++            if(rows.isEmpty())throw missing();return rows.getFirst();
++        }
++    }
++    private static org.springframework.web.server.ResponseStatusException missing(){return DeviceMessageStore.failure(HttpStatus.NOT_FOUND,"收藏不存在或无权访问");}
++}
+--- /dev/null
++++ b/src/test/java/com/leon/workflow/messaging/MessageCollectionsIntegrationTest.java
+@@ -0,0 +1,106 @@
++package com.leon.workflow.messaging;
++
++import com.example.helloservice.HelloServiceApplication;
++import org.junit.jupiter.api.*;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.test.web.servlet.MockMvc;
++import org.springframework.test.web.servlet.setup.MockMvcBuilders;
++import org.springframework.web.context.WebApplicationContext;
++import tools.jackson.databind.ObjectMapper;
++import java.util.*;
++import java.io.*;
++import java.awt.image.BufferedImage;
++import javax.imageio.ImageIO;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
++
++@SpringBootTest(classes=HelloServiceApplication.class,properties={
++    "spring.datasource.url=jdbc:h2:mem:message-collections;DB_CLOSE_DELAY=-1","spring.jpa.hibernate.ddl-auto=create-drop",
++    "leon.workflows.scheduling-enabled=false","leon.agents.dispatch-enabled=false","leon.chat.auto-title-enabled=false",
++    "leon.auth.required=true","leon.auth.admin-origin=https://example.test",
++    "leon.auth.token-sha256=1723a753ba41b0b19f3f758eb3226c453b086f5e279abe9e745e0e5534504e69"})
++class MessageCollectionsIntegrationTest {
++    @Autowired WebApplicationContext context;
++    @Autowired ObjectMapper json;
++    @Autowired ChatBackupService backups;
++    @Autowired DeviceMessageStore store;
++    MockMvc mvc;
++    record User(String name,String id,String token){}
++    @BeforeEach void setup(){mvc=MockMvcBuilders.webAppContextSetup(context).build();}
++    User user()throws Exception{return user("Collect"+UUID.randomUUID().toString().substring(0,8));}
++    User user(String name)throws Exception{
++        var response=mvc.perform(post("/api/conversations/account/login").header("Authorization","Bearer integration-test-token").contentType("application/json")
++            .content(json.writeValueAsString(Map.of("username",name)))).andExpect(status().isOk()).andReturn().getResponse();
++        var node=json.readTree(response.getContentAsByteArray());return new User(name,node.path("user").path("id").asText(),"Bearer "+node.path("sessionToken").asText());
++    }
++    Map<String,Object> sendBody(String room,String text,Long quote,List<String> images){
++        var body=new HashMap<String,Object>();body.put("clientMessageId",UUID.randomUUID().toString());body.put("deviceId",UUID.randomUUID().toString());
++        body.put("sender","spoofed");body.put("platform","ios");body.put("text",text);body.put("conversationId",room);body.put("imageIds",images);if(quote!=null)body.put("quoteMessageId",quote);return body;
++    }
++    long send(User user,Map<String,Object> body)throws Exception{
++        var response=mvc.perform(post("/api/device-messages").header("Authorization",user.token()).contentType("application/json").content(json.writeValueAsString(body))).andExpect(status().isOk()).andReturn().getResponse();
++        return json.readTree(response.getContentAsByteArray()).path("id").asLong();
++    }
++    long favorite(User user,long message)throws Exception{
++        var response=mvc.perform(post("/api/device-messages/"+message+"/favorite").header("Authorization",user.token())).andExpect(status().isOk()).andExpect(header().string("Cache-Control","no-store")).andReturn().getResponse();
++        return json.readTree(response.getContentAsByteArray()).path("id").asLong();
++    }
++    @Test void quoteSnapshotUsesServerContentAndRetryRemainsIdempotent()throws Exception{
++        var user=user();long original=send(user,sendBody("shared","服务器原文",null,List.of()));
++        var body=sendBody("shared","请解释这一句",original,List.of());body.put("quote",Map.of("text","伪造原文","sender","伪造姓名"));
++        long reply=send(user,body);assertEquals(reply,send(user,body));
++        mvc.perform(get("/api/device-messages").header("Authorization",user.token())).andExpect(status().isOk())
++            .andExpect(jsonPath("$.messages[1].quote.id").value(original)).andExpect(jsonPath("$.messages[1].quote.text").value("服务器原文"))
++            .andExpect(jsonPath("$.messages[1].quote.sender").value(user.name())).andExpect(jsonPath("$.messages[1].replyTo").isEmpty());
++        assertTrue(store.message(reply).modelText().contains("服务器原文"));
++        body.put("quoteMessageId",reply);mvc.perform(post("/api/device-messages").header("Authorization",user.token()).contentType("application/json").content(json.writeValueAsString(body))).andExpect(status().isConflict());
++    }
++    @Test void crossConversationReferencesAndPrivateFavoritesAreRejected()throws Exception{
++        var alice=user();var bob=user();long message=send(alice,sendBody("shared","私有消息",null,List.of()));long favorite=favorite(alice,message);
++        mvc.perform(post("/api/device-messages").header("Authorization",bob.token()).contentType("application/json").content(json.writeValueAsString(sendBody("shared","越权引用",message,List.of())))).andExpect(status().isBadRequest());
++        mvc.perform(post("/api/device-messages/"+message+"/favorite").header("Authorization",bob.token())).andExpect(status().isNotFound());
++        mvc.perform(get("/api/device-messages/favorites").header("Authorization",bob.token())).andExpect(status().isOk()).andExpect(jsonPath("$.results.length()").value(0));
++        mvc.perform(post("/api/device-messages/favorites/"+favorite+"/remove").header("Authorization",bob.token())).andExpect(status().isOk());
++        mvc.perform(get("/api/device-messages/favorites").header("Authorization",alice.token())).andExpect(jsonPath("$.results.length()").value(1));
++        mvc.perform(get("/api/device-messages/favorites")).andExpect(status().isUnauthorized());
++    }
++    @Test void favoritesDeduplicatePersistAcrossSessionsAndSearchWithStablePagination()throws Exception{
++        var user=user();long first=send(user,sendBody("shared","关键词 %_",null,List.of()));long id=favorite(user,first);assertEquals(id,favorite(user,first));
++        for(int i=0;i<4;i++)favorite(user,send(user,sendBody("shared","关键词 "+i,null,List.of())));
++        var second=user(user.name());
++        mvc.perform(get("/api/device-messages/favorites").header("Authorization",second.token()).param("q","%_"))
++            .andExpect(status().isOk()).andExpect(jsonPath("$.results.length()").value(1)).andExpect(jsonPath("$.results[0].id").value(id));
++        var found=new ArrayList<Long>();Long before=null;
++        do{var request=get("/api/device-messages/favorites").header("Authorization",user.token()).param("q","关键词").param("limit","2");if(before!=null)request.param("before",""+before);
++            var result=json.readTree(mvc.perform(request).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray());
++            for(var row:result.path("results"))found.add(row.path("id").asLong());before=result.path("hasMore").asBoolean()?result.path("nextBefore").asLong():null;
++        }while(before!=null);
++        assertEquals(5,found.size());assertEquals(5,new HashSet<>(found).size());assertEquals(id,found.getLast());
++        for(int i=0;i<2;i++)mvc.perform(post("/api/device-messages/favorites/"+id+"/remove").header("Authorization",user.token())).andExpect(status().isOk());
++        mvc.perform(get("/api/device-messages/favorites").header("Authorization",user.token()).param("q","%_")).andExpect(jsonPath("$.results.length()").value(0));
++    }
++    @Test void favoriteImageSurvivesSourceClearingAndHasIndependentOwnerAuthorization()throws Exception{
++        var user=user();var outsider=user();String image=UUID.randomUUID().toString();var output=new ByteArrayOutputStream();ImageIO.write(new BufferedImage(8,8,BufferedImage.TYPE_INT_RGB),"jpeg",output);
++        mvc.perform(post("/api/device-messages/images").header("Authorization",user.token()).param("id",image).param("conversationId","shared").contentType("image/jpeg").content(output.toByteArray())).andExpect(status().isOk());
++        long original=send(user,sendBody("shared","已收藏图片",null,List.of(image))),id=favorite(user,original);
++        String imageUrl="/api/device-messages/favorites/"+id+"/images/"+image;
++        byte[] saved=mvc.perform(get(imageUrl).header("Authorization",user.token())).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();
++        mvc.perform(get(imageUrl).header("Authorization",outsider.token())).andExpect(status().isNotFound());
++        var preview=json.readTree(mvc.perform(get("/api/conversations/context/clear-preview").header("Authorization",user.token()).param("conversationId","shared")).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray());
++        mvc.perform(post("/api/conversations/context/clear").header("Authorization",user.token()).contentType("application/json").content(json.writeValueAsString(Map.of("conversationId","shared","requestId",UUID.randomUUID().toString(),"expectedLatestMessageId",preview.path("latestMessageId").asLong(),"expectedHistoryRevision",preview.path("historyRevision").asLong(),"confirm",true)))).andExpect(status().isOk());
++        mvc.perform(get("/api/device-messages/images/"+image).header("Authorization",user.token())).andExpect(status().isNotFound());
++        assertArrayEquals(saved,mvc.perform(get(imageUrl).header("Authorization",user.token())).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray());
++        mvc.perform(get("/api/device-messages/favorites").header("Authorization",user.token())).andExpect(jsonPath("$.results[0].message.text").value("已收藏图片"));
++        mvc.perform(post("/api/device-messages/favorites/"+id+"/remove").header("Authorization",user.token())).andExpect(status().isOk());
++        mvc.perform(get(imageUrl).header("Authorization",user.token())).andExpect(status().isNotFound());
++    }
++    @Test void backupRestoreRemapsQuoteIdsAndPreservesSnapshot()throws Exception{
++        var user=user();long source=send(user,sendBody("shared","要保留的原文",null,List.of()));send(user,sendBody("shared","带引用的回复",source,List.of()));
++        byte[] backup=backups.export("home:"+user.id());
++        var restored=backups.restore(UUID.randomUUID().toString(),null,backup,user.id(),false);var page=store.page(restored.id(),null,null,100);
++        assertEquals(2,page.messages().size());assertEquals(page.messages().getFirst().id(),page.messages().getLast().quote().id());assertNotEquals(source,page.messages().getLast().quote().id());
++        assertEquals("要保留的原文",page.messages().getLast().quote().text());
++    }
++}

@@ -30,8 +30,20 @@ obj('resources',f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; fi
 obj('frameworks',f'isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ({uid("build-zlib")},); runOnlyForDeploymentPostprocessing = 0;')
 obj('target',f'isa = PBXNativeTarget; buildConfigurationList = {uid("target-config")}; buildPhases = ({uid("sources")}, {uid("frameworks")}, {uid("resources")},); buildRules = (); dependencies = (); name = Leon; productName = Leon; productReference = {uid("product")}; productType = "com.apple.product-type.application";')
 project_settings={'CLANG_ENABLE_MODULES':'YES','CLANG_ENABLE_OBJC_ARC':'YES','SDKROOT':'iphoneos','IPHONEOS_DEPLOYMENT_TARGET':'16.0','SWIFT_VERSION':'5.0','ENABLE_USER_SCRIPT_SANDBOXING':'YES','SWIFT_STRICT_CONCURRENCY':'minimal'}
-target_settings={'PRODUCT_BUNDLE_IDENTIFIER':'com.leon.ios','PRODUCT_NAME':'Leon','INFOPLIST_FILE':'Info.plist','GENERATE_INFOPLIST_FILE':'NO','CODE_SIGN_STYLE':'Automatic','CURRENT_PROJECT_VERSION':'5','MARKETING_VERSION':'0.12.4','TARGETED_DEVICE_FAMILY':'1,2','SUPPORTED_PLATFORMS':'iphoneos iphonesimulator','SUPPORTS_MACCATALYST':'NO','ASSETCATALOG_COMPILER_APPICON_NAME':'AppIcon','LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/Frameworks','SWIFT_EMIT_LOC_STRINGS':'YES'}
+target_settings={'PRODUCT_BUNDLE_IDENTIFIER':'com.leon.ios','PRODUCT_NAME':'Leon','INFOPLIST_FILE':'Info.plist','GENERATE_INFOPLIST_FILE':'NO','CODE_SIGN_STYLE':'Automatic','CURRENT_PROJECT_VERSION':'16','MARKETING_VERSION':'0.16.0','TARGETED_DEVICE_FAMILY':'1,2','SUPPORTED_PLATFORMS':'iphoneos iphonesimulator','SUPPORTS_MACCATALYST':'NO','ASSETCATALOG_COMPILER_APPICON_NAME':'AppIcon','LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/Frameworks','SWIFT_EMIT_LOC_STRINGS':'YES'}
 if team:target_settings['DEVELOPMENT_TEAM']=team
+push_environment=os.environ.get('LEON_IOS_APNS_ENVIRONMENT','')
+if push_environment not in ('','development','production'): raise ValueError('Invalid APNs environment')
+import plistlib
+info_path=root/'Info.plist'
+info=plistlib.loads(info_path.read_bytes())
+info['LeonRemotePushEnabled']=bool(push_environment)
+info['LeonPushEnvironment']=push_environment or 'development'
+info_path.write_bytes(plistlib.dumps(info,sort_keys=False))
+if push_environment:
+ (root/'Push.entitlements').write_bytes(plistlib.dumps({'aps-environment':push_environment}))
+ target_settings['CODE_SIGN_ENTITLEMENTS']='Push.entitlements'
+
 for scope,settings in [('project',project_settings),('target',target_settings)]:
  for config in ['Debug','Release']:
   data=dict(settings)

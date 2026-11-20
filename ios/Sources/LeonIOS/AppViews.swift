@@ -12,6 +12,8 @@ struct NativeRootView: View {
     @State private var usage = false
     @State private var logout = false
     @State private var connectionInfo = false
+    @State private var searching = false
+    @State private var favorites = false
     @State private var navigation = UUID()
     @State private var groupNavigation = UUID()
     private var directory: [AgentInfo] {store.agents.filter {agent in agent.enabled || store.conversations.contains {$0.direct && $0.agentId == agent.id}}}
@@ -27,6 +29,15 @@ struct NativeRootView: View {
                     }
                 }
         }
+        .fullScreenCover(isPresented:$searching) {
+            ChatSearchView(store:store) { id in
+                if let room = store.conversations.first(where:{$0.id == id}) {openRoom(room)}
+                else {Task {await store.refreshDirectory();if let room = store.conversations.first(where:{$0.id == id}) {openRoom(room)}}}
+            }
+        }
+        .fullScreenCover(isPresented:$favorites) {
+            FavoritesView(store:store,openRoom:openRoom)
+        }
         .tint(MobileStyle.green).preferredColorScheme(.light)
         .overlay {dialogs}
         .overlay(alignment:.bottom) {
@@ -36,6 +47,9 @@ struct NativeRootView: View {
                     .padding(.horizontal,24).padding(.bottom,84).allowsHitTesting(false).id(notice.id)
             }
         }
+        .modifier(NotificationHost(store:store,visibleRoom:path.last == .chat ? store.roomID : nil,openRoom:{id in
+            Task {do {let room=try await store.conversationForOpening(id);openRoom(room)}catch {store.error=error.localizedDescription}}
+        }))
         .onChange(of:store.notice?.id) {_ in if let notice = store.notice {UIAccessibility.post(notification:.announcement,argument:notice.text)}}
         .onChange(of:tab) {_ in navigation = UUID()}
         .onChange(of:path) {_ in navigation = UUID()}
@@ -59,6 +73,11 @@ struct NativeRootView: View {
                 Text(store.loggedIn ? store.status : "请先在设置中注册或登录")
                     .font(.system(size:12)).foregroundStyle(MobileStyle.muted).frame(maxWidth:.infinity,alignment:.leading)
                     .padding(.horizontal,18).padding(.vertical,9).background(MobileStyle.color(0xFFF6E8))
+            }
+            if tab != 2 {
+                Button {searching = true} label:{
+                    HStack(spacing:8) {Image(systemName:"magnifyingglass");Text("搜索聊天记录").font(.system(size:15))}.foregroundStyle(MobileStyle.muted).frame(maxWidth:.infinity).padding(10).background(.white,in:RoundedRectangle(cornerRadius:8))
+                }.buttonStyle(.plain).padding(.horizontal,12).padding(.vertical,9).background(MobileStyle.bar).disabled(!store.loggedIn).accessibilityIdentifier("global_chat_search")
             }
             ScrollView {
                 LazyVStack(spacing:0) {
@@ -111,6 +130,8 @@ struct NativeRootView: View {
             } else {
                 SettingRow(title:"注册或登录",summary:"输入 UserName 和服务访问令牌",symbol:.agents,action:{login = true}).accessibilityIdentifier("connection_settings")
             }
+            NotificationSettingsView()
+            SettingRow(title:"收藏",summary:"查看收藏的消息与图片",symbol:.favorite,action:{favorites = true}).disabled(!store.loggedIn).accessibilityIdentifier("my_favorites")
             SettingRow(title:"Token 用量",summary:"查看累计消耗与模型明细",symbol:.usage,action:{usage = true}).accessibilityIdentifier("token_usage")
             sectionGap
             SettingRow(title:"连接状态",summary:store.connected ? "已连接 · 自动同步" : store.status,symbol:.groups,action:{connectionInfo = true})

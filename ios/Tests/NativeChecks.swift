@@ -20,6 +20,10 @@ actor MemoryCredentials: CredentialStorage {
     func save(_ value: Credentials?) {self.value = value}
 }
 final class FakeAPI: ChatAPI, @unchecked Sendable {
+    var branchHook:((String,Int64,String,String) async throws -> Conversation)?
+    var conversationsHook: (() async throws -> [Conversation])?
+    var favoriteImageHook: ((Int64,String) async throws -> Data)?
+    var searchHook: ((String,String?,Int64?) async throws -> ChatSearchPage)?
     var sendHook: ((Outgoing) async throws -> Message)?
     var directHook: ((String) async throws -> Conversation)?
     var usageHook: (() async throws -> [ModelUsage])?
@@ -29,15 +33,25 @@ final class FakeAPI: ChatAPI, @unchecked Sendable {
     func login(_ username: String) async throws -> LoginResult {LoginResult(user:ChatUser(id:"user-1",username:username),sessionToken:"chat_new")}
     func logout() async throws {logouts += 1}
     func agents() async throws -> [AgentInfo] {[]}
-    func conversations() async throws -> [Conversation] {[]}
+    func conversations() async throws -> [Conversation] {if let conversationsHook {return try await conversationsHook()};return []}
     func heartbeat(deviceId: String,name: String) async throws {}
     func page(room: String,after: Int64?,before: Int64?) async throws -> MessagePage {pageFixture([])}
+    func search(query: String,room: String?,before: Int64?) async throws -> ChatSearchPage {if let searchHook {return try await searchHook(query,room,before)};return ChatSearchPage(results:[],hasMore:false,nextBefore:nil)}
+    func searchContext(room: String,message: Int64,direction: String) async throws -> ChatSearchContext {ChatSearchContext(messages:[],hasOlder:false,hasNewer:false,historyRevision:1)}
+
     func direct(_ agent: String) async throws -> Conversation {if let directHook {return try await directHook(agent)};return Conversation(id:"dm:user-1:\(agent)",name:"A",kind:"direct",agentId:agent,agentIds:[agent])}
     func newThread(agent: String,name: String,requestId: String) async throws -> Conversation {Conversation(id:"thread:\(requestId)",name:name,kind:"direct",agentId:agent,agentIds:[agent])}
+    func branch(room:String,message:Int64,name:String,requestId:String) async throws -> Conversation {guard let branchHook else {throw NativeError(message:"unused branch")};return try await branchHook(room,message,name,requestId)}
     func group(name: String,agentIds: [String],usernames: [String]) async throws -> Conversation {Conversation(id:"group:1",name:name,kind:"group",agentId:nil,agentIds:agentIds)}
     func members(room: String,adding: [String]?) async throws -> [ChatUser] {[]}
+    func addAgents(room:String,agentIds:[String]) async throws -> Conversation {Conversation(id:room,name:"群聊",kind:"group",agentId:nil,agentIds:agentIds)}
     func send(_ message: Outgoing) async throws -> Message {sends.append(message);if let sendHook {return try await sendHook(message)};return messageFixture(3,client:message.id,device:message.deviceId)}
     func retryJob(_ job: AgentJob) async throws {}
+    func addFavorite(_ message:Int64) async throws -> FavoriteItem {FavoriteItem(id:1,message:messageFixture(message),conversationName:"测试",savedAt:1)}
+    func favorites(query:String,before:Int64?) async throws -> FavoritePage {FavoritePage(results:[],hasMore:false,nextBefore:nil)}
+    func removeFavorite(_ id:Int64) async throws {}
+    func favoriteImage(_ favorite:Int64,image:String) async throws -> Data {if let favoriteImageHook {return try await favoriteImageHook(favorite,image)};return Data()}
+
     func uploadImage(id: String,room: String,data: Data) async throws {uploads.append(id)}
     func image(_ id: String) async throws -> Data {if let imageHook {return try await imageHook(id)};return Data([1,2,3])}
     func avatar(_ id: String) async throws -> Data {if let avatarHook {return try await avatarHook(id)};return Data([1,2,3])}
@@ -212,6 +226,11 @@ final class Checks {
             try expect(!followed,"redirect forwarded credential request")
         }
         try await checkHTTPContracts()
+        try await checkNotifications()
+        try await checkDocuments()
+        try await checkCollections()
+        try await checkBranches()
+        try await checkSearch()
         try await checkTimeline()
         try await checkParity()
         print("Native core: \(cases) scenarios passed")

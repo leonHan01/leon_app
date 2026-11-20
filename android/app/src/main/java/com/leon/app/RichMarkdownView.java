@@ -20,6 +20,9 @@ final class RichMarkdownView extends FrameLayout {
     private static final Pattern EXTENDED = Pattern.compile("(?m)```|~~~|!\\[|<[/!A-Za-z]|\\[\\^|\\[\\[|\\[![A-Za-z]+\\]|==[^=\\n]+==|\\^[^\\s^]+\\^|(?:^|[^~])~[^~\\s]+~(?:[^~]|$)|:[+\\w-]+:|^\\s*:\\s+|[-+*]\\s+\\[[ xX]\\]|\\d+[.)]\\s+\\[[ xX]\\]|\\\\(?:newcommand|renewcommand|def|tag|begin\\{aligned)");
     static boolean isRequired(String source) { return EXTENDED.matcher(source).find(); }
     private final String source;
+    private Runnable messageAction;
+    void setMessageAction(Runnable action){messageAction=action;}
+    private void longPress(){if(messageAction!=null)messageAction.run();else copy(source);}
     private final boolean mine;
     private final TextView fallback;
     private WebView web;
@@ -32,7 +35,7 @@ final class RichMarkdownView extends FrameLayout {
         super(context); this.source=source; this.mine=mine;
         fallback=new TextView(context); fallback.setText(source); fallback.setTextSize(14); fallback.setTextColor(ChatUi.INK);
         fallback.setPadding(dp(12),dp(10),dp(12),dp(10)); addView(fallback,new LayoutParams(-1,-2));
-        setOnLongClickListener(v->{copy(source);return true;}); fallback.setOnLongClickListener(v->{copy(source);return true;});
+        setOnLongClickListener(v->{longPress();return true;}); fallback.setOnLongClickListener(v->{longPress();return true;});
     }
     @Override protected void onAttachedToWindow(){super.onAttachedToWindow();getViewTreeObserver().addOnScrollChangedListener(visibilityListener);post(this::updateVisibility);}
     @Override protected void onDetachedFromWindow(){getViewTreeObserver().removeOnScrollChangedListener(visibilityListener);removeCallbacks(unload);stopWeb();super.onDetachedFromWindow();}
@@ -73,7 +76,7 @@ final class RichMarkdownView extends FrameLayout {
             }
             @Override public void onPageFinished(WebView v,String url){if(v==web&&PAGE.equals(url)){ready=true;render();}}
         });
-        view.setOnLongClickListener(v->{copy(source);return true;});
+        view.setOnLongClickListener(v->{longPress();return true;});
         view.setOnTouchListener(new OnTouchListener(){float x,y;
             @Override public boolean onTouch(View v,MotionEvent event){
                 if(event.getActionMasked()==MotionEvent.ACTION_DOWN){x=event.getX();y=event.getY();}

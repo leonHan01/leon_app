@@ -1,0 +1,177 @@
+--- a/src/main/java/com/leon/workflow/messaging/DeviceMessageController.java
++++ b/src/main/java/com/leon/workflow/messaging/DeviceMessageController.java
+@@ -22,6 +22,25 @@
+         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(store.page(access.room(request,conversationId,false),after,before,limit));
+     }
+ 
++
++    @GetMapping("/search")
++    public ResponseEntity<DeviceMessageStore.SearchPage> search(@RequestParam String q,
++            @RequestParam(required=false) String conversationId,@RequestParam(required=false) Long before,
++            @RequestParam(defaultValue="50") int limit,HttpServletRequest request) {
++        var user=access.user(request);
++        String room=conversationId==null?null:access.room(request,conversationId,false);
++        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
++            .body(store.search(q,room,before,limit,user.id(),access.legacy(user)));
++    }
++
++    @GetMapping("/context")
++    public ResponseEntity<DeviceMessageStore.SearchContext> context(@RequestParam String conversationId,
++            @RequestParam long messageId,@RequestParam(defaultValue="around") String direction,
++            @RequestParam(defaultValue="20") int limit,HttpServletRequest request) {
++        return ResponseEntity.ok().cacheControl(CacheControl.noStore())
++            .body(store.searchContext(access.room(request,conversationId,false),messageId,direction,limit));
++    }
++
+     @PostMapping
+     public ResponseEntity<DeviceMessageStore.Message> send(@RequestBody DeviceMessageStore.Send input,HttpServletRequest request) {
+         var user=access.user(request);
+--- a/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java
++++ b/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java
+@@ -215,6 +215,47 @@
+         var jobs=jdbc.query("SELECT * FROM chat_agent_job WHERE conversation_id=? AND status<>'SUCCEEDED' ORDER BY CASE WHEN status='FAILED' THEN 1 ELSE 0 END,message_id DESC LIMIT 100",(rs,n)->new Job(rs.getLong("message_id"),rs.getString("agent_id"),rs.getString("agent_name"),rs.getString("status"),rs.getString("error"),rs.getString("phase"),rs.getString("user_id")),conversation);
+         return new Page(List.copyOf(result),more,jobs,contextOperations(conversation),historyRevision(conversation));
+     }
++
++    public record SearchHit(Message message,String conversationName) {}
++    public record SearchPage(List<SearchHit> results,boolean hasMore,Long nextBefore) {}
++    public record SearchContext(List<Message> messages,boolean hasOlder,boolean hasNewer,long historyRevision) {}
++
++    /** Literal substring search: SQL wildcard characters have no special meaning. */
++    public synchronized SearchPage search(String query,String room,Long before,int limit,String userId,boolean legacy) {
++        String q=query==null?"":query.strip();
++        if(q.isEmpty()||q.length()>100||q.codePoints().anyMatch(Character::isISOControl)
++                ||before!=null&&before<=0||limit<1||limit>50)throw bad("搜索词应为 1–100 字符，分页参数必须有效");
++        String sql="SELECT m.*,c.name AS conversation_name FROM device_message m JOIN chat_conversation c ON c.id=m.conversation_id "
++            +"WHERE (c.owner_id=? OR (? AND c.owner_id IS NULL) OR EXISTS "
++            +"(SELECT 1 FROM chat_conversation_member cm WHERE cm.conversation_id=c.id AND cm.user_id=?)) "
++            +"AND LOCATE(LOWER(?),LOWER(m.body))>0";
++        var args=new ArrayList<Object>(List.of(userId,legacy,userId,q));
++        if(room!=null){sql+=" AND m.conversation_id=?";args.add(room);}
++        if(before!=null){sql+=" AND m.id<?";args.add(before);}
++        sql+=" ORDER BY m.id DESC LIMIT ?";args.add(limit+1);
++        var rows=jdbc.query(sql,(rs,n)->new SearchHit(ROW.mapRow(rs,n),rs.getString("conversation_name")),args.toArray());
++        boolean more=rows.size()>limit;
++        var result=List.copyOf(rows.subList(0,Math.min(limit,rows.size())));
++        return new SearchPage(result,more,more?result.getLast().message().id():null);
++    }
++
++    public synchronized SearchContext searchContext(String room,long anchor,String direction,int limit) {
++        if(anchor<=0||limit<1||limit>50||!Set.of("around","before","after").contains(direction))throw bad("消息定位参数无效");
++        var target=jdbc.query("SELECT * FROM device_message WHERE conversation_id=? AND id=?",ROW,room,anchor);
++        if(target.isEmpty())throw failure(HttpStatus.NOT_FOUND,"原消息已删除或不属于当前会话");
++        var result=new ArrayList<Message>();
++        if(!direction.equals("after")){
++            result.addAll(jdbc.query("SELECT * FROM device_message WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?",ROW,room,anchor,limit));
++            Collections.reverse(result);
++        }
++        if(direction.equals("around"))result.add(target.getFirst());
++        if(!direction.equals("before"))result.addAll(jdbc.query("SELECT * FROM device_message WHERE conversation_id=? AND id>? ORDER BY id LIMIT ?",ROW,room,anchor,limit));
++        long first=result.isEmpty()?anchor:result.getFirst().id(),last=result.isEmpty()?anchor:result.getLast().id();
++        boolean older=Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM device_message WHERE conversation_id=? AND id<?)",Boolean.class,room,first));
++        boolean newer=Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM device_message WHERE conversation_id=? AND id>?)",Boolean.class,room,last));
++        return new SearchContext(List.copyOf(result),older,newer,historyRevision(room));
++    }
++
+     synchronized long historyRevision(String room) { return jdbc.queryForObject("SELECT history_revision FROM chat_conversation WHERE id=?",Long.class,room); }
+     private void checkNotCleared(String device,String message) {
+         if(jdbc.queryForObject("SELECT COUNT(*) FROM chat_cleared_message WHERE device_id=? AND client_message_id=?",Integer.class,device,message)>0)
+--- /dev/null
++++ b/src/test/java/com/leon/workflow/messaging/ChatSearchIntegrationTest.java
+@@ -0,0 +1,96 @@
++package com.leon.workflow.messaging;
++
++import com.example.helloservice.HelloServiceApplication;
++import org.junit.jupiter.api.*;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.test.web.servlet.MockMvc;
++import org.springframework.test.web.servlet.setup.MockMvcBuilders;
++import org.springframework.web.context.WebApplicationContext;
++import tools.jackson.databind.ObjectMapper;
++import java.util.*;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
++
++@SpringBootTest(classes=HelloServiceApplication.class,properties={
++    "spring.datasource.url=jdbc:h2:mem:chat-search;DB_CLOSE_DELAY=-1",
++    "spring.jpa.hibernate.ddl-auto=create-drop","leon.workflows.scheduling-enabled=false","leon.agents.dispatch-enabled=false",
++    "leon.chat.auto-title-enabled=false","leon.auth.required=true","leon.auth.admin-origin=https://example.test",
++    "leon.auth.token-sha256=1723a753ba41b0b19f3f758eb3226c453b086f5e279abe9e745e0e5534504e69"})
++class ChatSearchIntegrationTest {
++    @Autowired WebApplicationContext context;
++    @Autowired ObjectMapper json;
++    MockMvc mvc;
++    record Account(String token,String home) {}
++    @BeforeEach void setup(){mvc=MockMvcBuilders.webAppContextSetup(context).build();}
++    Account account()throws Exception{
++        var result=mvc.perform(post("/api/conversations/account/login").header("Authorization","Bearer integration-test-token")
++            .contentType("application/json").content(json.writeValueAsString(Map.of("username","Search"+UUID.randomUUID().toString().substring(0,8)))))
++            .andExpect(status().isOk()).andReturn().getResponse();
++        var value=json.readTree(result.getContentAsByteArray());
++        return new Account("Bearer "+value.path("sessionToken").asText(),"home:"+value.path("user").path("id").asText());
++    }
++    long send(Account user,String room,String text)throws Exception{
++        var body=new DeviceMessageStore.Send(UUID.randomUUID().toString(),UUID.randomUUID().toString(),"Search","ios",text,room,List.of());
++        return json.readTree(mvc.perform(post("/api/device-messages").header("Authorization",user.token()).contentType("application/json")
++            .content(json.writeValueAsString(body))).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray()).path("id").asLong();
++    }
++    @Test void globalSearchIsAuthenticatedAndNeverLeaksOtherAccounts()throws Exception{
++        var alice=account();var bob=account();long id=send(alice,"shared","中文 搜索 Needle");send(bob,"shared","中文 搜索 Secret");
++        mvc.perform(get("/api/device-messages/search").param("q","搜索")).andExpect(status().isUnauthorized());
++        mvc.perform(get("/api/device-messages/search").header("Authorization",alice.token()).param("q","搜索"))
++            .andExpect(status().isOk()).andExpect(header().string("Cache-Control","no-store"))
++            .andExpect(jsonPath("$.results.length()").value(1)).andExpect(jsonPath("$.results[0].message.id").value(id));
++        mvc.perform(get("/api/device-messages/search").header("Authorization",bob.token()).param("q","搜索").param("conversationId",alice.home())).andExpect(status().isNotFound());
++        mvc.perform(get("/api/device-messages/context").header("Authorization",bob.token()).param("conversationId",alice.home()).param("messageId",""+id)).andExpect(status().isNotFound());
++        mvc.perform(get("/api/device-messages/search").header("Authorization",alice.token()).param("q","needle").param("conversationId","shared"))
++            .andExpect(status().isOk()).andExpect(jsonPath("$.results.length()").value(1));
++    }
++    @Test void literalWildcardsAndInvalidSearchInputs()throws Exception{
++        var user=account();send(user,"shared","100%_完成 ' OR 1=1 --");send(user,"shared","普通内容");
++        for(String q:List.of("%_","' OR 1=1 --"))mvc.perform(get("/api/device-messages/search").header("Authorization",user.token()).param("q",q))
++            .andExpect(status().isOk()).andExpect(jsonPath("$.results.length()").value(1));
++        for(String q:List.of("","   ","x".repeat(101)))mvc.perform(get("/api/device-messages/search").header("Authorization",user.token()).param("q",q)).andExpect(status().isBadRequest());
++        mvc.perform(get("/api/device-messages/search").header("Authorization",user.token()).param("q","普通").param("limit","51")).andExpect(status().isBadRequest());
++    }
++    @Test void searchesBeyondRecentHundredWithStableDescendingPagination()throws Exception{
++        var user=account();var ids=new ArrayList<Long>();for(int i=0;i<105;i++)ids.add(send(user,"shared","分页 hit "+i));
++        Long before=null;var found=new ArrayList<Long>();
++        do{
++            var request=get("/api/device-messages/search").header("Authorization",user.token()).param("q","hit").param("limit","25");
++            if(before!=null)request.param("before",""+before);
++            var value=json.readTree(mvc.perform(request).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray());
++            for(var row:value.path("results"))found.add(row.path("message").path("id").asLong());
++            before=value.path("hasMore").asBoolean()?value.path("nextBefore").asLong():null;
++        }while(before!=null);
++        Collections.reverse(ids);assertEquals(ids,found);
++    }
++    @Test void contextAnchorsAndPagesBothDirectionsAndRejectsDeletedOrWrongRoom()throws Exception{
++        var user=account();var ids=new ArrayList<Long>();for(int i=0;i<9;i++)ids.add(send(user,"shared","上下文 "+i));long anchor=ids.get(4);
++        mvc.perform(get("/api/device-messages/context").header("Authorization",user.token()).param("conversationId","shared").param("messageId",""+anchor).param("limit","2"))
++            .andExpect(status().isOk()).andExpect(jsonPath("$.messages.length()").value(5)).andExpect(jsonPath("$.messages[2].id").value(anchor))
++            .andExpect(jsonPath("$.hasOlder").value(true)).andExpect(jsonPath("$.hasNewer").value(true));
++        for(String direction:List.of("before","after")){
++            var value=json.readTree(mvc.perform(get("/api/device-messages/context").header("Authorization",user.token()).param("conversationId","shared")
++                .param("messageId",""+anchor).param("direction",direction).param("limit","2")).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray());
++            assertEquals(2,value.path("messages").size());for(var row:value.path("messages"))assertTrue(direction.equals("before")?row.path("id").asLong()<anchor:row.path("id").asLong()>anchor);
++        }
++        mvc.perform(get("/api/device-messages/context").header("Authorization",user.token()).param("conversationId","shared").param("messageId","9223372036854775807")).andExpect(status().isNotFound());
++    }
++    @Test void sharedGroupIsSearchableByMembersOnlyAndRoomFilterExcludesPrivateMatches()throws Exception{
++        var owner=account();var member=account();var outsider=account();
++        // Membership uses UserName, so resolve the member from its authenticated session.
++        var me=json.readTree(mvc.perform(get("/api/conversations/account/me").header("Authorization",member.token())).andReturn().getResponse().getContentAsByteArray());
++        var result=mvc.perform(post("/api/conversations/groups").header("Authorization",owner.token()).contentType("application/json")
++            .content(json.writeValueAsString(Map.of("name","搜索群","usernames",List.of(me.path("username").asText()))))).andExpect(status().isOk()).andReturn().getResponse();
++        String room=json.readTree(result.getContentAsByteArray()).path("id").asText();
++        send(owner,"shared","共同关键词 私人");long shared=send(member,room,"共同关键词 群聊");
++        mvc.perform(get("/api/device-messages/search").header("Authorization",member.token()).param("q","共同关键词"))
++            .andExpect(status().isOk()).andExpect(jsonPath("$.results.length()").value(1)).andExpect(jsonPath("$.results[0].message.id").value(shared));
++        mvc.perform(get("/api/device-messages/search").header("Authorization",owner.token()).param("q","共同关键词").param("conversationId",room))
++            .andExpect(status().isOk()).andExpect(jsonPath("$.results.length()").value(1));
++        mvc.perform(get("/api/device-messages/search").header("Authorization",outsider.token()).param("q","共同关键词"))
++            .andExpect(status().isOk()).andExpect(jsonPath("$.results.length()").value(0));
++    }
++}

@@ -23,17 +23,17 @@ final class ChatUi {
         view.setMinWidth(0);view.setMinimumWidth(0);view.setMinHeight(0);view.setMinimumHeight(0);
         view.setPadding(dp(12),dp(8),dp(12),dp(8));view.setBackground(ripple(Color.TRANSPARENT,5));return view;
     }
-    Button toolButton(String label,int resource,int accent,int surface){
+    Button toolButton(String label,int resource){
         Button view=button(label);view.setStateListAnimator(null);view.setElevation(0);
-        view.setTextSize(12);view.setTypeface(Typeface.create("sans-serif-medium",Typeface.NORMAL));
-        view.setTextColor(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled},new int[]{}},new int[]{MUTED,0xFF505B58}));
+        view.setTextSize(12);view.setTypeface(Typeface.create("sans-serif",Typeface.NORMAL));
+        view.setTextColor(Color.BLACK);
         view.setIncludeFontPadding(false);view.setGravity(Gravity.TOP|Gravity.CENTER_HORIZONTAL);
-        view.setMaxLines(2);view.setPadding(dp(1),dp(8),dp(1),dp(8));view.setBackground(ripple(Color.TRANSPARENT,16));
-        GradientDrawable badge=shape(surface,15);badge.setStroke(dp(1),0x08000000);
+        view.setMaxLines(2);view.setPadding(dp(1),dp(6),dp(1),dp(8));view.setBackground(ripple(Color.TRANSPARENT,16));
+        GradientDrawable badge=shape(Color.WHITE,16);badge.setStroke(dp(1),0xFFE5E8EB);
         Drawable icon=context.getDrawable(resource).mutate();
-        icon.setTintList(new ColorStateList(new int[][]{new int[]{-android.R.attr.state_enabled},new int[]{}},new int[]{MUTED,accent}));
-        LayerDrawable artwork=new LayerDrawable(new Drawable[]{badge,icon});artwork.setLayerInset(1,dp(12),dp(12),dp(12),dp(12));
-        artwork.setBounds(0,0,dp(48),dp(48));view.setCompoundDrawables(null,artwork,null,null);view.setCompoundDrawablePadding(dp(9));
+        icon.setTintList(ColorStateList.valueOf(Color.BLACK));
+        LayerDrawable artwork=new LayerDrawable(new Drawable[]{badge,icon});artwork.setLayerInset(1,dp(16),dp(16),dp(16),dp(16));
+        artwork.setBounds(0,0,dp(56),dp(56));view.setCompoundDrawables(null,artwork,null,null);view.setCompoundDrawablePadding(dp(10));
         return view;
     }
     ImageButton icon(int resource,String description){

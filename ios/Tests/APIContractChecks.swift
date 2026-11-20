@@ -134,6 +134,16 @@ extension Checks {
             try expect(try await api.members(room:"group:contract",adding:nil).first?.username == "Bob","member list decoding")
             try expect(try await api.members(room:"group:contract",adding:["Bob"]).count == 1,"member invitation decoding")
         }
+        try await run("Group Agent invitations use additive authenticated room endpoint") {
+            ContractTransport.install {request in
+                try requireHTTP(request.httpMethod == "POST" && request.url!.path == "/api/conversations/group:contract/agents","Agent invitation method or room path")
+                try requireHTTP(request.value(forHTTPHeaderField:"Authorization") == "Bearer chat_fixture","Agent invitation authentication")
+                try requireHTTP(try jsonBody(request)["agentIds"] as? [String] == [agent],"Agent invitation payload")
+                return (200,Data(group.utf8))
+            }
+            let updated = try await api.addAgents(room:"group:contract",agentIds:[agent])
+            try expect(updated.id == "group:contract" && updated.agentIds == [agent],"updated group membership decoding")
+        }
         try await run("Android context rounds, manual compression and clear preview contracts") {
             let context = #"{"conversationId":"group:contract","recentRounds":20,"inputTokenBudget":32000,"topicStartedAfter":12,"agents":[{"agentId":"11111111-1111-4111-8111-111111111111","agentName":"写作","summary":"摘要","lastCompressedAt":1000,"estimatedInputTokens":123,"retainedRounds":2,"phase":"IDLE"}]}"#
             ContractTransport.install {request in

@@ -18,7 +18,44 @@ final class ChatSession {
     final String deviceId;
     MessageApi.User user;
     String server, sender, status = "尚未连接", draft = "";
+    MessageApi.Quote quotedMessage;
+    private final Map<String,MessageApi.Quote> quoteDrafts=new HashMap<>();
+    private final Set<Long> favoriteRequests=new HashSet<>();
+    void quote(MessageApi.Message message){
+        if(message.id<=0||!message.conversationId.equals(selectedConversation))return;
+        try{quotedMessage=new MessageApi.Quote(message);notifyChanged();}catch(Exception e){report(e);}
+    }
+    void cancelQuote(){quotedMessage=null;notifyChanged();}
+    void favorite(MessageApi.Message message,java.util.function.Consumer<String> notice){
+        if(api==null||message.id<=0||!favoriteRequests.add(message.id))return;
+        int connection=connectionGeneration;MessageApi client=api;
+        navigationWorkers.execute(()->{
+            try{client.addFavorite(message.id);main.post(()->{if(connection==connectionGeneration){favoriteRequests.remove(message.id);notice.accept("已收藏");}});}
+            catch(Exception error){main.post(()->{if(connection==connectionGeneration){favoriteRequests.remove(message.id);searchFailure(error);report(error);}});}
+        });
+    }
+
+    final List<ChatDocument> draftDocuments=new ArrayList<>();
+    private final Map<String,List<ChatDocument>> documentDrafts=new HashMap<>();
+    int preparingDocuments,documentEpoch,documentPickerConnection;String documentPickerRoom="";
+    void addDocuments(List<android.net.Uri> uris,String room,int connection){
+        if(api==null||room.isEmpty()||connection!=connectionGeneration)return;
+        int count=room.equals(selectedConversation)?draftDocuments.size():documentDrafts.getOrDefault(room,List.of()).size();
+        if(uris.isEmpty()||count+preparingDocuments+uris.size()>4){report(new java.io.IOException("每条消息最多发送 4 个文档。"));return;}
+        int epoch=documentEpoch;preparingDocuments+=uris.size();notifyChanged();
+        avatarWorkers.execute(()->{
+            List<ChatDocument> result=new ArrayList<>();Exception error=null;
+            try{for(var uri:uris)result.add(ChatDocument.read(resolver,uri));}catch(Exception e){error=e;}
+            Exception failure=error;main.post(()->{
+                if(epoch!=documentEpoch||connection!=connectionGeneration)return;preparingDocuments-=uris.size();
+                if(failure!=null)report(failure);else if(room.equals(selectedConversation))draftDocuments.addAll(result);else documentDrafts.computeIfAbsent(room,k->new ArrayList<>()).addAll(result);notifyChanged();
+            });
+        });
+    }
+    void removeDocument(String id){draftDocuments.removeIf(doc->doc.id.equals(id));notifyChanged();}
+    static List<ChatDocument> documents(JSONObject message){try{return ChatDocument.parse(message.optJSONArray("documents"));}catch(Exception e){return List.of();}}
     final List<ChatImage> draftImages = new ArrayList<>();
+    ChatImageActions.Document imageExport;
     private final Map<String,List<ChatImage>> imageDrafts = new HashMap<>();
     private final java.io.File files;
     private final android.content.ContentResolver resolver;
@@ -26,19 +63,22 @@ final class ChatSession {
     void refreshImages(){imageLoader.refresh();}
     void bindImage(android.widget.ImageView view,String id){bindImage(view,id,false);}
     void bindImage(android.widget.ImageView view,String id,boolean large){
-        MessageApi client=api;String scope=pendingKey;int connection=connectionGeneration;
-        imageLoader.bind(view,connection+":"+id,()->{
+        imageLoader.bind(view,connectionGeneration+":"+id,imageSource(id),large);
+    }
+    ChatImageLoader.Source imageSource(String id){
+        MessageApi client=api;String scope=pendingKey;
+        return ()->{
             byte[] local=ChatImage.local(files,scope,id);if(local!=null)return local;
             if(client==null)throw new java.io.IOException("请先连接服务器");return client.image(id);
-        },large);
+        };
     }
     static List<String> imageIds(JSONObject message){
         var ids=message.optJSONArray("imageIds");var result=new ArrayList<String>();
         if(ids!=null)for(int i=0;i<ids.length();i++)result.add(ids.optString(i));return result;
     }
-    private void removeImageFiles(JSONObject message){for(String id:imageIds(message))ChatImage.remove(files,pendingKey,id);}
+    private void removeImageFiles(JSONObject message){for(var doc:documents(message))ChatDocument.remove(files,pendingKey,doc.id);for(String id:imageIds(message))ChatImage.remove(files,pendingKey,id);}
     int preparingImages;
-    boolean canSend(String text) { return configured() && !openingConversation() && !configuring && !toolsBusy && preparingImages==0 && (!text.trim().isEmpty() || !draftImages.isEmpty()) && text.length()<=8000; }
+    boolean canSend(String text) { return configured() && !openingConversation() && !configuring && !toolsBusy && preparingImages==0 && preparingDocuments==0 && (!text.trim().isEmpty() || !draftImages.isEmpty() || !draftDocuments.isEmpty()) && text.length()<=8000; }
     void addImage(android.net.Uri uri,Runnable release) {
         if(api==null||configuring||draftImages.size()+preparingImages>=4){release.run();report(new java.io.IOException("请先连接服务器，每条最多 4 张图片"));return;}
         int connection=connectionGeneration;String room=selectedConversation;preparingImages++;notifyChanged();
@@ -123,6 +163,8 @@ final class ChatSession {
     int pendingBackupConnection, pendingImportConnection;
     String pendingImportAgent="";
     int connectionStamp(){return connectionGeneration;}
+    MessageApi searchClient(){return api;}
+    void searchFailure(Exception error){if(error instanceof MessageApi.SessionExpired)signedOut(error.getMessage());}
     interface Tool<T>{T run(MessageApi client)throws Exception;}
     <T> void tool(String label,Tool<T> work,java.util.function.Consumer<T> success){
         if(api==null||configuring||toolsBusy)return;
@@ -144,7 +186,8 @@ final class ChatSession {
     void replaceConversations(List<MessageApi.Conversation> rooms){conversations.clear();conversations.addAll(rooms);notifyChanged();}
     void clearLocalHistory(String room,long revision){
         historyRevisions.put(room,revision);historyCache.remove(room);
-        drafts.remove(room);imageDrafts.remove(room);
+        quoteDrafts.remove(room);if(room.equals(selectedConversation))quotedMessage=null;
+        drafts.remove(room);imageDrafts.remove(room);documentDrafts.remove(room);documentEpoch++;preparingDocuments=0;if(room.equals(selectedConversation))draftDocuments.clear();
         pending.removeIf(message->{if(!message.optString("conversationId","shared").equals(room))return false;removeImageFiles(message);return true;});savePending();
         if(room.equals(selectedConversation)){
             generation++;polling=false;messages.clear();jobs.clear();contextOperations=new JSONArray();draft="";draftImages.clear();
@@ -180,8 +223,9 @@ final class ChatSession {
         if(id.equals(selectedConversation))return;
         historyCache.remove(selectedConversation);historyCache.put(selectedConversation,new RoomSnapshot(this));
         while(historyCache.size()>8)historyCache.remove(historyCache.keySet().iterator().next());
-        drafts.put(selectedConversation,draft);imageDrafts.put(selectedConversation,new ArrayList<>(draftImages));selectedConversation=id;draft=drafts.getOrDefault(id,"");
-        draftImages.clear();draftImages.addAll(imageDrafts.getOrDefault(id,List.of()));
+        quoteDrafts.put(selectedConversation,quotedMessage);
+        documentDrafts.put(selectedConversation,new ArrayList<>(draftDocuments));drafts.put(selectedConversation,draft);imageDrafts.put(selectedConversation,new ArrayList<>(draftImages));selectedConversation=id;quotedMessage=quoteDrafts.get(id);draft=drafts.getOrDefault(id,"");
+        draftImages.clear();draftImages.addAll(imageDrafts.getOrDefault(id,List.of()));draftDocuments.clear();draftDocuments.addAll(documentDrafts.getOrDefault(id,List.of()));
         generation++;polling=false;loadingOlder=false;messages.clear();jobs.clear();contextOperations=new JSONArray();
         RoomSnapshot cached=historyCache.get(id);initialLoaded=cached!=null&&cached.loaded;hasOlder=cached!=null&&cached.older;
         if(cached!=null){messages.addAll(cached.messages);jobs.addAll(cached.jobs);}
@@ -302,6 +346,9 @@ final class ChatSession {
     boolean owns(MessageApi.Conversation room){
         return room!=null&&user!=null&&(user.id().equals(room.ownerId)||room.ownerId.isEmpty()&&user.home().equals("shared"));
     }
+    boolean managesGroup(MessageApi.Conversation room){
+        return room!=null&&room.kind.equals("group")&&!room.id.equals("shared")&&!room.id.startsWith("home:")&&owns(room);
+    }
     boolean mine(MessageApi.Message message){
         if(!message.role.equals("user"))return false;
         return user==null?message.deviceId.equals(deviceId):user.id().equals(message.userId);
@@ -414,7 +461,9 @@ final class ChatSession {
         jobs.clear();
         contextOperations=new JSONArray();
         draft="";
+        quotedMessage=null;quoteDrafts.clear();favoriteRequests.clear();
         drafts.clear();
+        documentEpoch++;preparingDocuments=0;documentDrafts.clear();draftDocuments.clear();documentPickerRoom="";
         imageDrafts.clear();
         draftImages.clear();
         pending.clear();
@@ -503,13 +552,16 @@ final class ChatSession {
         text = text.trim();
         if (!canSend(text)) return false;
         try {
+            JSONArray docIds=new JSONArray(),docs=new JSONArray();for(var doc:draftDocuments){doc.save(files,pendingKey);docIds.put(doc.id);docs.put(doc.json());}
             JSONArray imageIds=new JSONArray();
             for(ChatImage image:draftImages){image.save(files,pendingKey);imageIds.put(image.id);}
             JSONObject message = new JSONObject().put("clientMessageId", UUID.randomUUID().toString()).put("deviceId", deviceId)
                     .put("sender", sender).put("platform", "android").put("text", text).put("conversationId",selectedConversation).put("mentionAgentIds",new JSONArray());
-            message.put("imageIds",imageIds);pending.add(message);
+            if(quotedMessage!=null)message.put("quoteMessageId",quotedMessage.id).put("quote",quotedMessage.json);
+            message.put("imageIds",imageIds).put("documentIds",docIds).put("documents",docs);pending.add(message);
             if (!savePending()) { pending.remove(message); throw new java.io.IOException("无法保存待发消息，请检查设备存储后重试。"); }
-            draft = "";draftImages.clear();imageDrafts.remove(selectedConversation); revision++; retry(message); return true;
+            quotedMessage=null;quoteDrafts.remove(selectedConversation);
+            draft = "";draftImages.clear();imageDrafts.remove(selectedConversation);draftDocuments.clear();documentDrafts.remove(selectedConversation); revision++; retry(message); return true;
         } catch (Exception e) { report(e); return false; }
     }
     void retry(JSONObject message) {
@@ -519,6 +571,7 @@ final class ChatSession {
         int epoch = connectionGeneration; MessageApi client = api;
         worker.execute(() -> {
             try {
+                for(var doc:documents(message)){byte[] bytes=ChatDocument.local(files,pendingKey,doc.id);client.uploadDocument(doc,message.optString("conversationId","shared"),bytes);}
                 for(String imageId:imageIds(message)){
                     byte[] data=ChatImage.local(files,pendingKey,imageId);
                     if(data!=null)client.uploadImage(imageId,message.optString("conversationId","shared"),data);

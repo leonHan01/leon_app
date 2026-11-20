@@ -1,0 +1,173 @@
+{
+  "date": "2026-11-21",
+  "implementation": "local only; no deployment or installation",
+  "server": {
+    "tests": 94,
+    "failures": 0,
+    "errors": 0,
+    "suites": [
+      {
+        "name": "ContextMemoryIntegrationTest",
+        "tests": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "AgentChatIntegrationTest",
+        "tests": 33,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "ChatBackupIntegrationTest",
+        "tests": 4,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "ChatBackupPersistenceTest",
+        "tests": 1,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "ChatAccountIntegrationTest",
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "ChatSearchIntegrationTest",
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "ChatImageIntegrationTest",
+        "tests": 3,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "DocumentAttachmentsIntegrationTest",
+        "tests": 8,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "HelperOutreachIntegrationTest",
+        "tests": 12,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "DeviceMessageIntegrationTest",
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "DeviceMessagePersistenceTest",
+        "tests": 2,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "OfficialAgentModelClientTest",
+        "tests": 7,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    ],
+    "package": "passed",
+    "publishedFiles": 10,
+    "concurrentEditsAfterPublication": []
+  },
+  "clients": {
+    "macOSRelease": "passed",
+    "iOSRelease": "passed; code signing disabled",
+    "iOSCore": "46 scenarios passed",
+    "modelProtocolCompatibility": "passed for both Mac and iOS",
+    "androidUnitTests": {
+      "status": "blocked in current workspace reports",
+      "observedReports": {
+        "tests": 60,
+        "failures": 54,
+        "errors": 0,
+        "skipped": 0
+      },
+      "diagnostic": "java.lang.VerifyError in com.vivo.push.sdk.BasePushMessageReceiver.isAllowNet during Robolectric initialization; the push SDK changed while context-memory work was running",
+      "scope": "Current Android full suite is not accepted as passing."
+    },
+    "androidLint": {
+      "status": "blocked",
+      "file": "android/app/src/main/java/com/leon/app/ChatNotifications.java",
+      "line": 84,
+      "diagnostic": "NotificationPermission in the notification module; unrelated to context memory"
+    }
+  },
+  "sourceManifest": [
+    {
+      "path": "README.md",
+      "before": "73b95ae63df9aff796502a6cc3cc4f3a5f7df55c9a211a87845c99ef2db729c2",
+      "after": "3f81c630e590019611297616da9975e6298fadeb64b228c2ca50c213473d51f3"
+    },
+    {
+      "path": "src/main/java/com/leon/workflow/messaging/AgentContextManager.java",
+      "before": "56dc116b6520ce56b010b62299297fccb36f46a0be0fd82ac236d3dc10328507",
+      "after": "cd39ccddd4c1f9efd839ceaad0b0bf651065d5bed213583a75aa9130fbbe564f"
+    },
+    {
+      "path": "src/main/java/com/leon/workflow/messaging/ChatBackupService.java",
+      "before": "eb4edfa812529af074b1d9eea30b67b86131f7a4f0b71fd1f58924d4b1795d7c",
+      "after": "f29c8b7e6602e7680ba2d9da169de7fa00ab375c33e88121d79efe362b358aa6"
+    },
+    {
+      "path": "src/main/java/com/leon/workflow/messaging/ContextHistorySearch.java",
+      "before": null,
+      "after": "37cfa04729051fd6e0d978dde606b5b3fbe7a7634ebd558703a06c1685236695"
+    },
+    {
+      "path": "src/main/java/com/leon/workflow/messaging/ConversationFactMemory.java",
+      "before": null,
+      "after": "96e78f64dd9cf8c2346c1ed4b041ea9ebc23819ac90fc7b305166632d7033b61"
+    },
+    {
+      "path": "src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java",
+      "before": "e64f23af68b9e9e70f6f30daab8b204b9c7459f719de8282da67f0276e985889",
+      "after": "6e74636cf52035f4af0af51d1aab021531a540c02534f359b6337b1f707a6f5d"
+    },
+    {
+      "path": "src/main/java/com/leon/workflow/messaging/HelperConversationMemory.java",
+      "before": "304577c5af7d1e8fe2d57f5a85b7b9cf9ae79d15204f68367422209197b33f76",
+      "after": "02330cb87613572632271336c9aa1f936ab245e3ab04f3205130b17c740b7a58"
+    },
+    {
+      "path": "src/test/java/com/leon/workflow/messaging/AgentChatIntegrationTest.java",
+      "before": "1eed14fca0c31a9716a6c3c4069d5c73335db26f561813e30946798b665b4900",
+      "after": "96adfe978119e049953b55279e3d8729df82a97359fab7f86830ca7dede7b3ed"
+    },
+    {
+      "path": "src/test/java/com/leon/workflow/messaging/ContextMemoryIntegrationTest.java",
+      "before": null,
+      "after": "b9e5f9a85ff1d5bb198f3be4d62e0df7b554e7836bc05f481c2522ff3d484a62"
+    },
+    {
+      "path": "src/test/java/com/leon/workflow/messaging/HelperOutreachIntegrationTest.java",
+      "before": "0a430ab8908942d6cc0ba27020b784db4580b5bb2fb34d53c77301d59a1c6202",
+      "after": "eabd71604ac79a21978cf4995465a70a58f92c921dbf5c6ed921eb14bbd4b243"
+    }
+  ]
+}

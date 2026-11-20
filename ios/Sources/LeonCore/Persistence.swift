@@ -5,9 +5,17 @@ protocol Persistence: Sendable {
     func deviceID() async throws -> String
     func load(scope: String) async throws -> OutboxSnapshot
     func save(scope: String, snapshot: OutboxSnapshot) async throws
+    func saveDocument(_ document:DraftDocument,scope:String) async throws
+    func document(_ id:String,scope:String) async throws -> Data?
+    func removeDocuments(_ ids:[String],scope:String) async throws
     func saveImage(_ image: DraftImage, scope: String) async throws
     func image(_ id: String, scope: String) async throws -> Data?
     func removeImages(_ ids: [String], scope: String) async throws
+}
+extension Persistence {
+    func saveDocument(_ document:DraftDocument,scope:String) async throws {try await saveImage(DraftImage(id:document.id,data:document.data),scope:scope)}
+    func document(_ id:String,scope:String) async throws -> Data? {try await image(id,scope:scope)}
+    func removeDocuments(_ ids:[String],scope:String) async throws {try await removeImages(ids,scope:scope)}
 }
 protocol CredentialStorage: Sendable {
     func read() async throws -> Credentials?
@@ -56,6 +64,13 @@ actor FilePersistence: Persistence {
     func save(scope: String, snapshot: OutboxSnapshot) throws {
         try write(JSONEncoder().encode(snapshot),to:directory(scope).appendingPathComponent("outbox.json"))
     }
+    private func documentURL(_ id:String,scope:String)throws -> URL {
+        guard UUID(uuidString:id) != nil else {throw NativeError(message:"文档标识无效。")}
+        return try directory(scope).appendingPathComponent("documents").appendingPathComponent(id)
+    }
+    func saveDocument(_ document:DraftDocument,scope:String)throws {try write(document.data,to:documentURL(document.id,scope:scope))}
+    func document(_ id:String,scope:String)throws -> Data? {let file=try documentURL(id,scope:scope);return FileManager.default.fileExists(atPath:file.path) ? try LocalFile.read(file,limit:10*1024*1024) : nil}
+    func removeDocuments(_ ids:[String],scope:String)throws {for id in ids {let file=try documentURL(id,scope:scope);if FileManager.default.fileExists(atPath:file.path){try FileManager.default.removeItem(at:file)}}}
     func saveImage(_ image: DraftImage, scope: String) throws { try write(image.data,to:imageURL(image.id,scope:scope)) }
     func image(_ id: String, scope: String) throws -> Data? {
         let file = try imageURL(id,scope:scope)

@@ -11,12 +11,22 @@ protocol ChatAPI: AnyObject, Sendable {
     func conversations() async throws -> [Conversation]
     func heartbeat(deviceId: String, name: String) async throws
     func page(room: String, after: Int64?, before: Int64?) async throws -> MessagePage
+    func search(query: String, room: String?, before: Int64?) async throws -> ChatSearchPage
+    func searchContext(room: String, message: Int64, direction: String) async throws -> ChatSearchContext
     func direct(_ agent: String) async throws -> Conversation
     func newThread(agent: String, name: String, requestId: String) async throws -> Conversation
+    func branch(room:String,message:Int64,name:String,requestId:String) async throws -> Conversation
     func group(name: String, agentIds: [String], usernames: [String]) async throws -> Conversation
     func members(room: String, adding: [String]?) async throws -> [ChatUser]
+    func addAgents(room:String,agentIds:[String]) async throws -> Conversation
     func send(_ message: Outgoing) async throws -> Message
     func retryJob(_ job: AgentJob) async throws
+    func addFavorite(_ message: Int64) async throws -> FavoriteItem
+    func favorites(query:String,before:Int64?) async throws -> FavoritePage
+    func removeFavorite(_ id:Int64) async throws
+    func favoriteImage(_ favorite:Int64,image:String) async throws -> Data
+    func uploadDocument(_ document:DocumentAttachment,room:String,data:Data) async throws
+    func document(_ id:String,favorite:Int64?) async throws -> Data
     func uploadImage(id: String, room: String, data: Data) async throws
     func image(_ id: String) async throws -> Data
     func avatar(_ id: String) async throws -> Data
@@ -29,7 +39,12 @@ protocol ChatAPI: AnyObject, Sendable {
     func backup(room: String) async throws -> Data
     func restore(_ bytes: Data, agent: String?, requestId: String) async throws -> Conversation
 }
-final class MessageAPI: ChatAPI, @unchecked Sendable {
+extension ChatAPI {
+    func branch(room:String,message:Int64,name:String,requestId:String) async throws -> Conversation {throw NativeError(message:"服务端尚未支持对话分支，请升级服务端。")}
+    func uploadDocument(_ document:DocumentAttachment,room:String,data:Data) async throws {throw NativeError(message:"文档接口不可用。")}
+    func document(_ id:String,favorite:Int64?) async throws -> Data {throw NativeError(message:"文档接口不可用。")}
+}
+final class MessageAPI: ChatAPI, NotificationAPI, @unchecked Sendable {
     let base: URL
     private let token: String
     private let session: URLSession
@@ -64,7 +79,7 @@ final class MessageAPI: ChatAPI, @unchecked Sendable {
             case 401: fallback = token.hasPrefix("chat_") ? "登录已失效，请重新登录。" : "服务访问令牌未通过认证。"
             case 403: fallback = "服务器拒绝访问，请检查权限和 HTTPS 代理。"
             case 404: fallback = "服务端尚未支持此功能，请升级服务端。"
-            case 413: fallback = "图片或备份超过服务允许的大小。"
+            case 413: fallback = "附件或备份超过服务允许的大小。"
             case 300...399: fallback = "服务发生重定向，请填写最终 HTTPS 地址。"
             default: fallback = "请求失败（HTTP \(http.statusCode)），请稍后重试。"
             }
@@ -96,9 +111,23 @@ final class MessageAPI: ChatAPI, @unchecked Sendable {
     private func identifier(_ id: String) throws -> String {
         guard UUID(uuidString: id) != nil else { throw NativeError(message: "标识无效。") }; return id
     }
+    func search(query: String, room: String?, before: Int64?) async throws -> ChatSearchPage {
+        var items = [URLQueryItem(name:"q",value:query)]
+        if let room { items.append(URLQueryItem(name:"conversationId",value:room)) }
+        if let before { items.append(URLQueryItem(name:"before",value:String(before))) }
+        return try await get("api/device-messages/search",query:items)
+    }
+    func searchContext(room: String, message: Int64, direction: String) async throws -> ChatSearchContext {
+        try await get("api/device-messages/context",query:[URLQueryItem(name:"conversationId",value:room),URLQueryItem(name:"messageId",value:String(message)),URLQueryItem(name:"direction",value:direction)])
+    }
     func direct(_ agent: String) async throws -> Conversation { try await post("api/conversations/direct/\(identifier(agent))", [:]) }
     func newThread(agent: String, name: String, requestId: String) async throws -> Conversation {
         try await post("api/conversations/direct/\(identifier(agent))/threads", ["name":name,"requestId":requestId])
+    }
+    func branch(room:String,message:Int64,name:String,requestId:String) async throws -> Conversation {
+        guard message>0 else {throw NativeError(message:"请选择已发送成功的消息。")}
+        guard room.range(of:"^[A-Za-z0-9:-]{1,80}$",options:.regularExpression) != nil else {throw NativeError(message:"会话标识无效。")}
+        return try JSONDecoder().decode(Conversation.self,from:await request("api/conversations/\(room)/branches",body:JSONSerialization.data(withJSONObject:["messageId":message,"name":name,"requestId":requestId]),timeout:90))
     }
     func group(name: String, agentIds: [String], usernames: [String]) async throws -> Conversation {
         try await post("api/conversations/groups", ["name":name,"agentIds":agentIds,"usernames":usernames])
@@ -107,10 +136,42 @@ final class MessageAPI: ChatAPI, @unchecked Sendable {
         let path = "api/conversations/\(room)/members"
         if let adding { return try await post(path, ["usernames":adding]) }; return try await get(path)
     }
-    func send(_ message: Outgoing) async throws -> Message {
-        try JSONDecoder().decode(Message.self, from: await request("api/device-messages", body: JSONEncoder().encode(message)))
+    func addAgents(room:String,agentIds:[String]) async throws -> Conversation {
+        try await post("api/conversations/\(room)/agents",["agentIds":agentIds])
     }
+    func send(_ message: Outgoing) async throws -> Message {
+        if message.quoteMessageId != nil {
+            let features: [String:Bool] = try await get("api/device-messages/features")
+            guard features["quotes"] == true else { throw NativeError(message:"服务端尚未支持引用回复，请先升级服务端。") }
+        }
+        var payload=message;payload.quote=nil;payload.documents=nil
+        return try JSONDecoder().decode(Message.self, from: await request("api/device-messages", body: JSONEncoder().encode(payload)))
+    }
+    func addFavorite(_ message:Int64) async throws -> FavoriteItem {try await post("api/device-messages/\(message)/favorite",[:])}
+    func favorites(query:String,before:Int64?) async throws -> FavoritePage {
+        var items=[URLQueryItem(name:"q",value:query)]
+        if let before {items.append(URLQueryItem(name:"before",value:String(before)))}
+        return try await get("api/device-messages/favorites",query:items)
+    }
+    func removeFavorite(_ id:Int64) async throws {_ = try await request("api/device-messages/favorites/\(id)/remove",body:Data("{}".utf8))}
+    func favoriteImage(_ favorite:Int64,image:String) async throws -> Data {try await request("api/device-messages/favorites/\(favorite)/images/\(identifier(image))",limit:1_048_576)}
     func retryJob(_ job: AgentJob) async throws { _ = try await request("api/device-messages/\(job.messageId)/agents/\(identifier(job.agentId))/retry", body: Data("{}".utf8)) }
+    func notificationStatus() async throws -> NotificationStatus {try await get("api/device-messages/notifications/status")}
+    func notifications(device:String,after:Int64?,preview:Bool) async throws -> NotificationPage {
+        var query=[URLQueryItem(name:"deviceId",value:device),URLQueryItem(name:"preview",value:String(preview))]
+        if let after {query.append(URLQueryItem(name:"after",value:String(after)))}
+        return try await get("api/device-messages/notifications",query:query)
+    }
+    func registerNotifications(_ registration:PushRegistration) async throws {_ = try await request("api/device-messages/notifications/devices",body:JSONEncoder().encode(registration))}
+    func removeNotifications(device:String) async throws {_ = try await request("api/device-messages/notifications/devices/\(identifier(device))/remove",body:Data("{}".utf8))}
+    func uploadDocument(_ document:DocumentAttachment,room:String,data:Data) async throws {
+        guard data.count<=10*1024*1024 else {throw NativeError(message:"文件不能超过 10 MB。")}
+        _ = try await request("api/device-messages/documents",query:[URLQueryItem(name:"id",value:try identifier(document.id)),URLQueryItem(name:"conversationId",value:room),URLQueryItem(name:"name",value:document.name)],body:data,type:"application/octet-stream",timeout:90)
+    }
+    func document(_ id:String,favorite:Int64?) async throws -> Data {
+        let prefix=favorite.map {"api/device-messages/favorites/\($0)/documents/"} ?? "api/device-messages/documents/"
+        return try await request(prefix+identifier(id),limit:10*1024*1024,timeout:60)
+    }
     func uploadImage(id: String, room: String, data: Data) async throws {
         guard data.count <= 1_048_576 else { throw NativeError(message: "图片不能超过 1 MB。") }
         _ = try await request("api/device-messages/images", query: [URLQueryItem(name:"id",value:try identifier(id)), URLQueryItem(name:"conversationId",value:room)], body:data,type:"image/jpeg")

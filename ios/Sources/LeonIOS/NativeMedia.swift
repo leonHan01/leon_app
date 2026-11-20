@@ -145,6 +145,7 @@ struct NativeComposer: UIViewRepresentable {
     var dismissSuggestions: () -> Void
     var pasteProvider: (NSItemProvider) -> Void
     var beganEditing: () -> Void
+    var focusRequest: Int64? = nil
     func makeUIView(context: Context) -> ComposerTextView {
         let view = ComposerTextView(); view.delegate = context.coordinator; view.pasteDelegate = context.coordinator
         view.font = UIFontMetrics(forTextStyle:.body).scaledFont(for:UIFont.systemFont(ofSize:16)); view.adjustsFontForContentSizeCategory = true
@@ -156,6 +157,10 @@ struct NativeComposer: UIViewRepresentable {
     }
     func updateUIView(_ view: ComposerTextView, context: Context) {
         context.coordinator.parent = self
+        if context.coordinator.lastFocusRequest != focusRequest {
+            context.coordinator.lastFocusRequest=focusRequest
+            if focusRequest != nil {DispatchQueue.main.async {view.becomeFirstResponder()}}
+        }
         if view.text != text && view.markedTextRange == nil { view.text = text; view.selectedRange = NSRange(location:min(selection.location,(text as NSString).length),length:0) }
         else if view.markedTextRange == nil, view.selectedRange != selection, NSMaxRange(selection) <= (text as NSString).length { view.selectedRange = selection }
         view.submit = { [weak view] in if let view {context.coordinator.enter(view)} }; view.move = move; view.dismissSuggestions = dismissSuggestions; view.hasSuggestions = suggestionCount > 0
@@ -171,6 +176,7 @@ struct NativeComposer: UIViewRepresentable {
     }
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     final class Coordinator: NSObject, UITextViewDelegate, UITextPasteDelegate {
+        var lastFocusRequest:Int64?
         var parent: NativeComposer
         init(_ parent: NativeComposer) { self.parent = parent }
         func textViewDidChange(_ view: UITextView) { parent.text = view.text; parent.selection = view.selectedRange; parent.composing = view.markedTextRange != nil;(view as? ComposerTextView)?.reportHeight() }

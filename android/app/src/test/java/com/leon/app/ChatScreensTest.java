@@ -149,14 +149,68 @@ public class ChatScreensTest {
         assertNull(activity.getWindow().getDecorView().findViewWithTag("agent-history:direct:sol"));
         tagged("agent-history:thread:one").performClick();assertChat("Luna 的周末计划");
         session.select("direct:luna");view(R.id.chat_add).performClick();
-        for(String command:List.of("compact","context","new","load","clear"))assertTrue(tagged("chat-tool:"+command).isShown());
-        assertNull(activity.getWindow().getDecorView().findViewWithTag("chat-tool:threads"));
+        for(String command:List.of("compact","context","new","threads"))assertTrue(tagged("chat-tool:"+command).isShown());
+        assertNull(activity.getWindow().getDecorView().findViewWithTag("chat-tool:load"));
+        assertNull(activity.getWindow().getDecorView().findViewWithTag("chat-tool:clear"));
         assertNull(activity.getWindow().getDecorView().findViewWithTag("chat-tool:backup"));
         snapshot("chat-quick-commands");
-        for(String command:List.of("compact","context","new","load","clear")){
-            View button=tagged("chat-tool:"+command);assertTrue(button.getWidth()>=68);assertTrue(button.getHeight()>=48);
-            int[] position=new int[2];button.getLocationOnScreen(position);assertTrue(position[0]>=0);assertTrue(position[0]+button.getWidth()<=360);
+        for(String command:List.of("compact","context","new","threads")){
+            View button=tagged("chat-tool:"+command);assertTrue(button.getWidth()>=64);assertTrue(button.getHeight()>=48);
+            int[] position=new int[2];button.getLocationOnScreen(position);assertTrue(position[0]>=0);assertTrue(position[0]+button.getWidth()<=((View)button.getParent()).getWidth()+12);
+            int[] first=new int[2];tagged("chat-tool:compact").getLocationOnScreen(first);assertEquals("Quick commands must share one row",first[1],position[1]);
         }
+        input().setText("返回后继续输入");int count=session.conversations.size();
+        tagged("chat-tool:threads").performClick();
+        assertTrue(view(R.id.agent_detail_screen).isShown());assertNotNull(tagged("agent-history:thread:one"));
+        assertEquals("direct:luna",session.selectedConversation);assertEquals(count,session.conversations.size());
+        view(R.id.agent_detail_back).performClick();assertChat("Luna");
+        assertEquals("返回后继续输入",input().getText().toString());assertEquals(View.GONE,view(R.id.chat_extras).getVisibility());
+    }
+
+    @Test public void groupConversationListSelectsAgentWithoutCreatingOrSwitchingChat() {
+        view(R.id.tab_groups).performClick();tagged("group:shared").performClick();
+        input().setText("群聊草稿");int count=session.conversations.size();
+        view(R.id.chat_add).performClick();tagged("chat-tool:threads").performClick();
+        assertEquals(View.GONE,view(R.id.chat_extras).getVisibility());
+        var chooser=(android.app.AlertDialog)org.robolectric.shadows.ShadowDialog.getLatestDialog();
+        assertNotNull(chooser);chooser.getListView().performItemClick(null,1,1);
+        assertTrue(view(R.id.agent_detail_screen).isShown());assertEquals("Sol",((TextView)view(R.id.agent_detail_name)).getText().toString());
+        assertEquals("shared",session.selectedConversation);assertEquals(count,session.conversations.size());
+        view(R.id.agent_detail_back).performClick();assertChat("设备群聊");assertEquals("群聊草稿",input().getText().toString());
+    }
+
+    @Test public void longPressQuoteKeepsDraftAndCancelRemovesOnlyTheReference()throws Exception{
+        view(R.id.tab_agents).performClick();openAgentChat("luna");
+        var original=message(71,"luna","Luna","这是一条可以引用的消息",false);session.messages.add(original);session.revision++;session.notifyChanged();
+        input().setText("已有草稿");tagged("message-actions:71").performLongClick();
+        var menu=(android.app.AlertDialog)org.robolectric.shadows.ShadowDialog.getLatestDialog();
+        assertEquals("引用",((TextView)menu.getListView().getAdapter().getView(1,null,menu.getListView())).getText().toString());
+        menu.getListView().performItemClick(null,1,1);assertEquals(71,session.quotedMessage.id);assertTrue(tagged("quote-preview").isShown());assertEquals("已有草稿",input().getText().toString());
+        snapshot("chat-quoted");
+        session.select("direct:sol");assertNull(session.quotedMessage);session.select("direct:luna");assertEquals(71,session.quotedMessage.id);
+        tagged("cancel-quote").performClick();assertNull(session.quotedMessage);assertEquals("已有草稿",input().getText().toString());
+    }
+    @Test public void imageOnlyAndRichMessagesExposeTheSameMessageActions()throws Exception{
+        view(R.id.tab_agents).performClick();openAgentChat("luna");
+        var rich=message(72,"luna","Luna","```java\nint x=1;\n```",false);session.messages.add(rich);
+        var image=new JSONObject().put("id",73).put("createdAt",1795053601000L).put("clientMessageId","fixture-image").put("deviceId","other").put("sender","Luna").put("platform","agent").put("text","").put("conversationId","direct:luna").put("role","assistant").put("agentId","luna").put("images",new JSONArray().put(new JSONObject().put("id","11111111-1111-4111-8111-111111111111")));
+        session.messages.add(new MessageApi.Message(image));session.revision++;session.notifyChanged();
+        for(long id:new long[]{72,73}){tagged("message-actions:"+id).performLongClick();var menu=(android.app.AlertDialog)org.robolectric.shadows.ShadowDialog.getLatestDialog();assertEquals(4,menu.getListView().getCount());assertEquals("从这里创建分支",menu.getListView().getAdapter().getItem(3));menu.dismiss();}
+        activity.onBackPressed();view(R.id.tab_settings).performClick();assertNotNull(tagged("my-favorites"));
+    }
+
+    @Test public void branchDialogKeepsSourceDraftAndRejectsAnEmptyName()throws Exception {
+        view(R.id.tab_agents).performClick();openAgentChat("luna");
+        Field client=ChatSession.class.getDeclaredField("api");client.setAccessible(true);client.set(session,new MessageApi("https://branch.invalid","chat_fixture"));
+        var point=message(74,"luna","Luna","可以另开讨论的消息",false);session.messages.add(point);session.revision++;session.notifyChanged();
+        input().setText("原会话草稿");tagged("message-actions:74").performLongClick();
+        var menu=(android.app.AlertDialog)org.robolectric.shadows.ShadowDialog.getLatestDialog();
+        assertEquals("从这里创建分支",menu.getListView().getAdapter().getItem(3));menu.getListView().performItemClick(null,3,3);
+        var prompt=(android.app.AlertDialog)org.robolectric.shadows.ShadowDialog.getLatestDialog();assertTrue(prompt.isShowing());
+        var name=(EditText)prompt.getWindow().getDecorView().findViewWithTag("branch_name");assertNotNull(name);assertTrue(name.getText().toString().contains("分支"));
+        name.setText("");prompt.getButton(android.app.AlertDialog.BUTTON_POSITIVE).performClick();assertNotNull(name.getError());assertFalse(session.toolsBusy);
+        prompt.getButton(android.app.AlertDialog.BUTTON_NEGATIVE).performClick();
+        assertEquals("direct:luna",session.selectedConversation);assertEquals("原会话草稿",input().getText().toString());
     }
 
     @Test public void renderSmallPhoneScreens() throws Exception {
@@ -191,6 +245,12 @@ public class ChatScreensTest {
         File directory=new File("build/outputs/ui-previews");assertTrue(directory.isDirectory()||directory.mkdirs());
         try(FileOutputStream out=new FileOutputStream(new File(directory,name+".png"))){bitmap.compress(Bitmap.CompressFormat.PNG,100,out);}
         bitmap.recycle();
+        if(name.equals("chat-quick-commands")){
+            View panel=view(R.id.chat_extras);Bitmap artwork=Bitmap.createBitmap(panel.getWidth(),panel.getHeight(),Bitmap.Config.ARGB_8888);
+            Canvas canvas=new Canvas(artwork);canvas.drawColor(ChatUi.BAR);panel.draw(canvas);
+            try(FileOutputStream out=new FileOutputStream(new File(directory,"quick-panel.png"))){artwork.compress(Bitmap.CompressFormat.PNG,100,out);}
+            artwork.recycle();
+        }
     }
     @Test public void agentDetailsShowProfileWithoutOpeningOrCreatingAConversation() throws Exception {
         session.conversations.add(room("thread:one","周末计划","direct","luna"));
@@ -217,7 +277,8 @@ public class ChatScreensTest {
         var menu=org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu().getMenu();
         assertNotNull(menu.findItem(menu.getItem(0).getItemId()));
         assertEquals("查看 Agent 信息",menu.getItem(0).getTitle().toString());
-        assertEquals("会话信息",menu.getItem(1).getTitle().toString());
+        assertEquals("查找聊天记录",menu.findItem(R.id.find_chat_history).getTitle().toString());
+        assertTrue(java.util.stream.IntStream.range(0,menu.size()).anyMatch(i->menu.getItem(i).getTitle().toString().equals("会话信息")));
         menu.performIdentifierAction(menu.getItem(0).getItemId(),0);
         assertTrue(view(R.id.agent_detail_screen).isShown());
         assertEquals("Luna",((TextView)view(R.id.agent_detail_name)).getText().toString());
@@ -265,6 +326,30 @@ public class ChatScreensTest {
     private void openProfileFromChat(String id,String name) throws Exception {
         session.messages.add(message(50,id,name,"点击头像查看详情",false));session.revision++;session.notifyChanged();
         tagged("message-agent-avatar:"+id).performClick();
+    }
+    @Test public void ownedGroupChatHasDirectUserAndAgentInvitationEntries()throws Exception{
+        session.user=new MessageApi.User("owner","Owner");
+        session.conversations.add(new MessageApi.Conversation(new JSONObject().put("id","group:owned").put("name","我的群聊").put("kind","group").put("agentIds",new JSONArray().put("luna")).put("ownerId","owner")));
+        session.agents.removeIf(agent->agent.id.equals("terra"));
+        session.agents.add(new MessageApi.Agent(new JSONObject().put("id","terra").put("name","Terra").put("handle","terra").put("provider","openai").put("enabled",false)));
+        session.notifyChanged();view(R.id.tab_groups).performClick();tagged("group:group:owned").performClick();input().setText("群聊草稿");
+        view(R.id.chat_more).performClick();var menu=org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu().getMenu();
+        assertNotNull(menu.findItem(R.id.chat_invite_users));assertNotNull(menu.findItem(R.id.chat_invite_agents));
+        menu.performIdentifierAction(R.id.chat_invite_users,0);
+        var users=(android.app.AlertDialog)org.robolectric.shadows.ShadowDialog.getLatestDialog();
+        assertNotNull(users.getWindow().getDecorView().findViewWithTag("group_invite_usernames"));users.dismiss();
+        menu.performIdentifierAction(R.id.chat_invite_agents,0);
+        var agents=(android.app.AlertDialog)org.robolectric.shadows.ShadowDialog.getLatestDialog();
+        assertNotNull(agents.getWindow().getDecorView().findViewWithTag("invite-agent:sol"));
+        assertNull(agents.getWindow().getDecorView().findViewWithTag("invite-agent:luna"));
+        assertNull(agents.getWindow().getDecorView().findViewWithTag("invite-agent:terra"));
+        agents.dismiss();assertChat("我的群聊");assertEquals("群聊草稿",input().getText().toString());
+        session.user=new MessageApi.User("member","Member");view(R.id.chat_more).performClick();
+        menu=org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu().getMenu();
+        assertNull(menu.findItem(R.id.chat_invite_users));assertNull(menu.findItem(R.id.chat_invite_agents));
+        session.user=new MessageApi.User("owner","Leon");session.select("shared");view(R.id.chat_more).performClick();
+        menu=org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu().getMenu();
+        assertNull(menu.findItem(R.id.chat_invite_users));assertNull(menu.findItem(R.id.chat_invite_agents));
     }
     private void openAgentChat(String id){tagged("agent:"+id).performClick();assertTrue(view(R.id.chat_screen).isShown());assertFalse(view(R.id.agent_detail_screen).isShown());}
     private void backToDirectory(){activity.onBackPressed();assertTrue(view(R.id.home_screen).isShown());}

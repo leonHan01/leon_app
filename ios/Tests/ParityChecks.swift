@@ -9,6 +9,17 @@ private actor DelayedPicture {
 @MainActor
 extension Checks {
     func checkParity() async throws {
+        try await run("Only custom group owners can invite users and Agents") {
+            let value = await store();value.user = ChatUser(id:"owner",username:"Alice")
+            let room = Conversation(id:"group:owned",name:"项目群",kind:"group",agentId:nil,agentIds:[],ownerId:"owner")
+            try expect(value.managesGroup(room),"owner cannot manage custom group")
+            value.user = ChatUser(id:"member",username:"Bob")
+            try expect(!value.managesGroup(room),"ordinary member can manage group")
+            value.user = ChatUser(id:"owner",username:"Leon")
+            for room in [Conversation(id:"shared",name:"设备群聊",kind:"group",agentId:nil,agentIds:[],ownerId:"owner"),Conversation(id:"home:owner",name:"设备群聊",kind:"group",agentId:nil,agentIds:[],ownerId:"owner"),Conversation(id:"direct:agent",name:"私聊",kind:"direct",agentId:"agent",agentIds:["agent"],ownerId:"owner")] {
+                try expect(!value.managesGroup(room),"personal or direct chat allows invitations")
+            }
+        }
         try await run("Android legacy group ownership accepts missing and empty owners") {
             let value = await store();value.user = ChatUser(id:"owner",username:"Leon")
             for owner in [nil,""] as [String?] {

@@ -1,0 +1,51 @@
+diff --git a/src/main/java/com/leon/workflow/messaging/AgentContextManager.java b/src/main/java/com/leon/workflow/messaging/AgentContextManager.java
+--- a/src/main/java/com/leon/workflow/messaging/AgentContextManager.java
++++ b/src/main/java/com/leon/workflow/messaging/AgentContextManager.java
+@@ -465,6 +465,7 @@
+     static int inputBudget(AgentRegistry.Agent agent) {
+         if(isLuna(agent)) return 3000;
+         String model=agent.model().toLowerCase(Locale.ROOT);
++        if(agent.provider().equalsIgnoreCase("openai")&&model.matches("gpt-[0-9]+(?:\\.[0-9]+)?-(?:sol|terra)(?:-.*)?"))return 20000;
+         return agent.provider().equals("deepseek")||model.startsWith("gpt-6")||model.startsWith("gpt-5")||model.startsWith("gpt-4.1")||model.startsWith("gpt-4o")||model.startsWith("o3")||model.startsWith("o4")?12000:5500;
+     }
+     private static int factBudget(AgentRegistry.Agent agent) { return isLuna(agent)?500:1000; }
+diff --git a/src/test/java/com/leon/workflow/messaging/LunaContextIntegrationTest.java b/src/test/java/com/leon/workflow/messaging/LunaContextIntegrationTest.java
+--- a/src/test/java/com/leon/workflow/messaging/LunaContextIntegrationTest.java
++++ b/src/test/java/com/leon/workflow/messaging/LunaContextIntegrationTest.java
+@@ -92,4 +92,21 @@
+         assertEquals(3,contexts.info(room.id()).agents().getFirst().facts().size());
+     }
+ 
++    @Test void solAndTerraCarryMoreThanTwelveThousandTokensAndCompactAtSixteenThousand() throws Exception {
++        for(String modelName:List.of("gpt-6.2-sol","GPT-6.1-TERRA")){
++            var selected=agent(modelName.contains("sol")?"sol-budget":"terra-budget",modelName);
++            var room=chat.direct(selected.id());var compacted=new AtomicInteger();var replies=new AtomicInteger();
++            doAnswer(call->{
++                List<Map<String,String>> input=call.getArgument(2);assertTrue(AgentContextManager.tokens(input)<=20000);
++                if(compression(input)){compacted.incrementAndGet();return "{\"summary\":\"保留当前进展。\",\"facts\":[]}";}
++                if(replies.getAndIncrement()==0){assertTrue(AgentContextManager.tokens(input)>12000);assertTrue(AgentContextManager.tokens(input)<16000);}
++                return "ok";
++            }).when(model).complete(any(),anyString(),anyList());
++            assertEquals(20000,contexts.info(room.id()).inputTokenBudget());
++            send(room.id(),"原文-"+"中".repeat(6500));engine.runNext();assertEquals(0,compacted.get());assertEquals(1,replies.get());
++            send(room.id(),"后续-"+"中".repeat(1700));engine.runNext();assertEquals(1,compacted.get());assertEquals(2,replies.get());
++            assertTrue(store.page(room.id(),null,null,100).jobs().isEmpty());
++        }
++    }
++
+ }
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -434,7 +434,10 @@
+ 普通回复由服务端组装 Agent 指令、当前用户背景、用户已确认事实、阶段摘要、尚未压缩的完整对话和本次问题。移除按 N 轮触发自动压缩的机制：按模型的 Token 压力阈值尝试压缩（常规模型 80%，Luna 60%），成功后优先保留约半个预算内的最新完整轮次；短聊天即使超过原先的保留轮数也继续携带原文。分页的 32 个历史锚点只是数据库读取批次，不是自动压缩条件。旧 `recentRounds` / `recent_rounds` 字段和设置接口仅用于旧客户端及备份兼容，不再决定新版原文窗口或自动压缩时机；手动 `/compact` 继续保留最近一轮。
+ 
+ 
+-Luna 使用更小的专用上下文：输入预算由 4,000 降至 3,000 个估算 Token，约 1,800 时即尝试压缩，压缩后优先保留约 1,500 Token 内的最新完整轮次。新阶段摘要最多 500 个估算 Token，事实提示最多 500；历史检索最多带回 1 轮，整段参考资料最多 350 Token，超过时跳过整轮，不截断消息。压缩器也使用更短的指令。此前保存的失败请求快照在重试前会重新核对当前预算，超出新预算时提示重新发送，不绕过限制。其他模型继续使用原有预算与阈值。
++Luna 使用更小的专用上下文：输入预算由 4,000 降至 3,000 个估算 Token，约 1,800 时即尝试压缩，压缩后优先保留约 1,500 Token 内的最新完整轮次。新阶段摘要最多 500 个估算 Token，事实提示最多 500；历史检索最多带回 1 轮，整段参考资料最多 350 Token，超过时跳过整轮，不截断消息。压缩器也使用更短的指令。此前保存的失败请求快照在重试前会重新核对当前预算，超出新预算时提示重新发送，不绕过限制。Sol、Terra 的预算见下文。
++
++
++Sol 与 Terra 的应用输入预算统一设为 20,000 个估算 Token，约 16,000 时尝试压缩，压缩后优先保留约 10,000 Token 范围内的最新完整轮次。匹配 OpenAI 的 Sol / Terra 模型及其版本 / 快照名称；Luna 继续使用 3,000，其他模型维持现有配置。此值是应用调用预算，当前仍仅完成本地修改，部署后生效。
+ 
+ 压缩使用当前 Agent 的模型，同时输出阶段摘要和结构化事实增量，不增加每轮独立的事实提取调用。事实区分 `fact` / `goal` / `preference` / `decision` / `todo`，每条记录发言者、语义键、来源消息和用户原文依据。只接受本次压缩范围内用户正文中的逐字摘录，不把 Agent 建议、引用或附件中的话写成用户事实。相同用户的相同键以新来源更正，撤销记录也保留版本；重试旧问题只读取当时之前的版本。摘要与事实在同一事务中发布，失败不覆盖原记忆；旧模型返回的纯文字摘要仍兼容，但不会创建未经验证的事实。
+ 

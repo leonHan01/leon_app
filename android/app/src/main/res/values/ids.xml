@@ -19,10 +19,17 @@
     <item name="settings_list" type="id" />
     <item name="chat_back" type="id" />
     <item name="chat_more" type="id" />
+    <item name="chat_invite_users" type="id" />
+    <item name="chat_invite_agents" type="id" />
     <item name="chat_title" type="id" />
     <item name="chat_input" type="id" />
     <item name="chat_add" type="id" />
     <item name="chat_extras" type="id" />
     <item name="chat_send" type="id" />
     <item name="connection_settings" type="id" />
+    <item name="global_chat_search" type="id" />
+    <item name="find_chat_history" type="id" />
+    <item name="chat_search_input" type="id" />
+    <item name="chat_search_results" type="id" />
+    <item name="download_chat_image" type="id" />
 </resources>

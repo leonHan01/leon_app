@@ -10,3 +10,6 @@ android/**/build/
 .tools/
 shared/markdown/node_modules/
 shared/markdown/test-results/
+
+android/vivo.properties
+ios/Push.entitlements

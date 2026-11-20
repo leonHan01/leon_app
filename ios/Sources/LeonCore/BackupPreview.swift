@@ -21,7 +21,7 @@ struct BackupPreview {
         }
         guard let end, try number(end+4,2) == 0, try number(end+6,2) == 0 else { throw NativeError(message:"备份 ZIP 格式不受支持。") }
         let count = Int(try number(end+10,2)); var cursor = Int(try number(end+16,4))
-        guard count > 0, count <= 40001, Int(try number(end+12,4)) <= bytes.count-cursor else { throw NativeError(message:"备份目录无效。") }
+        guard count > 0, count <= 65535, Int(try number(end+12,4)) <= bytes.count-cursor else { throw NativeError(message:"备份目录无效。") }
         var names = Set<String>(), total = 0
         var manifest: (offset:Int, compressed:Int, size:Int, method:UInt32, crc:UInt32)?
         for _ in 0..<count {
@@ -40,7 +40,7 @@ struct BackupPreview {
                 guard payload >= 0, compressed <= bytes.count-payload else { throw NativeError(message:"备份清单不完整。") }
                 manifest = (payload,compressed,size,method,try number(cursor+16,4))
             } else {
-                guard name.range(of:"^images/[a-f0-9-]{36}\\.jpg$",options:.regularExpression) != nil, size <= 1_048_576 else { throw NativeError(message:"备份文件结构无效。") }
+                guard (name.range(of:"^images/[a-f0-9-]{36}\\.jpg$",options:.regularExpression) != nil && size <= 1_048_576) || (name.range(of:"^documents/[a-f0-9-]{36}$",options:.regularExpression) != nil && size <= 10*1024*1024) else { throw NativeError(message:"备份文件结构无效。") }
             }
             cursor = start+length+extra+comment
         }
@@ -50,7 +50,7 @@ struct BackupPreview {
         let checksum = metadata.withUnsafeBytes { buffer in crc32(0,buffer.bindMemory(to:Bytef.self).baseAddress,uInt(buffer.count)) }
         guard metadata.count == entry.size, UInt32(checksum) == entry.crc,
               let object = try JSONSerialization.jsonObject(with:metadata) as? [String:Any],
-              object["format"] as? String == "leon-chat", object["version"] as? Int == 1,
+              object["format"] as? String == "leon-chat", [1,2].contains(object["version"] as? Int ?? 0),
               let room = object["conversation"] as? [String:Any], let name = room["name"] as? String,
               let kind = room["kind"] as? String, ["direct","group"].contains(kind),
               let messages = object["messages"] as? [Any], messages.count <= 10000

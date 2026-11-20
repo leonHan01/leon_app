@@ -49,6 +49,40 @@ public class ChatToolsApiTest {
         }finally{server.close();worker.shutdownNow();}
     }
     private static String room(){return "{\"id\":\"thread:one\",\"name\":\"独立对话\",\"kind\":\"direct\",\"agentId\":\"sol\",\"agentIds\":[\"sol\"]}";}
+    @Test public void groupInvitationsKeepUserAndAgentEndpointsSeparate()throws Exception{
+        var server=new ServerSocket(0,5,InetAddress.getByName("127.0.0.1"));server.setSoTimeout(10000);
+        var worker=Executors.newSingleThreadExecutor();
+        var served=worker.submit(()->{
+            for(int i=0;i<3;i++)try(var socket=server.accept()){
+                socket.setSoTimeout(10000);var input=new BufferedInputStream(socket.getInputStream());
+                String request=line(input),header;int length=0;boolean authenticated=false;
+                while(!(header=line(input)).isEmpty()){
+                    if(header.equals("Authorization: Bearer group-fixture"))authenticated=true;
+                    if(header.startsWith("Content-Length: "))length=Integer.parseInt(header.substring(16));
+                }
+                assertTrue(authenticated);byte[] body=ChatTools.readLimited(input,length);String response;
+                if(i<2){
+                    assertEquals((i==0?"GET":"POST")+" /api/conversations/group%3Aone/members HTTP/1.1",request);
+                    if(i==1)assertEquals("Bob",new JSONObject(new String(body,StandardCharsets.UTF_8)).getJSONArray("usernames").getString(0));
+                    response="[{\"id\":\"bob\",\"username\":\"Bob\"}]";
+                }else{
+                    assertEquals("POST /api/conversations/group%3Aone/agents HTTP/1.1",request);
+                    assertEquals("sol",new JSONObject(new String(body,StandardCharsets.UTF_8)).getJSONArray("agentIds").getString(0));
+                    response="{\"id\":\"group:one\",\"name\":\"群聊\",\"kind\":\"group\",\"ownerId\":\"owner\",\"agentIds\":[\"luna\",\"sol\"]}";
+                }
+                byte[] bytes=response.getBytes(StandardCharsets.UTF_8);var out=socket.getOutputStream();
+                out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: "+bytes.length+"\r\n\r\n").getBytes(StandardCharsets.US_ASCII));out.write(bytes);out.flush();
+            }return null;
+        });
+        try{
+            var api=new MessageApi("http://127.0.0.1:"+server.getLocalPort(),"group-fixture");
+            assertEquals("Bob",api.members("group:one",null).get(0).username());
+            assertEquals(1,api.members("group:one",java.util.List.of("Bob")).size());
+            var updated=api.addAgents("group:one",java.util.List.of("sol"));
+            assertEquals(java.util.List.of("luna","sol"),updated.agentIds);assertEquals("owner",updated.ownerId);
+            served.get(10,TimeUnit.SECONDS);
+        }finally{server.close();worker.shutdownNow();}
+    }
     private static String line(InputStream input)throws IOException{
         var bytes=new ByteArrayOutputStream();for(int b;(b=input.read())!=-1;){if(b=='\n')break;if(b!='\r')bytes.write(b);}return bytes.toString(StandardCharsets.US_ASCII.name());
     }

@@ -22,13 +22,16 @@ enum RichMarkdown {
 struct RichMarkdownMessageView: View {
     let source: String
     let mine: Bool
+    var onQuote:(()->Void)? = nil
+    var onFavorite:(()->Void)? = nil
+    var onBranch:(()->Void)? = nil
     @Environment(\.colorScheme) private var colorScheme
     @StateObject private var layout = MarkdownLayoutState()
 
     var body: some View {
         Group {
             if layout.visible {
-                NativeRichMarkdown(source: source, mine: mine, dark: colorScheme == .dark, height: $layout.height)
+                NativeRichMarkdown(source: source, mine: mine,onQuote:onQuote,onFavorite:onFavorite,onBranch:onBranch, dark: colorScheme == .dark, height: $layout.height)
             } else {
                 Color.clear
             }
@@ -46,6 +49,9 @@ private final class MarkdownLayoutState: ObservableObject {
 private struct NativeRichMarkdown: NSViewRepresentable {
     let source: String
     let mine: Bool
+    var onQuote:(()->Void)? = nil
+    var onFavorite:(()->Void)? = nil
+    var onBranch:(()->Void)? = nil
     let dark: Bool
     @Binding var height: CGFloat
     private static let dataStore = WKWebsiteDataStore.nonPersistent()
@@ -64,7 +70,7 @@ private struct NativeRichMarkdown: NSViewRepresentable {
         view.underPageBackgroundColor = .clear
         view.allowsLinkPreview = false
         view.navigationDelegate = context.coordinator
-        view.rawSource = source
+        view.rawSource = source;view.onQuote=onQuote;view.onFavorite=onFavorite;view.onBranch=onBranch
         context.coordinator.view = view
         if let runtime = RichMarkdown.runtimeURL {
             view.loadFileURL(runtime.appendingPathComponent("markdown.html"), allowingReadAccessTo: runtime)
@@ -77,7 +83,7 @@ private struct NativeRichMarkdown: NSViewRepresentable {
 
     func updateNSView(_ view: MarkdownWebView, context: Context) {
         context.coordinator.parent = self
-        view.rawSource = source
+        view.rawSource = source;view.onQuote=onQuote;view.onFavorite=onFavorite;view.onBranch=onBranch
         context.coordinator.render()
     }
 
@@ -152,6 +158,9 @@ private struct NativeRichMarkdown: NSViewRepresentable {
 }
 
 private final class MarkdownWebView: WKWebView {
+    var onQuote:(()->Void)?
+    var onFavorite:(()->Void)?
+    var onBranch:(()->Void)?
     var rawSource = ""
     override var isOpaque: Bool { false }
     override func scrollWheel(with event: NSEvent) {
@@ -168,13 +177,23 @@ private final class MarkdownWebView: WKWebView {
         let item = NSMenuItem(title: "复制原文", action: #selector(copyOriginal), keyEquivalent: "")
         item.identifier = NSUserInterfaceItemIdentifier("leon-copy-markdown")
         item.target = self; menu.addItem(item)
+        appendMessageActions(menu)
         return menu
     }
     func showOriginalMenu(x: CGFloat, y: CGFloat) {
         let menu = NSMenu()
         let item = NSMenuItem(title: "复制原文", action: #selector(copyOriginal), keyEquivalent: "")
         item.target = self; menu.addItem(item)
+        appendMessageActions(menu)
         menu.popUp(positioning: nil, at: NSPoint(x: x, y: isFlipped ? y : bounds.height - y), in: self)
     }
+    private func appendMessageActions(_ menu:NSMenu) {
+        if onQuote != nil {let item=NSMenuItem(title:"引用",action:#selector(quoteMessage),keyEquivalent:"");item.target=self;menu.addItem(item)}
+        if onFavorite != nil {let item=NSMenuItem(title:"收藏",action:#selector(favoriteMessage),keyEquivalent:"");item.target=self;menu.addItem(item)}
+        if onBranch != nil {let item=NSMenuItem(title:"从这里创建分支",action:#selector(branchMessage),keyEquivalent:"");item.target=self;menu.addItem(item)}
+    }
+    @objc private func quoteMessage(){onQuote?()}
+    @objc private func favoriteMessage(){onFavorite?()}
+    @objc private func branchMessage(){onBranch?()}
     @objc private func copyOriginal() { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(rawSource, forType: .string) }
 }

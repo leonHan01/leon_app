@@ -105,18 +105,27 @@ struct MessagePicture: View {
     @ObservedObject var store: ChatStore
     let id: String
     var maxWidth: CGFloat = 220
+    var onQuote:(()->Void)? = nil
+    var onFavorite:(()->Void)? = nil
+    var onBranch:(()->Void)? = nil
     @State private var image: UIImage?
     @State private var failed = false
     @State private var attempt = 0
     @State private var showing = false
+    @State private var branchAfterPreview=false
     @State private var scale: CGFloat = 1
     @State private var previewImage:UIImage?
+    @State private var saving = false
+    @State private var saveNotice: String?
+    @State private var saveDenied = false
     var body: some View {
         Group {
             if let image { Image(uiImage:image).resizable().scaledToFit().padding(3).frame(width:maxWidth,height:maxWidth*0.75).background(.white,in:RoundedRectangle(cornerRadius:6)).onTapGesture { showing = true } }
             else if failed { Button("图片加载失败，点击重试") { attempt += 1 }.font(.caption) }
             else { ProgressView().frame(width:maxWidth,height:maxWidth*0.75) }
         }
+        .contextMenu { saveButton;messageActions }
+        .alert("保存图片",isPresented:noticePresented(inPreview:false)) { noticeActions } message: { Text(saveNotice ?? "") }
         .task(id:"\(store.connectionID):\(id):\(attempt)") {
             image = nil;failed = false;let connection = store.connectionID
             do {
@@ -126,14 +135,70 @@ struct MessagePicture: View {
             } catch {if !Task.isCancelled,connection == store.connectionID {failed = true}}
         }
         .onDisappear {image = nil;previewImage = nil}
-        .sheet(isPresented:$showing,onDismiss:{scale = 1;previewImage = nil}) {
+        .onChange(of:store.searchConnectionID) {_ in branchAfterPreview=false}
+        .sheet(isPresented:$showing,onDismiss:{scale = 1;previewImage = nil;if branchAfterPreview {branchAfterPreview=false;onBranch?()}}) {
             NavigationStack {
                 if let image = previewImage ?? image { Image(uiImage:image).resizable().scaledToFit().scaleEffect(scale).gesture(MagnificationGesture().onChanged {scale = min(5,max(1,$0))})
-                    .toolbar { ToolbarItem(placement:.confirmationAction) { Button("关闭") { showing = false; scale = 1;previewImage = nil } } } }
+                    .contextMenu { saveButton;messageActions }
+                    .toolbar {
+                        ToolbarItem(placement:.confirmationAction) { Button("关闭") { showing = false; scale = 1;previewImage = nil } }
+                    } }
             }
+            .overlay(alignment:.bottomTrailing) { downloadButton.padding(20) }
+            .alert("保存图片",isPresented:noticePresented(inPreview:true)) { noticeActions } message: { Text(saveNotice ?? "") }
             .task {
                 let connection = store.connectionID
                 if let bytes = try? await store.imageData(id),!Task.isCancelled,connection == store.connectionID {previewImage = NativeImageDecoder.image(bytes,pixels:1600)}
+            }
+        }
+    }
+    @ViewBuilder private var messageActions:some View {
+        if let onQuote {Button {showing=false;onQuote()} label:{Label("引用",systemImage:"quote.bubble")}}
+        if let onFavorite {Button {showing=false;onFavorite()} label:{Label("收藏",systemImage:"star")}}
+        if let onBranch {Button {if showing {branchAfterPreview=true;showing=false} else {onBranch()}} label:{Label("从这里创建分支",systemImage:"arrow.triangle.branch")}}
+    }
+    private var saveButton: some View {
+        Button { saveImage() } label: { Label(saving ? "保存中…" : "保存图片",systemImage:"square.and.arrow.down") }
+            .disabled(saving || (image == nil && previewImage == nil)).accessibilityIdentifier("save_chat_image")
+    }
+    private var downloadButton: some View {
+        Button { saveImage() } label: {
+            Group {
+                if saving { ProgressView() }
+                else { Image(systemName:"arrow.down.to.line").font(.system(size:20,weight:.medium)) }
+            }
+            .foregroundStyle(.primary).frame(width:48,height:48)
+            .background(.regularMaterial,in:Circle())
+            .overlay(Circle().stroke(.primary.opacity(0.08),lineWidth:1))
+            .shadow(color:.black.opacity(0.15),radius:7,y:3)
+        }
+        .buttonStyle(.plain).disabled(saving || (image == nil && previewImage == nil))
+        .accessibilityLabel(saving ? "正在保存图片" : "下载并保存图片")
+        .accessibilityHint("保存到系统相册").accessibilityIdentifier("download_chat_image")
+    }
+    @ViewBuilder private var noticeActions: some View {
+        if saveDenied {
+            Button("前往设置") { if let url = URL(string:UIApplication.openSettingsURLString) {UIApplication.shared.open(url)} }
+        }
+        Button("好",role:.cancel) { saveNotice = nil }
+    }
+    private func noticePresented(inPreview:Bool) -> Binding<Bool> {
+        Binding(get:{saveNotice != nil && showing == inPreview},set:{if !$0 {saveNotice = nil}})
+    }
+    private func saveImage() {
+        guard !saving else {return};saving = true;saveDenied = false
+        let connection = store.connectionID
+        Task {
+            defer {saving = false}
+            do {
+                let data = try await store.imageData(id)
+                guard connection == store.connectionID else {return}
+                try await PhotoLibrarySaver.save(data)
+                if connection == store.connectionID {saveNotice = "已保存到系统相册。"}
+            } catch {
+                guard connection == store.connectionID else {return}
+                saveDenied = (error as? PhotoSaveError) == .permissionDenied
+                saveNotice = error.localizedDescription
             }
         }
     }
@@ -146,6 +211,7 @@ struct MessageBubble: View {
     var openAgent:(String)->Void
     let availableWidth:CGFloat
     var resized:()->Void = {}
+    var actionsEnabled:Bool = true
     @State private var height:CGFloat = 44
     private var mine:Bool {outgoing != nil || store.mine(message)}
     private var agentReply:Bool {message.role == "assistant" && message.agentId != nil}
@@ -154,9 +220,11 @@ struct MessageBubble: View {
     private var bubbleWidth:CGFloat {
         // Short plain text wraps tightly; every message still uses the full
         // Markdown parser, so choosing a width cannot drop a syntax feature.
-        let controls = CharacterSet(charactersIn:"\n\r#*_~`[]()<>\\^=|!:$-.@&")
+        let controls = CharacterSet(charactersIn:"\n\r#+*_~`[]()<>\\^=|!:$-.@&")
         guard !wide,message.text.rangeOfCharacter(from:controls) == nil else {return contentWidth}
-        let natural = ceil((message.text as NSString).size(withAttributes:[.font:UIFont.systemFont(ofSize:14)]).width)+28
+        // NSString's default kerning compresses CJK punctuation, while the
+        // WebView keeps its full advance. Match that spacing when measuring.
+        let natural = ceil((message.text as NSString).size(withAttributes:[.font:UIFont.systemFont(ofSize:14),.kern:0]).width)+28
         return min(contentWidth,max(40,natural))
     }
     var body:some View {
@@ -172,6 +240,14 @@ struct MessageBubble: View {
                 }
             }
         }.frame(maxWidth:.infinity,alignment:.leading).padding(.bottom,15)
+            .contextMenu {
+                if !message.text.isEmpty {Button {UIPasteboard.general.string=message.text;store.showNotice("已复制")} label:{Label("复制",systemImage:"doc.on.doc")}}
+                if actionsEnabled,outgoing == nil,message.id>0 {
+                    Button {store.quoteMessage(message)} label:{Label("引用",systemImage:"quote.bubble")}
+                    Button {Task {await store.favoriteMessage(message)}} label:{Label("收藏",systemImage:"star")}
+                    Button {store.beginBranch(message)} label:{Label("从这里创建分支",systemImage:"arrow.triangle.branch")}
+                }
+            }
     }
     private var contents:some View {
         VStack(alignment:mine ? .trailing : .leading,spacing:0) {
@@ -179,14 +255,18 @@ struct MessageBubble: View {
                 Text(message.sender).font(.system(size:11)).foregroundStyle(MobileStyle.muted).padding(.leading,5).padding(.bottom,5)
             }
             ForEach(outgoing?.imageIds ?? message.images?.map(\.id) ?? [],id:\.self) {id in
-                MessagePicture(store:store,id:id,maxWidth:min(220,contentWidth)).padding(.bottom,5)
+                MessagePicture(store:store,id:id,maxWidth:min(220,contentWidth),onQuote:actionsEnabled && outgoing == nil ? {store.quoteMessage(message)} : nil,onFavorite:actionsEnabled && outgoing == nil ? {Task {await store.favoriteMessage(message)}} : nil,onBranch:actionsEnabled && outgoing == nil ? {store.beginBranch(message)} : nil).padding(.bottom,5)
             }
+            ForEach(outgoing?.documents ?? message.documents ?? []){document in DocumentCard(store:store,document:document,message:outgoing==nil && actionsEnabled ? message : nil).padding(.bottom,5)}
             if !message.text.isEmpty {
                 RichMessageView(source:message.text,mine:mine,height:$height,resized:resized,copied:{store.showNotice("已复制")})
                     .frame(width:max(36,bubbleWidth-(wide ? 0 : 4)),height:height)
                     .padding(.leading,!wide && !mine ? 4 : 0).padding(.trailing,!wide && mine ? 4 : 0)
                     .background(MobileBubbleShape(mine:mine,wide:wide).fill(mine ? MobileStyle.outgoing : .white))
-                    .contextMenu {Button {UIPasteboard.general.string = message.text;store.showNotice("已复制")} label:{Label("复制原文",systemImage:"doc.on.doc")}}
+
+            }
+            if let quote=message.quote,let room=message.conversationId {
+                QuoteCard(store:store,quote:quote,room:room,title:store.conversations.first(where:{$0.id==room})?.name ?? "聊天").padding(.top,6)
             }
             if let outgoing {
                 Text(store.sending.contains(outgoing.id) ? "发送中…" : "发送未完成").font(.system(size:10)).foregroundStyle(MobileStyle.muted).padding(.leading,5).padding(.top,4)

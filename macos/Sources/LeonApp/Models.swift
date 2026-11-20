@@ -13,6 +13,8 @@ struct Message: Codable, Identifiable, Equatable {
     let agentId: String?
     let replyTo: Int64?
     var images: [ChatImage]? = nil
+    var quote: MessageQuote? = nil
+    var documents:[DocumentAttachment]? = nil
     var date: Date { Date(timeIntervalSince1970: Double(createdAt) / 1000) }
 }
 
@@ -153,6 +155,12 @@ struct ConversationContext: Codable {
     let inputTokenBudget: Int
     let topicStartedAfter: Int64
     let agents: [AgentContextInfo]
+    var compressionMode: String? = nil
+}
+struct ContextFact: Codable, Identifiable {
+    var id: String { subjectId + ":" + kind + ":" + key }
+    let subjectId: String; let speaker: String; let kind: String; let key: String
+    let value: String; let sourceMessageId: Int64
 }
 struct AgentContextInfo: Codable, Identifiable {
     var id: String { agentId }
@@ -163,6 +171,9 @@ struct AgentContextInfo: Codable, Identifiable {
     let estimatedInputTokens: Int
     let retainedRounds: Int
     let phase: String
+    var facts: [ContextFact]? = nil
+    var retrievedRounds: Int? = nil
+    var compressionFallback: Bool? = nil
 }
 
 struct Outgoing: Codable, Identifiable {
@@ -175,6 +186,10 @@ struct Outgoing: Codable, Identifiable {
     var conversationId: String? = nil
     var mentionAgentIds: [String]? = nil
     var imageIds: [String]? = nil
+    var quoteMessageId: Int64? = nil
+    var documentIds:[String]? = nil
+    var quote: MessageQuote? = nil
+    var documents:[DocumentAttachment]? = nil
 }
 
 enum Endpoint {
@@ -220,7 +235,7 @@ final class NoRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
                     completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
 }
 
-final class MessageAPI: @unchecked Sendable {
+final class MessageAPI: NotificationAPI, @unchecked Sendable {
     let base: URL
     private let token: String
     private let session: URLSession
@@ -247,6 +262,21 @@ final class MessageAPI: @unchecked Sendable {
         return try await request(URLRequest(url: components.url!))
     }
 
+    func search(query: String, room: String?, before: Int64?) async throws -> ChatSearchPage {
+        var items = [URLQueryItem(name: "q", value: query)]
+        if let room { items.append(URLQueryItem(name: "conversationId", value: room)) }
+        if let before { items.append(URLQueryItem(name: "before", value: String(before))) }
+        return try await searchRequest("search", items: items)
+    }
+    func searchContext(room: String, message: Int64, direction: String) async throws -> ChatSearchContext {
+        try await searchRequest("context", items: [URLQueryItem(name: "conversationId", value: room), URLQueryItem(name: "messageId", value: String(message)), URLQueryItem(name: "direction", value: direction)])
+    }
+    private func searchRequest<T: Decodable>(_ path: String, items: [URLQueryItem]) async throws -> T {
+        var url = URLComponents(url: base.appendingPathComponent("api/device-messages/" + path), resolvingAgainstBaseURL: false)!
+        url.queryItems = items
+        return try await request(URLRequest(url: url.url!))
+    }
+
     func agents() async throws -> [AgentInfo] { try await request(URLRequest(url: base.appendingPathComponent("api/agents"))) }
     func usage() async throws -> [ModelUsage] { try await request(URLRequest(url: base.appendingPathComponent("api/agents/usage"))) }
     func heartbeat(deviceId: String, name: String) async throws {
@@ -263,6 +293,38 @@ final class MessageAPI: @unchecked Sendable {
               http.mimeType == "image/png", data.count <= 2 * 1024 * 1024 else { throw ClientError.message("头像暂时不可用") }
         avatarCache.setObject(data as NSData, forKey: id as NSString, cost: data.count)
         return data
+    }
+    func notificationStatus() async throws -> NotificationStatus {try await request(URLRequest(url:base.appendingPathComponent("api/device-messages/notifications/status")))}
+    func notifications(device:String,after:Int64?,preview:Bool) async throws -> NotificationPage {
+        var url=URLComponents(url:base.appendingPathComponent("api/device-messages/notifications"),resolvingAgainstBaseURL:false)!
+        url.queryItems=[URLQueryItem(name:"deviceId",value:device),URLQueryItem(name:"preview",value:String(preview))]
+        if let after {url.queryItems!.append(URLQueryItem(name:"after",value:String(after)))}
+        return try await request(URLRequest(url:url.url!))
+    }
+    func registerNotifications(_ registration:PushRegistration) async throws {
+        var req=URLRequest(url:base.appendingPathComponent("api/device-messages/notifications/devices"));req.httpMethod="POST";req.httpBody=try JSONEncoder().encode(registration);req.setValue("application/json",forHTTPHeaderField:"Content-Type")
+        let _:[String:Bool]=try await request(req)
+    }
+    func removeNotifications(device:String) async throws {
+        guard UUID(uuidString:device) != nil else {throw ClientError.message("设备标识无效。")}
+        var req=URLRequest(url:base.appendingPathComponent("api/device-messages/notifications/devices/\(device)/remove"));req.httpMethod="POST";req.httpBody=Data("{}".utf8);req.setValue("application/json",forHTTPHeaderField:"Content-Type")
+        let _:[String:Bool]=try await request(req)
+    }
+    func uploadDocument(_ document:DocumentAttachment,room:String,data:Data) async throws {
+        guard UUID(uuidString:document.id) != nil,data.count<=10*1024*1024 else {throw ClientError.message("文档无效或超过 10 MB。")}
+        var url=URLComponents(url:base.appendingPathComponent("api/device-messages/documents"),resolvingAgainstBaseURL:false)!
+        url.queryItems=[URLQueryItem(name:"id",value:document.id),URLQueryItem(name:"conversationId",value:room),URLQueryItem(name:"name",value:document.name)]
+        var req=URLRequest(url:url.url!);req.httpMethod="POST";req.httpBody=data;req.timeoutInterval=90;req.setValue("application/octet-stream",forHTTPHeaderField:"Content-Type")
+        let _:DocumentAttachment=try await request(req)
+    }
+    func document(_ id:String,favorite:Int64?) async throws -> Data {
+        guard UUID(uuidString:id) != nil else {throw ClientError.message("附件标识无效。")}
+        let path=favorite.map {"api/device-messages/favorites/\($0)/documents/"} ?? "api/device-messages/documents/"
+        var req=URLRequest(url:base.appendingPathComponent(path+id));req.timeoutInterval=60;req.setValue("Bearer \(token)",forHTTPHeaderField:"Authorization")
+        let (stream,response)=try await session.bytes(for:req)
+        guard let http=response as? HTTPURLResponse,(200...299).contains(http.statusCode) else {stream.task.cancel();throw ClientError.message("附件不存在、已清空或无权访问。")}
+        guard response.expectedContentLength<=10*1024*1024 else {stream.task.cancel();throw ClientError.message("附件过大。")}
+        var bytes=Data();for try await byte in stream {guard bytes.count<10*1024*1024 else {stream.task.cancel();throw ClientError.message("附件过大。")};bytes.append(byte)};return bytes
     }
     func uploadImage(id: String, conversation: String, data: Data) async throws -> ChatImage {
         guard UUID(uuidString: id) != nil, data.count <= 5 * 1024 * 1024 else { throw ClientError.message("图片无效或过大") }
@@ -287,6 +349,13 @@ final class MessageAPI: @unchecked Sendable {
     func direct(_ agentId: String) async throws -> Conversation { try await post("api/conversations/direct/\(agentId)", body: [String:String]()) }
     func newThread(agentId: String, name: String, requestId: String) async throws -> Conversation {
         try await post("api/conversations/direct/\(agentId)/threads", body: ["name": name, "requestId": requestId])
+    }
+    func branch(room:String,message:Int64,name:String,requestId:String) async throws -> Conversation {
+        struct Branch:Encodable {let messageId:Int64;let name:String;let requestId:String}
+        guard message>0, !room.isEmpty,room.utf8.count<=80,room.utf8.allSatisfy({(48...57).contains($0)||(65...90).contains($0)||(97...122).contains($0)||[45,58].contains($0)}) else {throw ClientError.message("分支消息标识无效")}
+        var req=URLRequest(url:base.appendingPathComponent("api/conversations/\(room)/branches"));req.httpMethod="POST";req.timeoutInterval=90
+        req.setValue("application/json",forHTTPHeaderField:"Content-Type");req.httpBody=try JSONEncoder().encode(Branch(messageId:message,name:name,requestId:requestId))
+        return try await request(req)
     }
     func group(name: String, agentIds: [String]) async throws -> Conversation {
         struct Group: Encodable { let name: String; let agentIds: [String] }
@@ -336,11 +405,31 @@ final class MessageAPI: @unchecked Sendable {
         return try await request(req)
     }
 
+    func addFavorite(_ message:Int64) async throws -> FavoriteItem {try await post("api/device-messages/\(message)/favorite",body:[String:String]())}
+    func favorites(query:String,before:Int64?) async throws -> FavoritePage {
+        var items=[URLQueryItem(name:"q",value:query)]
+        if let before {items.append(URLQueryItem(name:"before",value:String(before)))}
+        var url=URLComponents(url:base.appendingPathComponent("api/device-messages/favorites"),resolvingAgainstBaseURL:false)!;url.queryItems=items
+        return try await request(URLRequest(url:url.url!))
+    }
+    func removeFavorite(_ id:Int64) async throws {struct Result:Decodable{let removed:Bool};let _:Result=try await post("api/device-messages/favorites/\(id)/remove",body:[String:String]())}
+    func favoriteImage(_ favorite:Int64,image:String) async throws -> Data {
+        guard UUID(uuidString:image) != nil else {throw ClientError.message("图片标识无效")}
+        var req=URLRequest(url:base.appendingPathComponent("api/device-messages/favorites/\(favorite)/images/\(image)"));req.setValue("Bearer \(token)",forHTTPHeaderField:"Authorization")
+        let (bytes,response)=try await session.data(for:req)
+        guard let http=response as? HTTPURLResponse,http.statusCode==200,bytes.count<=1_048_576 else {throw ClientError.message("收藏图片已不可用，请刷新后重试。")}
+        return bytes
+    }
     func send(_ outgoing: Outgoing) async throws -> Message {
+        if outgoing.quoteMessageId != nil {
+            let features:[String:Bool] = try await request(URLRequest(url:base.appendingPathComponent("api/device-messages/features")))
+            guard features["quotes"] == true else {throw ClientError.message("服务端尚未支持引用回复，请先升级服务端。")}
+        }
+        var payload=outgoing;payload.quote=nil;payload.documents=nil
         var req = URLRequest(url: base.appendingPathComponent("api/device-messages"))
         req.httpMethod = "POST"
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = try JSONEncoder().encode(outgoing)
+        req.httpBody = try JSONEncoder().encode(payload)
         return try await request(req)
     }
 
@@ -353,15 +442,67 @@ final class MessageAPI: @unchecked Sendable {
         switch http.statusCode {
         case 200...299: return try JSONDecoder().decode(T.self, from: data)
         default:
+            if http.statusCode == 404, req.url?.path == "/api/device-messages/search" {
+                throw ClientError.message("服务端尚未支持聊天记录搜索，请先升级服务端。")
+            }
             if http.statusCode == 404, req.url?.path == "/api/agents/usage" {
                 throw ClientError.message("服务端尚未支持 Token 用量，请先升级服务端。")
             }
             if http.statusCode == 404, req.url?.path.contains("/context/clear") == true {
                 throw ClientError.message("服务端尚未支持 /clear，请先部署本次服务端更新。")
             }
+            if http.statusCode==404,req.url?.path=="/api/device-messages/context" {
+                let failure=try? JSONDecoder().decode(Failure.self,from:data)
+                throw ClientError.message(failure?.detail ?? failure?.message ?? "原消息已删除或不可访问。")
+            }
+            if http.statusCode==404,req.url?.path.hasSuffix("/branches")==true {
+                let failure=try? JSONDecoder().decode(Failure.self,from:data)
+                throw ClientError.message(failure?.message ?? failure?.detail ?? "服务端尚未支持对话分支，请先升级服务端。")
+            }
             if let message = HTTPFailure.message(for: http.statusCode) { throw ClientError.message(message) }
             let failure = try? JSONDecoder().decode(Failure.self, from: data)
             throw ClientError.message(failure?.detail ?? failure?.message ?? "请求失败（HTTP \(http.statusCode)），请稍后重试。")
         }
     }
+}
+
+
+struct ChatSearchHit: Codable, Identifiable {
+    let message: Message
+    let conversationName: String
+    var id: Int64 { message.id }
+}
+struct ChatSearchPage: Codable {
+    let results: [ChatSearchHit]
+    let hasMore: Bool
+    let nextBefore: Int64?
+}
+struct ChatSearchContext: Codable {
+    let messages: [Message]
+    let hasOlder: Bool
+    let hasNewer: Bool
+    let historyRevision: Int64
+}
+
+
+struct MessageQuote: Codable, Identifiable, Equatable {
+    let id: Int64
+    let sender: String
+    let text: String
+    let images: [ChatImage]
+    var documents:[DocumentAttachment]? = nil
+    var preview: String { (images.isEmpty ? "" : "[图片] ") + ((documents ?? []).map {"[文件] "+$0.name}.joined(separator:" ")) + text.replacingOccurrences(of:"\n",with:" ") }
+    init(message: Message) { id=message.id;sender=message.sender;text=message.text;images=message.images ?? [];documents=message.documents }
+    init(id:Int64,sender:String,text:String,images:[ChatImage]) {self.id=id;self.sender=sender;self.text=text;self.images=images}
+}
+struct FavoriteItem: Codable, Identifiable, Equatable {
+    let id: Int64
+    let message: Message
+    let conversationName: String
+    let savedAt: Int64
+}
+struct FavoritePage: Codable {
+    let results: [FavoriteItem]
+    let hasMore: Bool
+    let nextBefore: Int64?
 }

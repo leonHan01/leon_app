@@ -1,0 +1,69 @@
+{
+  "date": "2026-11-21",
+  "status": "implemented and locally verified; not deployed",
+  "luna": {
+    "previousEstimatedInputTokenBudget": 4000,
+    "estimatedInputTokenBudget": 3000,
+    "automaticCompressionPercent": 60,
+    "recentHistoryTargetTokens": 1500,
+    "newSummaryBudgetTokens": 500,
+    "factPromptBudgetTokens": 500,
+    "maximumRetrievedRounds": 1,
+    "retrievedReferenceBudgetTokens": 350,
+    "checksFrozenRetrySnapshots": true
+  },
+  "tests": {
+    "total": 53,
+    "failures": 0,
+    "errors": 0,
+    "suites": [
+      {
+        "name": "LunaContextIntegrationTest",
+        "tests": 6,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "ContextMemoryIntegrationTest",
+        "tests": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "AgentChatIntegrationTest",
+        "tests": 33,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "ChatUserAdminIntegrationTest",
+        "tests": 5,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    ]
+  },
+  "package": "passed with Java 21, offline, tests already run",
+  "sourceManifest": [
+    {
+      "path": "src/main/java/com/leon/workflow/messaging/AgentContextManager.java",
+      "before": "cd39ccddd4c1f9efd839ceaad0b0bf651065d5bed213583a75aa9130fbbe564f",
+      "after": "4df4e72885b10f5643f540b1866a4cd9f74eed0575646bfc730817d764567bd8"
+    },
+    {
+      "path": "src/test/java/com/leon/workflow/messaging/LunaContextIntegrationTest.java",
+      "before": null,
+      "after": "b12faa4c51d11b0712f22a32bad8eaccea57f4b436bae8b33ec33510dfae7b9a"
+    },
+    {
+      "path": "README.md",
+      "before": "6b175b917bfe3f1b3f34a47eff091970fc13a203217f30ff6304fb84a185e0b4",
+      "after": "181789f813c9feb0caaac4146ef07f497cc4bd2063c3c293a9908cb187a5663a"
+    }
+  ],
+  "patch": "luna-context.patch"
+}

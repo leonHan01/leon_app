@@ -20,10 +20,15 @@ import java.util.*;
 
 public final class MainActivity extends Activity implements ChatSession.Listener {
     private static final int GREEN=ChatUi.GREEN, INK=ChatUi.INK, MUTED=ChatUi.MUTED;
-    private ChatSession session;
+    private ChatSession session;private ChatNotifications notifications;
     private MessageMarkdown markdown;
     private ChatUi ui;
     private ChatTools tools;
+    private ChatSearch chatSearch;
+    private ChatFavorites favorites;
+    private LinearLayout quotePreview;
+    private ChatImageActions imageActions;private ChatDocuments documents;private LinearLayout documentDraftRows;
+    private Button homeSearch;
     private final ChatNavigation navigation=new ChatNavigation();
     private LinearLayout homeScreen,chatScreen,homeRows,attachmentRows,mentionPanel,mentionRows,extras,agentDetailScreen,agentDetailRows;
     private String agentDetailSignature="";
@@ -34,6 +39,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     private MentionEditText composer;
     private Button send,older,imageButton,mentionButton;
     private ScrollView scroll;
+    private HorizontalScrollView commandScroll;
     private LinearLayout timeline;
     private AlertDialog settings;
     private AlertDialog usageDialog;
@@ -54,20 +60,27 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         else if(!session.configured())navigation.tab(ChatNavigation.Tab.SETTINGS);
         agentDetailConnection=session.connectionStamp();
         tools=new ChatTools(this,session,room->openGroup(room));
-        buildUI();showScreen();
+        imageActions=new ChatImageActions(this,session);documents=new ChatDocuments(this,session);
+        chatSearch=new ChatSearch(this,session,id->{if(favorites!=null)favorites.dismiss();session.select(id);navigation.agentId="";navigation.inChat=true;navigation.attachments=false;showScreen();},imageActions);
+        favorites=new ChatFavorites(this,session,(message,name)->chatSearch.showMessage(message,name));
+        notifications=new ChatNotifications(this,session,id->{session.select(id);navigation.agentId="";navigation.inChat=true;navigation.attachments=false;showScreen();});
+        buildUI();showScreen();notifications.changed(navigation.inChat?session.selectedConversation:null);notifications.open(getIntent());chatSearch.restore(savedState);
         if(savedState!=null&&savedState.getBoolean("settings"))showSettings();
         if(savedState!=null&&savedState.getBoolean("usage"))showUsage();
     }
     @Override public Object onRetainNonConfigurationInstance(){return session;}
-    @Override protected void onStart(){super.onStart();session.start();}
-    @Override protected void onStop(){session.stop();super.onStop();}
+    @Override protected void onStart(){super.onStart();session.start();if(notifications!=null)notifications.start();}
+    @Override protected void onStop(){if(notifications!=null)notifications.stop();session.stop();super.onStop();}
     @Override protected void onSaveInstanceState(Bundle out){
+        chatSearch.save(out);
         out.putString("homeTab",navigation.tab.name());out.putBoolean("chat",navigation.inChat);
         out.putString("agentDetail",navigation.agentId);
         out.putBoolean("usage",usageDialog!=null&&usageDialog.isShowing());
         out.putBoolean("settings",settings!=null&&settings.isShowing());super.onSaveInstanceState(out);
     }
-    @Override protected void onDestroy(){RichMarkdownView.releaseTree(findViewById(android.R.id.content));session.listener=null;if(settings!=null)settings.dismiss();if(usageDialog!=null)usageDialog.dismiss();tools.close();if(!isChangingConfigurations())session.close();super.onDestroy();}
+    @Override protected void onDestroy(){RichMarkdownView.releaseTree(findViewById(android.R.id.content));session.listener=null;if(chatSearch!=null)chatSearch.close();if(favorites!=null)favorites.close();if(imageActions!=null)imageActions.close();if(documents!=null)documents.close();if(notifications!=null)notifications.close();if(settings!=null)settings.dismiss();if(usageDialog!=null)usageDialog.dismiss();tools.close();if(!isChangingConfigurations())session.close();super.onDestroy();}
+    @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);if(notifications!=null)notifications.open(intent);}
+    @Override public void onRequestPermissionsResult(int requestCode,String[] permissions,int[] results){super.onRequestPermissionsResult(requestCode,permissions,results);if(requestCode==ChatNotifications.PERMISSION&&notifications!=null)notifications.permissionResult(results.length>0&&results[0]==android.content.pm.PackageManager.PERMISSION_GRANTED);}
     @Override public void onBackPressed(){
         if(navigation.attachments){navigation.attachments=false;showScreen();return;}
         if(navigation.inChat){hideKeyboard();composer.clearFocus();navigation.back();showScreen();return;}
@@ -102,6 +115,9 @@ public final class MainActivity extends Activity implements ChatSession.Listener
             if(navigation.tab==ChatNavigation.Tab.GROUPS)showNewGroup();else showHomeMenu();
         });bar.addView(homeAdd);homeScreen.addView(bar);
         homeScreen.addView(ui.divider(0));
+        homeSearch=ui.button("搜索聊天记录");homeSearch.setId(R.id.global_chat_search);homeSearch.setTextColor(MUTED);homeSearch.setBackground(ui.shape(Color.WHITE,8));
+        homeSearch.setOnClickListener(view->chatSearch.show(null,"全部聊天记录"));LinearLayout.LayoutParams searchParams=new LinearLayout.LayoutParams(-1,dp(40));searchParams.setMargins(dp(12),dp(9),dp(12),dp(9));homeScreen.addView(homeSearch,searchParams);
+
         homeStatus=text("",12,MUTED);homeStatus.setPadding(dp(18),dp(9),dp(18),dp(9));homeStatus.setBackgroundColor(0xFFFFF6E8);homeScreen.addView(homeStatus);
         ScrollView list=new ScrollView(this);list.setFillViewport(true);list.setBackgroundColor(Color.WHITE);
         homeRows=column();list.addView(homeRows,new ScrollView.LayoutParams(-1,-2));homeScreen.addView(list,new LinearLayout.LayoutParams(-1,0,1));
@@ -131,6 +147,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     }
     private void renderHome(){
         String title=navigation.tab==ChatNavigation.Tab.AGENTS?"Agents":navigation.tab==ChatNavigation.Tab.GROUPS?"群聊":"设置";
+        homeSearch.setVisibility(navigation.tab==ChatNavigation.Tab.SETTINGS?View.GONE:View.VISIBLE);homeSearch.setEnabled(session.configured());
         homeTitle.setText(title);homeAdd.setVisibility(navigation.tab==ChatNavigation.Tab.SETTINGS?View.GONE:View.VISIBLE);
         homeAdd.setImageResource(navigation.tab==ChatNavigation.Tab.GROUPS?R.drawable.ic_add:R.drawable.ic_more);
         homeAdd.setContentDescription(navigation.tab==ChatNavigation.Tab.GROUPS?"新建群聊":"列表操作");
@@ -200,6 +217,8 @@ public final class MainActivity extends Activity implements ChatSession.Listener
             account.setId(R.id.connection_settings);
             settingRow("退出登录","",R.drawable.ic_settings,this::confirmLogout);
         }
+        settingRow("消息通知",notifications==null?"通知尚未开启":notifications.status(),R.drawable.ic_notification,()->notifications.showSettings()).setTag("notification-settings");
+        settingRow("收藏","查看收藏的消息与图片",R.drawable.ic_favorite,favorites::show).setTag("my-favorites");
         View usage=settingRow("Token 用量","查看累计消耗与模型明细",R.drawable.ic_usage,this::showUsage);usage.setId(R.id.token_usage);
         sectionGap();settingRow("连接状态",session.connected?"已连接 · 自动同步":session.status,R.drawable.ic_groups,()->{
             new AlertDialog.Builder(this).setTitle("连接状态").setMessage(session.status+"\n\n应用在前台时自动同步。退出后消息保留在服务器，下次打开可继续读取。").setPositiveButton("知道了",null).show();
@@ -222,6 +241,12 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     private void openAgentDetails(String agentId){
         if(session.agents.stream().noneMatch(agent->agent.id.equals(agentId))){Toast.makeText(this,"Agent 已不存在",Toast.LENGTH_SHORT).show();return;}
         hideKeyboard();composer.clearFocus();navigation.agent(agentId);agentDetailConnection=session.connectionStamp();agentDetailSignature="";showScreen();session.refresh();
+    }
+    private void showConversationList(){
+        hideKeyboard();composer.clearFocus();navigation.attachments=false;showScreen();
+        var room=session.selected();
+        if(room!=null&&room.kind.equals("direct")&&!room.agentId.isEmpty())openAgentDetails(room.agentId);
+        else showAgents(false,true);
     }
     private void startAgentChat(MessageApi.Agent agent){navigation.chat();session.openDirect(agent);showScreen();}
     private void openGroup(MessageApi.Conversation room){if(!room.kind.equals("direct"))navigation.agentId="";navigation.chat();session.select(room.id);showScreen();}
@@ -273,7 +298,9 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         mentionPanel=column();mentionPanel.setPadding(dp(10),dp(6),dp(10),dp(6));mentionPanel.setBackgroundColor(Color.WHITE);mentionPanel.setVisibility(View.GONE);
         TextView mentionTitle=text("提及 Agent",12,MUTED);mentionTitle.setPadding(dp(6),dp(5),dp(6),dp(5));mentionPanel.addView(mentionTitle);
         ScrollView mentionScroll=new ScrollView(this);mentionRows=column();mentionScroll.addView(mentionRows);mentionPanel.addView(mentionScroll,new LinearLayout.LayoutParams(-1,dp(132)));inputArea.addView(mentionPanel);
+        HorizontalScrollView documentScroll=new HorizontalScrollView(this);documentScroll.setHorizontalScrollBarEnabled(false);documentDraftRows=row();documentDraftRows.setPadding(dp(12),0,dp(12),0);documentScroll.addView(documentDraftRows);inputArea.addView(documentScroll);
         HorizontalScrollView attachmentScroll=new HorizontalScrollView(this);attachmentScroll.setHorizontalScrollBarEnabled(false);attachmentRows=row();attachmentRows.setPadding(dp(12),dp(6),dp(12),0);attachmentScroll.addView(attachmentRows);inputArea.addView(attachmentScroll);
+        quotePreview=row();quotePreview.setTag("quote-preview");quotePreview.setPadding(dp(12),dp(7),dp(12),0);quotePreview.setVisibility(View.GONE);inputArea.addView(quotePreview);
         LinearLayout input=row();input.setGravity(Gravity.BOTTOM);input.setPadding(dp(10),dp(8),dp(8),dp(8));
         composer=new MentionEditText(this);composer.setId(R.id.chat_input);composer.setTextColor(INK);composer.setTextSize(16);composer.setHint("发送消息");composer.setHintTextColor(0xFFAAAAAA);
         composer.setInputType(InputType.TYPE_CLASS_TEXT|InputType.TYPE_TEXT_FLAG_MULTI_LINE|InputType.TYPE_TEXT_FLAG_CAP_SENTENCES);composer.setMinLines(1);composer.setMaxLines(4);composer.setGravity(Gravity.TOP);
@@ -297,20 +324,34 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         send=action("发送");send.setId(R.id.chat_send);send.setTextColor(Color.WHITE);send.setTypeface(null,Typeface.BOLD);send.setBackground(ui.ripple(GREEN,5));send.setOnClickListener(view->sendCurrent());
         LinearLayout.LayoutParams sp=new LinearLayout.LayoutParams(dp(58),dp(38));sp.leftMargin=dp(3);sp.bottomMargin=dp(1);input.addView(send,sp);inputArea.addView(input);
         extras=column();extras.setId(R.id.chat_extras);extras.setPadding(dp(12),dp(4),dp(12),dp(10));extras.setVisibility(View.GONE);
-        LinearLayout first=row(),second=row();extras.addView(first);extras.addView(second);
-        imageButton=attachmentAction(first,"相册",R.drawable.ic_photo,0xFF4778B2,0xFFEAF1FA,this::chooseImages);
-        attachmentAction(first,"压缩上下文",R.drawable.ic_compact,0xFF35896A,0xFFE7F2EC,tools::compact).setTag("chat-tool:compact");
-        attachmentAction(first,"查看上下文",R.drawable.ic_context,0xFF35896A,0xFFE7F2EC,tools::context).setTag("chat-tool:context");
-        attachmentAction(first,"新建对话",R.drawable.ic_add,0xFF35896A,0xFFE7F2EC,tools::newConversation).setTag("chat-tool:new");
-        attachmentAction(second,"加载备份",R.drawable.ic_restore,0xFF6979A4,0xFFECEDF6,tools::load).setTag("chat-tool:load");
-        attachmentAction(second,"清理记录",R.drawable.ic_clear,0xFFB56360,0xFFF8ECEA,tools::clear).setTag("chat-tool:clear");
-        mentionButton=attachmentAction(second,"@ Agent",R.drawable.ic_agents,0xFF35896A,0xFFE7F2EC,()->showAgents(true));inputArea.addView(extras);
+        commandScroll=new HorizontalScrollView(this);commandScroll.setHorizontalScrollBarEnabled(false);
+        LinearLayout commands=row();commandScroll.addView(commands,new HorizontalScrollView.LayoutParams(-2,-2));extras.addView(commandScroll,new LinearLayout.LayoutParams(-1,-2));
+        commandScroll.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->updateQuickCommandWidths());
+        attachmentAction(commands,"文件",R.drawable.ic_document,documents::choose).setTag("chat-tool:documents");
+        imageButton=attachmentAction(commands,"相册",R.drawable.ic_photo,this::chooseImages);
+        attachmentAction(commands,"压缩上下文",R.drawable.ic_compact,tools::compact).setTag("chat-tool:compact");
+        attachmentAction(commands,"查看上下文",R.drawable.ic_context,tools::context).setTag("chat-tool:context");
+        attachmentAction(commands,"新建对话",R.drawable.ic_new_chat,tools::newConversation).setTag("chat-tool:new");
+        attachmentAction(commands,"会话列表",R.drawable.ic_threads,this::showConversationList).setTag("chat-tool:threads");
+        mentionButton=attachmentAction(commands,"@ Agent",R.drawable.ic_mention,()->showAgents(true));
+        inputArea.addView(extras);
         chatScreen.addView(inputArea);
     }
-    private Button attachmentAction(LinearLayout parent,String label,int icon,int accent,int surface,Runnable action){
-        Button button=ui.toolButton(label,icon,accent,surface);
-        button.setOnClickListener(view->action.run());LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,-2,1);params.setMargins(dp(2),dp(2),dp(2),dp(2));
-        button.setMinHeight(dp(88));parent.addView(button,params);return button;
+    private Button attachmentAction(LinearLayout parent,String label,int icon,Runnable action){
+        Button button=ui.toolButton(label,icon);
+        button.setOnClickListener(view->action.run());LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(dp(64),-2);
+        button.setMinHeight(dp(96));parent.addView(button,params);return button;
+    }
+    private void updateQuickCommandWidths(){
+        if(commandScroll==null||imageButton==null)return;
+        LinearLayout commands=(LinearLayout)imageButton.getParent();int count=0;
+        for(int i=0;i<commands.getChildCount();i++)if(commands.getChildAt(i).getVisibility()!=View.GONE)count++;
+        int available=commandScroll.getWidth()>0?commandScroll.getWidth():getResources().getDisplayMetrics().widthPixels-dp(24);
+        int width=Math.max(dp(64),available/Math.max(1,count));
+        for(int i=0;i<commands.getChildCount();i++){
+            View item=commands.getChildAt(i);var params=item.getLayoutParams();
+            if(params.width!=width){params.width=width;item.setLayoutParams(params);}
+        }
     }
     private void chooseImages(){
         Intent picker=new Intent(Intent.ACTION_OPEN_DOCUMENT);picker.setType("image/*");picker.addCategory(Intent.CATEGORY_OPENABLE);picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true);startActivityForResult(picker,42);
@@ -318,15 +359,16 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     private void sendCurrent(){if(session.sendDraft(composer.getText().toString())){composer.setText("");navigation.attachments=false;extras.setVisibility(View.GONE);chatAdd.setRotation(0);scroll.post(()->scroll.fullScroll(View.FOCUS_DOWN));}}
     private void showChatMenu(View anchor){
         PopupMenu menu=new PopupMenu(this,anchor);
-        menu.getMenu().add("查看 Agent 信息").setOnMenuItemClickListener(item->{
-            var room=session.selected();
-            if(room!=null&&room.kind.equals("direct")&&!room.agentId.isEmpty())openAgentDetails(room.agentId);
-            else showAgents(false,true);
-            return true;
-        });
+        menu.getMenu().add("查看 Agent 信息").setOnMenuItemClickListener(item->{showConversationList();return true;});
+        menu.getMenu().add(0,R.id.find_chat_history,Menu.NONE,"查找聊天记录").setOnMenuItemClickListener(item->{hideKeyboard();chatSearch.show(session.selectedConversation,session.title());return true;});
         menu.getMenu().add("会话信息").setOnMenuItemClickListener(item->{showConversationInfo();return true;});
         if(session.selected()!=null&&session.selected().kind.equals("group"))
             menu.getMenu().add("群成员").setOnMenuItemClickListener(item->{showGroupMembers();return true;});
+        if(session.managesGroup(session.selected())){
+            menu.getMenu().add(0,R.id.chat_invite_users,Menu.NONE,"添加用户").setEnabled(!session.toolsBusy).setOnMenuItemClickListener(item->{inviteUsers(session.selectedConversation);return true;});
+            menu.getMenu().add(0,R.id.chat_invite_agents,Menu.NONE,"添加 Agent").setEnabled(!session.toolsBusy).setOnMenuItemClickListener(item->{inviteAgents(session.selectedConversation);return true;});
+        }
+        menu.getMenu().add("收藏").setOnMenuItemClickListener(item->{favorites.show();return true;});
         menu.getMenu().add("Token 用量").setOnMenuItemClickListener(item->{showUsage();return true;});
         menu.getMenu().add("快捷命令").setOnMenuItemClickListener(item->{hideKeyboard();composer.clearFocus();navigation.attachments=true;showScreen();return true;});
         menu.getMenu().add("新建对话").setOnMenuItemClickListener(item->{tools.newConversation();return true;});
@@ -349,18 +391,23 @@ public final class MainActivity extends Activity implements ChatSession.Listener
 
     private void renderGroupMembers(List<MessageApi.User> users){
         if(isDestroyed()||isFinishing())return;
-        String[] names=users.stream().map(MessageApi.User::username).toArray(String[]::new);
         var room=session.selected();
-        var builder=new AlertDialog.Builder(this).setTitle("群成员").setItems(names,null).setNegativeButton("关闭",null);
-        if(session.owns(room)&&!room.id.equals("shared")&&!room.id.startsWith("home:"))
+        List<String> names=new ArrayList<>();for(var user:users)names.add("用户 · "+user.username());
+        if(room!=null)for(var agent:session.agents)if(room.agentIds.contains(agent.id)||room.id.equals("shared")||room.id.startsWith("home:"))names.add("Agent · "+agent.name+" @"+agent.handle);
+        var builder=new AlertDialog.Builder(this).setTitle("群成员").setItems(names.toArray(new String[0]),null).setNegativeButton("关闭",null);
+        if(session.managesGroup(room)){
             builder.setPositiveButton("添加用户",(dialog,which)->inviteUsers(room.id));
+            builder.setNeutralButton("添加 Agent",(dialog,which)->inviteAgents(room.id));
+        }
         builder.show();
     }
 
     private void inviteUsers(String roomId){
+        var room=session.selected();if(!session.managesGroup(room)||!room.id.equals(roomId))return;
         LinearLayout form=column();
         form.setPadding(dp(24),dp(8),dp(24),0);
         EditText names=field(form,"已注册的 UserName（用逗号分隔）","",false);
+        names.setTag("group_invite_usernames");
         AlertDialog dialog=new AlertDialog.Builder(this).setTitle("添加群成员").setView(form)
             .setNegativeButton("取消",null).setPositiveButton("添加",null).create();
         dialog.setOnShowListener(ignored->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
@@ -372,6 +419,27 @@ public final class MainActivity extends Activity implements ChatSession.Listener
                 dialog.dismiss();
                 renderGroupMembers(members);
             });
+        }));
+        dialog.show();
+    }
+
+    private void inviteAgents(String roomId){
+        var room=session.selected();if(!session.managesGroup(room)||!room.id.equals(roomId))return;
+        List<MessageApi.Agent> candidates=new ArrayList<>();
+        for(var agent:session.agents)if(agent.enabled&&!room.agentIds.contains(agent.id))candidates.add(agent);
+        if(candidates.isEmpty()){Toast.makeText(this,"暂无可添加的 Agent",Toast.LENGTH_SHORT).show();return;}
+        LinearLayout form=column();form.setPadding(dp(20),dp(8),dp(20),0);
+        form.addView(text("已加入 "+room.agentIds.size()+" / 32 位 Agent，可多选",13,MUTED));
+        List<CheckBox> boxes=new ArrayList<>();
+        for(var agent:candidates){CheckBox box=new CheckBox(this);box.setText(agent.name+" @"+agent.handle);box.setTag("invite-agent:"+agent.id);form.addView(box);boxes.add(box);}
+        ScrollView contents=new ScrollView(this);contents.addView(form);
+        AlertDialog dialog=new AlertDialog.Builder(this).setTitle("添加 Agent").setView(contents).setNegativeButton("取消",null).setPositiveButton("添加",null).create();
+        dialog.setOnShowListener(ignored->dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
+            var current=session.selected();if(!session.managesGroup(current)||!current.id.equals(roomId))return;
+            List<String> ids=new ArrayList<>();for(int i=0;i<boxes.size();i++)if(boxes.get(i).isChecked()&&!current.agentIds.contains(candidates.get(i).id))ids.add(candidates.get(i).id);
+            if(ids.isEmpty()){Toast.makeText(this,"请选择尚未加入的 Agent",Toast.LENGTH_SHORT).show();return;}
+            if(current.agentIds.size()+ids.size()>32){Toast.makeText(this,"群聊最多加入 32 个 Agent",Toast.LENGTH_LONG).show();return;}
+            session.tool("正在添加 Agent…",api->api.addAgents(roomId,ids),updated->{session.addConversation(updated);dialog.dismiss();Toast.makeText(this,"Agent 已加入群聊",Toast.LENGTH_SHORT).show();session.refresh();});
         }));
         dialog.show();
     }
@@ -437,7 +505,8 @@ public final class MainActivity extends Activity implements ChatSession.Listener
 
     @Override public void changed(){
         if(homeScreen==null)return;
-        renderUsage();tools.changed();
+        if(notifications!=null)notifications.changed(navigation.inChat?session.selectedConversation:null);
+        renderUsage();tools.changed();if(chatSearch!=null)chatSearch.changed();if(favorites!=null)favorites.changed();
         if(!session.configured()&&navigation.tab!=ChatNavigation.Tab.SETTINGS&&session.status.equals("登录已失效，请重新登录。")){
             composer.setText("");
             navigation.tab(ChatNavigation.Tab.SETTINGS);
@@ -452,10 +521,11 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         roomTitle.setText(session.title());
         String subtitle=session.toolsBusy?session.toolsStatus:session.openingConversation()?"正在打开会话…":!session.connected?session.status:"";
         roomStatus.setText(subtitle);roomStatus.setVisibility(subtitle.isEmpty()?View.GONE:View.VISIBLE);
-        boolean direct=session.selected()!=null&&session.selected().kind.equals("direct");mentionButton.setVisibility(direct?View.INVISIBLE:View.VISIBLE);mentionButton.setEnabled(!session.availableAgents().isEmpty());
+        boolean direct=session.selected()!=null&&session.selected().kind.equals("direct");mentionButton.setVisibility(direct?View.GONE:View.VISIBLE);mentionButton.setEnabled(!session.availableAgents().isEmpty());updateQuickCommandWidths();
         if(!composer.getText().toString().equals(session.draft)){composer.setText(session.draft);composer.setSelection(composer.length());}
         if(!renderedConversation.equals(session.selectedConversation)){renderedConversation=session.selectedConversation;hideMentionSuggestions(false);dismissedMentionKey="";mentionKey="";renderedRevision=-1;attachmentSignature="";timeline.setTag(null);RichMarkdownView.releaseTree(timeline);timeline.removeAllViews();}
-        updateSend();renderAttachments();updateMentionSuggestions();
+        if(notifications!=null)notifications.changed(navigation.inChat?session.selectedConversation:null);
+        updateSend();renderQuotePreview();renderDocumentDrafts();renderAttachments();updateMentionSuggestions();
         if(renderedRevision!=session.revision){renderMessages();renderedRevision=session.revision;}
         if(older!=null){older.setText(session.loadingOlder?"正在加载…":"加载更早的消息");older.setEnabled(!session.loadingOlder);older.setVisibility(session.hasOlder?View.VISIBLE:View.GONE);}
     }
@@ -486,13 +556,14 @@ public final class MainActivity extends Activity implements ChatSession.Listener
                 addContextNotice(operations.get(operationIndex++));
             }
             if(lastTime==0||Math.abs(message.createdAt-lastTime)>5*60*1000){addTime(message.createdAt);lastTime=message.createdAt;}
-            addBubble(message.text,message.sender,"",session.mine(message),null,message.role.equals("assistant")?message.agentId:null,message.imageIds);
+            addBubble(message.text,message.sender,"",session.mine(message),null,message.role.equals("assistant")?message.agentId:null,message.imageIds,message,List.of());
             while(jobIndex<jobs.size()&&jobs.get(jobIndex).messageId==message.id)addJobNotice(jobs.get(jobIndex++));
         }
         while(operationIndex<operations.size())addContextNotice(operations.get(operationIndex++));
         while(jobIndex<jobs.size())addJobNotice(jobs.get(jobIndex++));
         for(JSONObject message:session.currentPending()){
-            boolean sending=session.sending.contains(message.optString("clientMessageId"));addBubble(message.optString("text"),message.optString("sender"),sending?"发送中…":"发送未完成",true,sending?null:message,null,ChatSession.imageIds(message));
+            boolean sending=session.sending.contains(message.optString("clientMessageId"));addBubble(message.optString("text"),message.optString("sender"),sending?"发送中…":"发送未完成",true,sending?null:message,null,ChatSession.imageIds(message),null,ChatSession.documents(message));
+            if(message.optJSONObject("quote")!=null){try{var quoted=new MessageApi.Quote(message.getJSONObject("quote"));TextView preview=text(quoted.sender+"："+quoted.preview(),12,INK);preview.setMaxLines(2);timeline.addView(preview);}catch(Exception ignored){}}
         }
         if(session.dismissedFailureCount()>0){
             Button restore=action("恢复已忽略的失败提示（"+session.dismissedFailureCount()+"）");restore.setTextSize(12);restore.setTextColor(MUTED);
@@ -521,10 +592,12 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         String value=android.text.format.DateUtils.isToday(timestamp)?DateFormat.getTimeInstance(DateFormat.SHORT).format(new Date(timestamp)):new SimpleDateFormat("M月d日 HH:mm",Locale.getDefault()).format(new Date(timestamp));
         TextView time=text(value,11,0xFFAAAAAA);time.setGravity(Gravity.CENTER);time.setPadding(0,dp(10),0,dp(17));timeline.addView(time);
     }
-    private void addBubble(String body,String sender,String detail,boolean mine,JSONObject retry,String agentId,List<String> images){
+    private void addBubble(String body,String sender,String detail,boolean mine,JSONObject retry,String agentId,List<String> images,MessageApi.Message original,List<ChatDocument> pendingDocs){
         boolean wideAgentReply=!mine&&agentId!=null&&!agentId.isEmpty()&&body.codePointCount(0,body.length())>500;
         LinearLayout message=row();message.setGravity(Gravity.TOP);LinearLayout.LayoutParams mp=new LinearLayout.LayoutParams(-1,-2);mp.bottomMargin=dp(15);
         LinearLayout content=column();content.setGravity(mine?Gravity.END:Gravity.START);
+        for(var doc:original!=null?original.documents:pendingDocs){content.addView(documents.card(doc,null,null,original==null?null:()->showMessageActions(original)),new LinearLayout.LayoutParams(-1,-2));}
+        if(original!=null){content.setTag("message-actions:"+original.id);content.setOnLongClickListener(v->{showMessageActions(original);return true;});}
         View identity;
         if(mine){TextView initials=text(sender.isEmpty()?"我":new String(Character.toChars(sender.codePointAt(0))),16,Color.WHITE);initials.setGravity(Gravity.CENTER);initials.setBackground(shape(0xFF719983,6));identity=initials;}
         else {
@@ -543,25 +616,46 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         for(String id:images){
             ImageView image=new ImageView(this);image.setScaleType(ImageView.ScaleType.FIT_CENTER);image.setPadding(dp(3),dp(3),dp(3),dp(3));image.setBackground(shape(Color.WHITE,6));
             int width=Math.min(dp(220),getResources().getDisplayMetrics().widthPixels-dp(125));LinearLayout.LayoutParams ip=new LinearLayout.LayoutParams(width,Math.round(width*.75f));ip.bottomMargin=dp(5);content.addView(image,ip);session.bindImage(image,id);
-            image.setOnClickListener(view->{ImageView large=new ImageView(this);large.setScaleType(ImageView.ScaleType.FIT_CENTER);large.setAdjustViewBounds(true);session.bindImage(large,id,true);new AlertDialog.Builder(this).setTitle("图片预览").setView(large).setPositiveButton("关闭",null).show();});
+            imageActions.bind(image,id,original==null?null:()->showMessageActions(original));
         }
         if(!body.isEmpty()){
             if(RichMarkdownView.isRequired(body)){
-                RichMarkdownView rich=new RichMarkdownView(this,body,mine);rich.setBackground(wideAgentReply?shape(Color.WHITE,5):ui.bubble(mine));content.addView(rich,new LinearLayout.LayoutParams(-1,-2));
+                RichMarkdownView rich=new RichMarkdownView(this,body,mine);if(original!=null)rich.setMessageAction(()->showMessageActions(original));rich.setBackground(wideAgentReply?shape(Color.WHITE,5):ui.bubble(mine));content.addView(rich,new LinearLayout.LayoutParams(-1,-2));
             }else{
                 TextView bubble=text("",14,INK);bubble.setPadding(dp(12),dp(10),dp(12),dp(10));bubble.setLineSpacing(dp(2),1);bubble.setBackground(wideAgentReply?shape(Color.WHITE,5):ui.bubble(mine));
                 boolean table=markdown.setText(bubble,body,mine);
-                bubble.setOnLongClickListener(view->{((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("消息",body));Toast.makeText(this,"已复制",Toast.LENGTH_SHORT).show();return true;});
+                bubble.setOnLongClickListener(view->{if(original!=null){showMessageActions(original);return true;}((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("消息",body));Toast.makeText(this,"已复制",Toast.LENGTH_SHORT).show();return true;});
                 content.addView(bubble,new LinearLayout.LayoutParams(wideAgentReply||table?-1:-2,-2));
             }
+        }
+        if(original!=null&&original.quote!=null){
+            TextView quote=text(original.quote.sender+"："+original.quote.preview(),12,INK);quote.setMaxLines(2);quote.setPadding(dp(10),dp(8),dp(10),dp(8));quote.setBackground(shape(0xFFE5E5E5,6));quote.setOnClickListener(v->chatSearch.showQuote(original.quote,original.conversationId,session.title()));content.addView(quote,new LinearLayout.LayoutParams(-1,-2));
         }
         if(!detail.isEmpty()){TextView state=text(detail,10,MUTED);state.setPadding(dp(5),dp(4),dp(5),0);content.addView(state);}
         if(retry!=null){Button button=action("重试发送");button.setOnClickListener(view->session.retry(retry));content.addView(button);}
         timeline.addView(message,mp);
     }
+    private void showMessageActions(MessageApi.Message message){
+        new AlertDialog.Builder(this).setItems(new String[]{"复制","引用","收藏","从这里创建分支"},(dialog,index)->{
+            if(index==0){((ClipboardManager)getSystemService(CLIPBOARD_SERVICE)).setPrimaryClip(ClipData.newPlainText("消息",message.text));Toast.makeText(this,"已复制",Toast.LENGTH_SHORT).show();}
+            else if(index==1){session.quote(message);navigation.attachments=false;showScreen();composer.requestFocus();((InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).showSoftInput(composer,InputMethodManager.SHOW_IMPLICIT);}
+            else if(index==2)session.favorite(message,text->Toast.makeText(this,text,Toast.LENGTH_SHORT).show());
+            else tools.branch(message);
+        }).show();
+    }
+    private void renderQuotePreview(){
+        if(quotePreview==null)return;quotePreview.removeAllViews();var quote=session.quotedMessage;quotePreview.setVisibility(quote==null?View.GONE:View.VISIBLE);if(quote==null)return;
+        TextView excerpt=text(quote.sender+"："+quote.preview(),12,INK);excerpt.setMaxLines(2);excerpt.setPadding(dp(10),dp(9),dp(10),dp(9));excerpt.setBackground(shape(0xFFE5E5E5,6));quotePreview.addView(excerpt,new LinearLayout.LayoutParams(0,-2,1));
+        Button cancel=action("×");cancel.setTextColor(Color.BLACK);cancel.setContentDescription("取消引用");cancel.setTag("cancel-quote");cancel.setOnClickListener(v->session.cancelQuote());quotePreview.addView(cancel,new LinearLayout.LayoutParams(dp(40),dp(40)));
+    }
     @Override protected void onActivityResult(int requestCode,int resultCode,Intent data){
-        super.onActivityResult(requestCode,resultCode,data);if(tools.result(requestCode,resultCode,data))return;if(requestCode!=42||resultCode!=RESULT_OK||data==null)return;
+        super.onActivityResult(requestCode,resultCode,data);if((favorites!=null&&favorites.result(requestCode,resultCode,data))||documents.result(requestCode,resultCode,data))return;if(imageActions.result(requestCode,resultCode,data)||tools.result(requestCode,resultCode,data))return;if(requestCode!=42||resultCode!=RESULT_OK||data==null)return;
         if(data.getClipData()!=null){var clip=data.getClipData();for(int i=0;i<Math.min(clip.getItemCount(),5);i++)session.addImage(clip.getItemAt(i).getUri(),()->{});}else if(data.getData()!=null)session.addImage(data.getData(),()->{});
+    }
+    private void renderDocumentDrafts(){
+        if(documentDraftRows==null)return;documentDraftRows.removeAllViews();
+        if(session.preparingDocuments>0)documentDraftRows.addView(text("正在读取文档…",12,Color.BLACK));
+        for(var doc:session.draftDocuments)documentDraftRows.addView(documents.card(doc,null,()->session.removeDocument(doc.id),null),new LinearLayout.LayoutParams(dp(260),-2));
     }
     private void renderAttachments(){
         imageButton.setEnabled(session.configured()&&!session.configuring&&session.draftImages.size()+session.preparingImages<4);imageButton.setText(session.preparingImages>0?"处理中…":"相册");
@@ -579,7 +673,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         if(dismiss)dismissedMentionKey=mentionKey;
         if(mentionPanel!=null)mentionPanel.setVisibility(View.GONE);
         boolean direct=session.selected()!=null&&session.selected().kind.equals("direct");
-        if(mentionButton!=null)mentionButton.setVisibility(direct?View.INVISIBLE:View.VISIBLE);
+        if(mentionButton!=null)mentionButton.setVisibility(direct?View.GONE:View.VISIBLE);
     }
     private void updateMentionSuggestions(){
         if(composer==null||mentionPanel==null)return;

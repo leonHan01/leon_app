@@ -2,6 +2,7 @@ import SwiftUI
 
 @main
 struct LeonIOSApp: App {
+    @UIApplicationDelegateAdaptor(PlatformPushDelegate.self) private var pushDelegate
     @Environment(\.scenePhase) private var phase
     @State private var store: ChatStore?
     @State private var failure: String?

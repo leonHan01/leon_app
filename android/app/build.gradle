@@ -1,14 +1,23 @@
 plugins { id 'com.android.application' }
 
+def vivoConfig = new Properties()
+def vivoConfigFile = System.getenv('LEON_VIVO_CONFIG') ? new File(System.getenv('LEON_VIVO_CONFIG')) : rootProject.file('vivo.properties')
+if (vivoConfigFile.exists()) vivoConfigFile.withInputStream { vivoConfig.load(it) }
+def vivoAppId = vivoConfig.getProperty('appId', System.getenv('LEON_VIVO_APP_ID') ?: '')
+def vivoAppKey = vivoConfig.getProperty('appKey', System.getenv('LEON_VIVO_APP_KEY') ?: '')
+
 android {
     namespace 'com.leon.app'
     compileSdk 35
+    buildFeatures { buildConfig true }
     defaultConfig {
         applicationId 'com.leon.app'
+        buildConfigField 'boolean', 'VIVO_PUSH_CONFIGURED', (!vivoAppId.isEmpty() && !vivoAppKey.isEmpty()).toString()
+        manifestPlaceholders = [vivoAppId: vivoAppId ?: 'unconfigured', vivoAppKey: vivoAppKey ?: 'unconfigured']
         minSdk 26
         targetSdk 35
-        versionCode 19
-        versionName '0.11.1'
+        versionCode 30
+        versionName '0.15.0'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -18,9 +27,16 @@ android {
         unitTests.includeAndroidResources = true
     }
     sourceSets { main { assets.srcDirs += ['../../shared/markdown/runtime'] } }
+    if (!vivoAppId.isEmpty() && !vivoAppKey.isEmpty()) {
+        def vivoManifest = layout.buildDirectory.file('generated/vivo/AndroidManifest.xml').get().asFile
+        vivoManifest.parentFile.mkdirs()
+        vivoManifest.text = file('src/main/AndroidManifest.xml').getText('UTF-8').replace('<!-- VIVO_RECEIVER -->', '<receiver android:name=".VivoPushReceiver" android:exported="false"><intent-filter><action android:name="com.vivo.pushclient.action.RECEIVE" /></intent-filter></receiver>')
+        sourceSets.main.manifest.srcFile(vivoManifest)
+    }
 }
 
 dependencies {
+    implementation files('libs/vivo-push-4.1.0.0.aar')
     implementation 'androidx.webkit:webkit:1.14.0'
     implementation 'androidx.exifinterface:exifinterface:1.4.2'
     implementation 'io.noties.markwon:core:4.6.2'

@@ -1,0 +1,770 @@
+diff --git a/pom.xml b/pom.xml
+--- a/pom.xml
++++ b/pom.xml
+@@ -23,6 +23,9 @@
+     </properties>
+ 
+     <dependencies>
++        <dependency><groupId>org.apache.pdfbox</groupId><artifactId>pdfbox</artifactId><version>3.0.8</version></dependency>
++        <dependency><groupId>org.apache.poi</groupId><artifactId>poi-ooxml</artifactId><version>6.0.0</version></dependency>
++        <dependency><groupId>org.apache.poi</groupId><artifactId>poi-scratchpad</artifactId><version>6.0.0</version></dependency>
+         <dependency>
+             <groupId>org.jsoup</groupId><artifactId>jsoup</artifactId><version>1.24.1</version>
+         </dependency>
+diff --git a/src/main/java/com/leon/workflow/messaging/AgentContextManager.java b/src/main/java/com/leon/workflow/messaging/AgentContextManager.java
+--- a/src/main/java/com/leon/workflow/messaging/AgentContextManager.java
++++ b/src/main/java/com/leon/workflow/messaging/AgentContextManager.java
+@@ -56,8 +56,9 @@
+             return store.atomic(()-> {
+                 // Content-free tombstones stop an old outbox/workflow retry from recreating deleted history.
+                 jdbc.update("INSERT INTO chat_cleared_message(device_id,client_message_id) SELECT device_id,client_message_id FROM device_message WHERE conversation_id=?",room);
++                jdbc.update("INSERT INTO chat_cleared_document(id) SELECT id FROM chat_message_document WHERE conversation_id=?",room);
+                 jdbc.update("INSERT INTO chat_cleared_image(id) SELECT id FROM chat_message_image WHERE conversation_id=?",room);
+-                for(String table:List.of("chat_helper_memory","chat_context_archive","chat_context_snapshot","chat_context_summary","chat_context_operation","chat_agent_job","device_message","chat_message_image"))
++                for(String table:List.of("chat_helper_memory","chat_context_archive","chat_context_snapshot","chat_context_summary","chat_context_operation","chat_agent_job","device_message","chat_message_image","chat_message_document"))
+                     jdbc.update("DELETE FROM "+table+" WHERE conversation_id=?",room);
+                 jdbc.update("MERGE INTO chat_context_policy(conversation_id,recent_rounds,after_id,epoch) KEY(conversation_id) VALUES(?,?,0,?)",room,policy.recentRounds(),policy.epoch()+1);
+                 jdbc.update("UPDATE chat_conversation SET history_revision=history_revision+1,last_clear_request_id=?,last_clear_count=? WHERE id=?",id,preview.messageCount(),room);
+@@ -343,7 +344,8 @@
+         var messages=new ArrayList<Map<String,String>>();
+         for(var row:rows) {
+             boolean mine="assistant".equals(row.role())&&agent.id().equals(row.agentId());
+-            String content=mine?row.modelText():("assistant".equals(row.role())?"[其他 Agent · ":"[用户 · ")+row.sender()+"]："+row.modelText();
++            String attachmentText=store.documentContext(row,Math.min(12000,Math.max(2000,inputBudget(agent))));
++            String content=mine?row.modelText()+attachmentText:("assistant".equals(row.role())?"[其他 Agent · ":"[用户 · ")+row.sender()+"]："+row.modelText()+attachmentText;
+             var attachments=new ArrayList<>(row.images());
+             if(row.quote()!=null)for(var image:row.quote().images())if(attachments.stream().noneMatch(i->i.id().equals(image.id())))attachments.add(image);
+             messages.add(ChatImageService.message(mine?"assistant":"user",clean(content,key),attachments));
+diff --git a/src/main/java/com/leon/workflow/messaging/ChatBackupService.java b/src/main/java/com/leon/workflow/messaging/ChatBackupService.java
+--- a/src/main/java/com/leon/workflow/messaging/ChatBackupService.java
++++ b/src/main/java/com/leon/workflow/messaging/ChatBackupService.java
+@@ -20,14 +20,16 @@
+     public record Backup(String format,int version,DeviceMessageStore.Conversation conversation,List<DeviceMessageStore.Message> messages,
+                          int recentRounds,long topicStartedAfter,List<Memory> memories) {}
+     private final DeviceMessageStore store;
+-    private final ChatImageService images;
++    private final ChatImageService images;private final ChatDocumentService documents;
+     private final AgentRegistry agents;
+     private final JdbcTemplate jdbc;
+     private final ObjectMapper json;
+-    public ChatBackupService(DeviceMessageStore store,ChatImageService images,AgentRegistry agents,JdbcTemplate jdbc,ObjectMapper json){this.store=store;this.images=images;this.agents=agents;this.jdbc=jdbc;this.json=json;}
++    public ChatBackupService(DeviceMessageStore store,ChatImageService images,AgentRegistry agents,JdbcTemplate jdbc,ObjectMapper json){this(store,images,agents,jdbc,json,new ChatDocumentService(jdbc,store));}
++    @org.springframework.beans.factory.annotation.Autowired
++    public ChatBackupService(DeviceMessageStore store,ChatImageService images,AgentRegistry agents,JdbcTemplate jdbc,ObjectMapper json,ChatDocumentService documents){this.documents=documents;this.store=store;this.images=images;this.agents=agents;this.jdbc=jdbc;this.json=json;}
+     @PostConstruct void initialize(){jdbc.execute("CREATE TABLE IF NOT EXISTS chat_backup_import (request_id VARCHAR(36) PRIMARY KEY,source_hash VARCHAR(64) NOT NULL,target_agent VARCHAR(36) NOT NULL,conversation_id VARCHAR(80) NOT NULL)");}
+     public byte[] export(String room) {
+-        Backup backup;var files=new LinkedHashMap<String,byte[]>();
++        Backup backup;var files=new LinkedHashMap<String,byte[]>();var docFiles=new LinkedHashMap<String,byte[]>();
+         synchronized(store) {
+             var conversation=store.conversation(room);
+             if(ChatAccess.personalRoom(room))conversation=new DeviceMessageStore.Conversation(room,conversation.name(),"group",null,agents.list().stream().map(AgentRegistry.Agent::id).toList());
+@@ -38,18 +40,22 @@
+             for(var message:messages)for(var image:message.images())if(!files.containsKey(image.id())){
+                 size+=image.byteCount();if(size>MAX_BYTES)throw tooLarge();files.put(image.id(),images.bytes(image.id()));
+             }
++            for(var message:messages)for(var doc:message.documents())if(!docFiles.containsKey(doc.id())){
++                size+=doc.byteCount();if(size>MAX_BYTES)throw tooLarge();docFiles.put(doc.id(),documents.bytes(doc.id()));
++            }
+             var policy=jdbc.queryForList("SELECT recent_rounds,after_id,epoch FROM chat_context_policy WHERE conversation_id=?",room);
+             int rounds=policy.isEmpty()?10:((Number)policy.getFirst().get("recent_rounds")).intValue();
+             long after=policy.isEmpty()?0:((Number)policy.getFirst().get("after_id")).longValue(), epoch=policy.isEmpty()?0:((Number)policy.getFirst().get("epoch")).longValue();
+             var memories=jdbc.query("SELECT s.* FROM chat_context_summary s WHERE conversation_id=? AND epoch=? AND through_id=(SELECT MAX(t.through_id) FROM chat_context_summary t WHERE t.conversation_id=s.conversation_id AND t.agent_id=s.agent_id AND t.epoch=s.epoch)",
+                 (rs,n)->new Memory(rs.getString("agent_id"),rs.getLong("through_id"),rs.getString("summary"),rs.getLong("created_at")),room,epoch);
+-            backup=new Backup("leon-chat",1,conversation,messages,rounds,after,memories);
++            backup=new Backup("leon-chat",docFiles.isEmpty()?1:2,conversation,messages,rounds,after,memories);
+         }
+         try {
+             byte[] manifest=json.writeValueAsBytes(backup);if(manifest.length>MAX_MANIFEST)throw tooLarge();
+             var output=new ByteArrayOutputStream();
+             try(var zip=new ZipOutputStream(output)){
+                 entry(zip,"manifest.json",manifest);
++                for(var file:docFiles.entrySet()){entry(zip,"documents/"+file.getKey(),file.getValue());if(output.size()>MAX_BYTES)throw tooLarge();}
+                 for(var file:files.entrySet()){entry(zip,"images/"+file.getKey()+".jpg",file.getValue());if(output.size()>MAX_BYTES)throw tooLarge();}
+             }
+             if(output.size()>MAX_BYTES)throw tooLarge();return output.toByteArray();
+@@ -64,24 +70,24 @@
+         String request=legacy?key:UUID.nameUUIDFromBytes((owner+":"+key).getBytes(java.nio.charset.StandardCharsets.UTF_8)).toString();
+         String target=targetAgent==null?"":DeviceMessageStore.uuid(targetAgent);
+         if(data.length==0||data.length>MAX_BYTES)throw tooLarge();
+-        String hash=hash(data);Backup backup;var files=new LinkedHashMap<String,byte[]>();
++        String hash=hash(data);Backup backup;var files=new LinkedHashMap<String,byte[]>();var docFiles=new LinkedHashMap<String,byte[]>();
+         try(var zip=new ZipInputStream(new ByteArrayInputStream(data))){
+             byte[] manifest=null;long total=0;var names=new HashSet<String>();
+             for(ZipEntry entry;(entry=zip.getNextEntry())!=null;){
+                 String name=entry.getName();
+-                if(!names.add(name)||names.size()>MAX_MESSAGES*4+1||entry.isDirectory())throw bad("备份包含重复或无效文件");
+-                int limit=name.equals("manifest.json")?MAX_MANIFEST:ChatImageService.MAX_STORED;
+-                if(!name.equals("manifest.json")&&!name.matches("images/[a-f0-9-]{36}\\.jpg"))throw bad("备份文件结构无效");
++                if(!names.add(name)||names.size()>MAX_MESSAGES*8+1||entry.isDirectory())throw bad("备份包含重复或无效文件");
++                int limit=name.equals("manifest.json")?MAX_MANIFEST:name.startsWith("documents/")?ChatDocumentService.MAX_BYTES:ChatImageService.MAX_STORED;
++                if(!name.equals("manifest.json")&&!name.matches("images/[a-f0-9-]{36}\\.jpg")&&!name.matches("documents/[a-f0-9-]{36}"))throw bad("备份文件结构无效");
+                 byte[] bytes=zip.readNBytes(limit+1);if(bytes.length>limit)throw tooLarge();
+                 total+=bytes.length;if(total>MAX_BYTES+MAX_MANIFEST)throw tooLarge();
+-                if(name.equals("manifest.json"))manifest=bytes;else files.put(DeviceMessageStore.uuid(name.substring(7,43)),bytes);
++                if(name.equals("manifest.json"))manifest=bytes;else if(name.startsWith("documents/"))docFiles.put(DeviceMessageStore.uuid(name.substring(10)),bytes);else files.put(DeviceMessageStore.uuid(name.substring(7,43)),bytes);
+                 zip.closeEntry();
+             }
+             if(manifest==null)throw bad("不是 Leon 聊天备份");
+             backup=json.readValue(manifest,Backup.class);
+         }catch(ResponseStatusException known){throw known;}
+         catch(Exception invalid){throw bad("备份损坏或格式不受支持");}
+-        try{validate(backup,files,target);}
++        try{validate(backup,files,docFiles,target);}
+         catch(ResponseStatusException known){throw known;}
+         catch(RuntimeException invalid){throw bad("备份内容不完整或格式无效");}
+         synchronized(store){
+@@ -104,6 +110,10 @@
+                     String id=UUID.randomUUID().toString();imageMap.put(file.getKey(),id);var metadata=imageMetadata(file.getValue());
+                     jdbc.update("INSERT INTO chat_message_image(id,conversation_id,source_hash,mime_type,width,height,byte_count,image_data,created_at) VALUES(?,?,?,'image/jpeg',?,?,?,?,?)",id,room,hash(file.getValue()),metadata[0],metadata[1],file.getValue().length,file.getValue(),System.currentTimeMillis());
+                 }
++                var documentMap=new HashMap<String,String>();
++                for(var message:backup.messages())for(var doc:message.documents())if(!documentMap.containsKey(doc.id())){
++                    String id=UUID.randomUUID().toString();documents.upload(id,room,owner==null?"legacy":owner,doc.name(),docFiles.get(doc.id()));documentMap.put(doc.id(),id);
++                }
+                 var idMap=new TreeMap<Long,Long>();
+                 for(var message:backup.messages()){
+                     String clientId=UUID.randomUUID().toString();String agent=remapAgent(message.agentId(),source,directAgent);
+@@ -111,10 +121,12 @@
+                     String imageIds=String.join(",",message.images().stream().map(i->imageMap.get(i.id())).toList());
+                     jdbc.update("INSERT INTO device_message(client_message_id,device_id,sender,platform,body,created_at,conversation_id,message_role,agent_id,reply_to,image_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?)",clientId,message.deviceId(),message.sender(),message.platform(),message.text(),message.createdAt(),room,message.role(),agent,reply,imageIds);
+                     long id=jdbc.queryForObject("SELECT id FROM device_message WHERE device_id=? AND client_message_id=?",Long.class,message.deviceId(),clientId);idMap.put(message.id(),id);
++                    jdbc.update("UPDATE device_message SET document_ids=? WHERE id=?",String.join(",",message.documents().stream().map(d->documentMap.get(d.id())).toList()),id);
+                 }
+                 for(var message:backup.messages())if(message.quote()!=null){
+                     var q=message.quote();Long targetId=idMap.get(q.id());
+                     if(targetId==null)throw bad("备份引用消息不存在");
++                    jdbc.update("UPDATE device_message SET quote_document_ids=? WHERE id=?",String.join(",",q.documents().stream().map(d->documentMap.get(d.id())).toList()),idMap.get(message.id()));
+                     jdbc.update("UPDATE device_message SET quote_message_id=?,quote_sender=?,quote_body=?,quote_image_ids=? WHERE id=?",targetId,q.sender(),q.text(),String.join(",",q.images().stream().map(image->imageMap.get(image.id())).toList()),idMap.get(message.id()));
+                 }
+                 jdbc.update("INSERT INTO chat_context_policy(conversation_id,recent_rounds,after_id,epoch) VALUES(?,?,?,0)",room,backup.recentRounds(),boundary(idMap,backup.topicStartedAfter()));
+@@ -124,8 +136,8 @@
+             });
+         }
+     }
+-    private void validate(Backup backup,Map<String,byte[]> files,String target){
+-        if(backup==null||!"leon-chat".equals(backup.format())||backup.version()!=1||backup.conversation()==null||backup.messages()==null||backup.memories()==null)throw bad("不是受支持的 Leon 聊天备份");
++    private void validate(Backup backup,Map<String,byte[]> files,Map<String,byte[]> docFiles,String target){
++        if(backup==null||!"leon-chat".equals(backup.format())||(backup.version()!=1&&backup.version()!=2)||backup.conversation()==null||backup.messages()==null||backup.memories()==null)throw bad("不是受支持的 Leon 聊天备份");
+         var room=backup.conversation();
+         if(!Set.of("direct","group").contains(room.kind())||!text(room.name(),60)||room.agentIds()==null||room.agentIds().size()>32||backup.messages().size()>MAX_MESSAGES||backup.recentRounds()<1||backup.recentRounds()>20||backup.topicStartedAfter()<0)throw bad("备份会话无效");
+         if(room.kind().equals("direct")) {
+@@ -136,7 +148,7 @@
+             if(!target.isEmpty())throw bad("群聊备份不能加载到 Agent 私聊");
+             for(String id:room.agentIds())agents.get(DeviceMessageStore.uuid(id));
+         }
+-        var ids=new HashMap<Long,DeviceMessageStore.Message>();var usedImages=new HashSet<String>();long previous=0;
++        var ids=new HashMap<Long,DeviceMessageStore.Message>();var usedImages=new HashSet<String>();var usedDocuments=new HashSet<String>();long previous=0;
+         for(var m:backup.messages()){
+             if(m==null||m.id()<=previous||!Set.of("user","assistant").contains(m.role())||!Set.of("macos","android","ios","agent").contains(m.platform())||!text(m.sender(),60)||m.text()==null||m.text().length()>8000||m.text().indexOf('\0')>=0||m.createdAt()<0||m.images()==null||m.images().size()>4)throw bad("备份消息无效");
+             DeviceMessageStore.uuid(m.deviceId());
+@@ -147,12 +159,19 @@
+             for(var image:m.images()){
+                 String id=DeviceMessageStore.uuid(image.id());if(!files.containsKey(id)||!perMessage.add(id))throw bad("备份缺少图片或图片重复");usedImages.add(id);
+             }
++            if(m.documents().size()>4)throw bad("备份文档数量无效");var perDocument=new HashSet<String>();
++            for(var doc:m.documents()){
++                String id=DeviceMessageStore.uuid(doc.id());
++                if(!docFiles.containsKey(id)||!perDocument.add(id)||docFiles.get(id).length!=doc.byteCount())throw bad("备份缺少文档或文档无效");
++                ChatDocumentService.filename(doc.name());usedDocuments.add(id);
++            }
+             if(m.quote()!=null){
+                 var q=m.quote();var original=ids.get(q.id());
+-                if(original==null||!Objects.equals(q.sender(),original.sender())||!Objects.equals(q.text(),original.text())||!Objects.equals(q.images(),original.images()))throw bad("备份引用消息无效");
++                if(original==null||!Objects.equals(q.sender(),original.sender())||!Objects.equals(q.text(),original.text())||!Objects.equals(q.images(),original.images())||!Objects.equals(q.documents(),original.documents()))throw bad("备份引用消息无效");
+             }
+             previous=m.id();ids.put(m.id(),m);
+         }
++        if(!docFiles.keySet().equals(usedDocuments))throw bad("备份文档与消息不匹配");
+         if(!files.keySet().equals(usedImages))throw bad("备份图片与消息不匹配");
+         files.values().forEach(ChatBackupService::imageMetadata);
+         var memoryAgents=new HashSet<String>();
+diff --git a/src/main/java/com/leon/workflow/messaging/ChatDocumentService.java b/src/main/java/com/leon/workflow/messaging/ChatDocumentService.java
+new file mode 100644
+--- /dev/null
++++ b/src/main/java/com/leon/workflow/messaging/ChatDocumentService.java
+@@ -0,0 +1,123 @@
++package com.leon.workflow.messaging;
++
++import org.springframework.stereotype.Service;
++import org.springframework.jdbc.core.JdbcTemplate;
++import org.springframework.http.HttpStatus;
++import org.apache.pdfbox.Loader;
++import org.apache.pdfbox.text.PDFTextStripper;
++import org.apache.poi.hwpf.HWPFDocument;
++import org.apache.poi.hwpf.extractor.WordExtractor;
++import org.apache.poi.xwpf.usermodel.XWPFDocument;
++import org.apache.poi.xwpf.extractor.XWPFWordExtractor;
++import org.apache.poi.ss.usermodel.*;
++import java.io.*;
++import java.nio.*;
++import java.nio.charset.*;
++import java.security.MessageDigest;
++import java.util.*;
++
++/** Original files and extracted text are conversation-bound; parsers never execute formulas or macros. */
++@Service
++public class ChatDocumentService {
++    public static final int MAX_BYTES=10*1024*1024, MAX_TEXT=60000;
++    private static final Set<String> EXT=Set.of("pdf","txt","doc","docx","xls","xlsx","md","markdown","csv");
++    private final JdbcTemplate jdbc;private final DeviceMessageStore store;
++    public ChatDocumentService(JdbcTemplate jdbc,DeviceMessageStore store){this.jdbc=jdbc;this.store=store;}
++    public DeviceMessageStore.Document upload(String id,String room,String user,String name,byte[] bytes){
++        id=DeviceMessageStore.uuid(id);name=filename(name);
++        if(bytes.length==0||bytes.length>MAX_BYTES)throw bad("文档不能为空，且每个文件不能超过 10 MB");
++        String ext=name.substring(name.lastIndexOf('.')+1).toLowerCase(Locale.ROOT);
++        if(!EXT.contains(ext))throw bad("支持 PDF、TXT、DOC/DOCX、XLS/XLSX、Markdown 和 CSV");
++        long revision;String hash=hash(bytes);
++        synchronized(store){
++            store.conversation(room);revision=store.historyRevision(room);
++            if(jdbc.queryForObject("SELECT COUNT(*) FROM chat_cleared_document WHERE id=?",Integer.class,id)>0)throw bad("附件已随聊天清空，请重新选择");
++            var old=jdbc.queryForList("SELECT conversation_id,user_id,name,source_hash FROM chat_message_document WHERE id=?",id);
++            if(!old.isEmpty()){
++                var row=old.getFirst();
++                if(!Objects.equals(row.get("conversation_id"),room)||!Objects.equals(row.get("user_id"),user)||!row.get("name").equals(name)||!row.get("source_hash").equals(hash))throw DeviceMessageStore.failure(HttpStatus.CONFLICT,"相同附件标识不能上传不同文件");
++                return store.documents(id).getFirst();
++            }
++        }
++        String text=extract(ext,bytes);boolean truncated=text.length()>MAX_TEXT;
++        if(text.isBlank())throw bad(ext.equals("pdf")?"PDF 没有可提取的文字，扫描件请先进行 OCR 或发送页面图片。":"文档没有可供 AI 分析的文字内容。");
++        if(truncated)text=text.substring(0,MAX_TEXT);
++        String mime=switch(ext){case "pdf"->"application/pdf";case "doc"->"application/msword";case "docx"->"application/vnd.openxmlformats-officedocument.wordprocessingml.document";case "xls"->"application/vnd.ms-excel";case "xlsx"->"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";case "csv"->"text/csv";case "md","markdown"->"text/markdown";default->"text/plain";};
++        synchronized(store){
++            if(store.historyRevision(room)!=revision)throw bad("会话已清空，请重新选择附件");
++            var existing=jdbc.queryForList("SELECT source_hash,name,user_id,conversation_id FROM chat_message_document WHERE id=?",id);
++            if(!existing.isEmpty()){
++                var old=existing.getFirst();if(!hash.equals(old.get("source_hash"))||!name.equals(old.get("name"))||!user.equals(old.get("user_id"))||!room.equals(old.get("conversation_id")))throw bad("附件标识冲突");
++                return store.documents(id).getFirst();
++            }
++            jdbc.update("INSERT INTO chat_message_document(id,conversation_id,user_id,name,mime_type,byte_count,character_count,truncated,document_data,extracted_text,source_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?)",id,room,user,name,mime,bytes.length,text.length(),truncated,bytes,text,hash);
++            return store.documents(id).getFirst();
++        }
++    }
++    public byte[] bytes(String id){
++        var rows=jdbc.queryForList("SELECT document_data FROM chat_message_document WHERE id=?",byte[].class,DeviceMessageStore.uuid(id));
++        if(rows.isEmpty())throw DeviceMessageStore.failure(HttpStatus.NOT_FOUND,"附件不存在或已清空");return rows.getFirst();
++    }
++    public String room(String id){
++        var rows=jdbc.queryForList("SELECT conversation_id FROM chat_message_document WHERE id=?",String.class,DeviceMessageStore.uuid(id));
++        if(rows.isEmpty())throw DeviceMessageStore.failure(HttpStatus.NOT_FOUND,"附件不存在或已清空");return rows.getFirst();
++    }
++    static String filename(String name){
++        if(name==null)throw bad("文件名不能为空");name=name.strip();
++        if(name.isEmpty()||name.length()>180||name.contains("/")||name.contains("\\")||name.codePoints().anyMatch(Character::isISOControl))throw bad("文件名无效或过长");return name;
++    }
++    static String hash(byte[] bytes){try{return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));}catch(Exception e){throw new IllegalStateException(e);}}
++    static String extract(String ext,byte[] bytes){
++        try{
++            String text;
++            switch(ext){
++                case "pdf":
++                    try(var pdf=Loader.loadPDF(bytes)){
++                        if(pdf.isEncrypted()||!pdf.getCurrentAccessPermission().canExtractContent())throw bad("PDF 已加密或禁止文字提取，请使用可读取的文件。");
++                        if(pdf.getNumberOfPages()>300)throw bad("PDF 超过 300 页，请拆分后发送。");
++                        var out=new BoundedWriter();var stripper=new PDFTextStripper();stripper.setSortByPosition(true);stripper.writeText(pdf,out);text=out.toString();
++                    }break;
++                case "doc":try(var doc=new HWPFDocument(new ByteArrayInputStream(bytes));var reader=new WordExtractor(doc)){text=bounded(reader.getText());}break;
++                case "docx":
++                    checkZip(bytes);try(var doc=new XWPFDocument(new ByteArrayInputStream(bytes));var reader=new XWPFWordExtractor(doc)){text=bounded(reader.getText());}break;
++                case "xls":case "xlsx":
++                    if(ext.equals("xlsx"))checkZip(bytes);
++                    try(var book=WorkbookFactory.create(new ByteArrayInputStream(bytes))){
++                        var out=new BoundedWriter();var format=new DataFormatter(Locale.CHINA);format.setUseCachedValuesForFormulaCells(true);
++                        outer:for(var sheet:book){out.write("\n[工作表："+sheet.getSheetName()+"]\n");for(var row:sheet){
++                            out.write("行 "+(row.getRowNum()+1)+"\t");
++                            int cells=Math.max(0,row.getLastCellNum());
++                            for(int c=0;c<cells;c++){if(out.full())break outer;if(c>0)out.write("\t");var cell=row.getCell(c);if(cell!=null)out.write(format.formatCellValue(cell).replace('\t',' ').replace('\n',' '));}
++                            out.write("\n");if(out.full())break outer;
++                        }}text=out.toString();
++                    }break;
++                default:text=decode(bytes);
++            }
++            return text.replace("\u0000","").strip();
++        }catch(org.springframework.web.server.ResponseStatusException known){throw known;}
++        catch(Exception e){throw bad("文档损坏、已加密或格式与扩展名不符，请检查后重试。");}
++    }
++    private static void checkZip(byte[] bytes)throws IOException{
++        int total=0,count=0;try(var zip=new java.util.zip.ZipInputStream(new ByteArrayInputStream(bytes))){
++            for(var entry=zip.getNextEntry();entry!=null;entry=zip.getNextEntry()){
++                if(++count>4000)throw bad("Office 文件结构过大，请拆分后发送");
++                byte[] buffer=new byte[8192];int n;while((n=zip.read(buffer))!=-1){total+=n;if(total>50*1024*1024)throw bad("Office 文件解压后过大，请拆分后发送");}
++            }
++        }
++    }
++    private static String decode(byte[] bytes)throws CharacterCodingException{
++        Charset[] encodings={StandardCharsets.UTF_8,Charset.forName("GB18030")};
++        if(bytes.length>=2&&(bytes[0]==(byte)0xff&&bytes[1]==(byte)0xfe||bytes[0]==(byte)0xfe&&bytes[1]==(byte)0xff))encodings=new Charset[]{StandardCharsets.UTF_16};
++        for(var encoding:encodings){try{String text=encoding.newDecoder().onMalformedInput(CodingErrorAction.REPORT).onUnmappableCharacter(CodingErrorAction.REPORT).decode(ByteBuffer.wrap(bytes)).toString().replace("\uFEFF","");
++            if(text.codePoints().anyMatch(c->Character.isISOControl(c)&&c!='\n'&&c!='\r'&&c!='\t'))throw bad("文件包含二进制内容，请选择有效文档");return bounded(text);
++        }catch(CharacterCodingException ignored){}}
++        throw bad("无法识别文字编码，请另存为 UTF-8 后发送");
++    }
++    private static String bounded(String value){return value.length()>MAX_TEXT+1?value.substring(0,MAX_TEXT+1):value;}
++    private static class BoundedWriter extends Writer{
++        private final StringBuilder text=new StringBuilder();boolean full(){return text.length()>MAX_TEXT;}
++        public void write(char[] chars,int offset,int length){int n=Math.min(length,MAX_TEXT+1-text.length());if(n>0)text.append(chars,offset,n);}
++        public void flush(){}public void close(){}public String toString(){return text.toString();}
++    }
++    private static org.springframework.web.server.ResponseStatusException bad(String text){return DeviceMessageStore.bad(text);}
++}
+diff --git a/src/main/java/com/leon/workflow/messaging/ChatFavorites.java b/src/main/java/com/leon/workflow/messaging/ChatFavorites.java
+--- a/src/main/java/com/leon/workflow/messaging/ChatFavorites.java
++++ b/src/main/java/com/leon/workflow/messaging/ChatFavorites.java
+@@ -18,6 +18,7 @@
+         jdbc.execute("CREATE TABLE IF NOT EXISTS chat_favorite (id BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,user_id VARCHAR(36) NOT NULL,source_message_id BIGINT NOT NULL,conversation_name VARCHAR(60) NOT NULL,sender VARCHAR(60) NOT NULL,body VARCHAR(8000) NOT NULL,snapshot_json CLOB NOT NULL,saved_at BIGINT NOT NULL,CONSTRAINT uq_chat_favorite UNIQUE(user_id,source_message_id))");
+         jdbc.execute("CREATE INDEX IF NOT EXISTS idx_chat_favorite_user ON chat_favorite(user_id,id)");
+         jdbc.execute("CREATE TABLE IF NOT EXISTS chat_favorite_image (favorite_id BIGINT NOT NULL,image_id VARCHAR(36) NOT NULL,image_data BLOB NOT NULL,PRIMARY KEY(favorite_id,image_id))");
++        jdbc.execute("CREATE TABLE IF NOT EXISTS chat_favorite_document(favorite_id BIGINT NOT NULL,document_id VARCHAR(36) NOT NULL,name VARCHAR(180) NOT NULL,document_data BLOB NOT NULL,PRIMARY KEY(favorite_id,document_id))");
+     }
+     public Item add(ChatUserRegistry.User user,long messageId){
+         if(messageId<=0)throw DeviceMessageStore.bad("消息标识无效");
+@@ -33,6 +34,10 @@
+                     int count=jdbc.update("INSERT INTO chat_favorite_image(favorite_id,image_id,image_data) SELECT ?,id,image_data FROM chat_message_image WHERE id=? AND conversation_id=?",id,image.id(),message.conversationId());
+                     if(count!=1)throw DeviceMessageStore.bad("原图片已不可用，请重新加载后收藏");
+                 }
++                for(var doc:message.documents()){
++                    int count=jdbc.update("INSERT INTO chat_favorite_document(favorite_id,document_id,name,document_data) SELECT ?,id,name,document_data FROM chat_message_document WHERE id=? AND conversation_id=?",id,doc.id(),message.conversationId());
++                    if(count!=1)throw DeviceMessageStore.bad("原附件已不可用，请重新加载后收藏");
++                }
+                 return item(user.id(),id);
+             });
+         }
+@@ -44,8 +49,8 @@
+     public Page page(String user,String query,Long before,int limit){
+         String q=query==null?"":query.strip();
+         if(q.length()>100||q.codePoints().anyMatch(Character::isISOControl)||before!=null&&before<=0||limit<1||limit>50)throw DeviceMessageStore.bad("收藏搜索或分页参数无效");
+-        String sql="SELECT id FROM chat_favorite WHERE user_id=? AND (LOCATE(LOWER(?),LOWER(body))>0 OR LOCATE(LOWER(?),LOWER(sender))>0 OR LOCATE(LOWER(?),LOWER(conversation_name))>0)";
+-        var args=new ArrayList<Object>(List.of(user,q,q,q));if(before!=null){sql+=" AND id<?";args.add(before);}sql+=" ORDER BY id DESC LIMIT ?";args.add(limit+1);
++        String sql="SELECT id FROM chat_favorite WHERE user_id=? AND (LOCATE(LOWER(?),LOWER(body))>0 OR LOCATE(LOWER(?),LOWER(sender))>0 OR LOCATE(LOWER(?),LOWER(conversation_name))>0 OR EXISTS(SELECT 1 FROM chat_favorite_document d WHERE d.favorite_id=chat_favorite.id AND LOCATE(LOWER(?),LOWER(d.name))>0))";
++        var args=new ArrayList<Object>(List.of(user,q,q,q,q));if(before!=null){sql+=" AND id<?";args.add(before);}sql+=" ORDER BY id DESC LIMIT ?";args.add(limit+1);
+         synchronized(store){
+             var ids=jdbc.queryForList(sql,Long.class,args.toArray());boolean more=ids.size()>limit;
+             var selected=ids.subList(0,Math.min(limit,ids.size()));var result=selected.stream().map(id->item(user,id)).toList();
+@@ -54,9 +59,15 @@
+     }
+     public void remove(String user,long id){
+         synchronized(store){store.atomic(()->{
++            jdbc.update("DELETE FROM chat_favorite_document WHERE favorite_id=? AND EXISTS(SELECT 1 FROM chat_favorite WHERE id=? AND user_id=?)",id,id,user);
+             jdbc.update("DELETE FROM chat_favorite_image WHERE favorite_id=? AND EXISTS(SELECT 1 FROM chat_favorite WHERE id=? AND user_id=?)",id,id,user);
+             jdbc.update("DELETE FROM chat_favorite WHERE id=? AND user_id=?",id,user);return true;
+         });}
++    }
++    public byte[] document(String user,long id,String document){
++        document=DeviceMessageStore.uuid(document);
++        synchronized(store){var rows=jdbc.query("SELECT d.document_data FROM chat_favorite_document d JOIN chat_favorite f ON f.id=d.favorite_id WHERE f.user_id=? AND f.id=? AND d.document_id=?",(rs,n)->rs.getBytes(1),user,id,document);
++            if(rows.isEmpty())throw missing();return rows.getFirst();}
+     }
+     public byte[] image(String user,long id,String image){
+         image=DeviceMessageStore.uuid(image);
+diff --git a/src/main/java/com/leon/workflow/messaging/DeviceMessageController.java b/src/main/java/com/leon/workflow/messaging/DeviceMessageController.java
+--- a/src/main/java/com/leon/workflow/messaging/DeviceMessageController.java
++++ b/src/main/java/com/leon/workflow/messaging/DeviceMessageController.java
+@@ -12,9 +12,9 @@
+     private final DeviceMessageStore store;
+     private final AgentChatService chat;
+     private final ChatAccess access;
+-    private final ChatFavorites favorites;
+-    public DeviceMessageController(DeviceMessageStore store,AgentChatService chat,ChatAccess access,ChatFavorites favorites){
+-        this.store=store;this.chat=chat;this.access=access;this.favorites=favorites;
++    private final ChatFavorites favorites;private final ChatDocumentService documents;
++    public DeviceMessageController(DeviceMessageStore store,AgentChatService chat,ChatAccess access,ChatFavorites favorites,ChatDocumentService documents){
++        this.store=store;this.chat=chat;this.access=access;this.favorites=favorites;this.documents=documents;
+     }
+ 
+     @GetMapping
+@@ -42,8 +42,20 @@
+             .body(store.searchContext(access.room(request,conversationId,false),messageId,direction,limit));
+     }
+ 
++    @PostMapping("/documents") public ResponseEntity<DeviceMessageStore.Document> uploadDocument(@RequestParam String id,@RequestParam String conversationId,@RequestParam String name,HttpServletRequest request)throws java.io.IOException {
++        var user=access.user(request);String room=access.room(request,conversationId,false);
++        if(request.getContentLengthLong()>ChatDocumentService.MAX_BYTES)throw DeviceMessageStore.failure(org.springframework.http.HttpStatus.PAYLOAD_TOO_LARGE,"文件不能超过 10 MB");
++        byte[] bytes=request.getInputStream().readNBytes(ChatDocumentService.MAX_BYTES+1);
++        if(bytes.length>ChatDocumentService.MAX_BYTES)throw DeviceMessageStore.failure(org.springframework.http.HttpStatus.PAYLOAD_TOO_LARGE,"文件不能超过 10 MB");
++        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(documents.upload(id,room,user.id(),name,bytes));
++    }
++    @GetMapping("/documents/{id}") public ResponseEntity<byte[]> document(@PathVariable String id,HttpServletRequest request){
++        synchronized(store){access.room(request,documents.room(id),false);var doc=store.documents(id).getFirst();
++            return ResponseEntity.ok().cacheControl(CacheControl.noStore()).contentType(org.springframework.http.MediaType.APPLICATION_OCTET_STREAM)
++                .header("X-Content-Type-Options","nosniff").header("Content-Disposition",org.springframework.http.ContentDisposition.attachment().filename(doc.name(),java.nio.charset.StandardCharsets.UTF_8).build().toString()).body(documents.bytes(id));}
++    }
+     @GetMapping("/features") public ResponseEntity<?> features(){
+-        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(java.util.Map.of("quotes",true,"favorites",true));
++        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(java.util.Map.of("quotes",true,"favorites",true,"documents",true));
+     }
+     @GetMapping("/favorites") public ResponseEntity<ChatFavorites.Page> favorites(@RequestParam(defaultValue="") String q,@RequestParam(required=false) Long before,@RequestParam(defaultValue="30") int limit,HttpServletRequest request){
+         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(favorites.page(access.user(request).id(),q,before,limit));
+@@ -54,6 +66,10 @@
+     @PostMapping("/favorites/{id}/remove") public ResponseEntity<?> removeFavorite(@PathVariable long id,HttpServletRequest request){
+         favorites.remove(access.user(request).id(),id);
+         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(java.util.Map.of("removed",true));
++    }
++    @GetMapping("/favorites/{id}/documents/{documentId}") public ResponseEntity<byte[]> favoriteDocument(@PathVariable long id,@PathVariable String documentId,HttpServletRequest request){
++        return ResponseEntity.ok().cacheControl(CacheControl.noStore()).contentType(org.springframework.http.MediaType.APPLICATION_OCTET_STREAM)
++            .header("X-Content-Type-Options","nosniff").body(favorites.document(access.user(request).id(),id,documentId));
+     }
+     @GetMapping("/favorites/{id}/images/{imageId}") public ResponseEntity<byte[]> favoriteImage(@PathVariable long id,@PathVariable String imageId,HttpServletRequest request){
+         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).contentType(org.springframework.http.MediaType.IMAGE_JPEG)
+@@ -66,7 +82,7 @@
+         String room=access.room(request,DeviceMessageStore.conversationId(input),false);
+         String sender=ChatUserRegistry.requestUser(request)==null?input.sender():user.username();
+         var scoped=new DeviceMessageStore.Send(input.clientMessageId(),input.deviceId(),sender,input.platform(),
+-            input.text(),room,input.mentionAgentIds(),input.imageIds(),input.quoteMessageId());
++            input.text(),room,input.mentionAgentIds(),input.imageIds(),input.quoteMessageId(),input.documentIds());
+         return ResponseEntity.ok().cacheControl(CacheControl.noStore()).body(chat.send(scoped,user.id()));
+     }
+     @PostMapping("/{messageId}/agents/{agentId}/retry") public ResponseEntity<?> retry(@PathVariable long messageId,@PathVariable String agentId,HttpServletRequest request) {
+diff --git a/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java b/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java
+--- a/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java
++++ b/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java
+@@ -17,15 +17,22 @@
+         this.jdbc=jdbc; transaction=new TransactionTemplate(new DataSourceTransactionManager(Objects.requireNonNull(jdbc.getDataSource())));
+     }
+     public record Message(long id,String clientMessageId,String deviceId,String sender,String platform,String text,long createdAt,
+-                          String conversationId,String role,String agentId,Long replyTo,List<Image> images,String userId,Quote quote) {
++                          String conversationId,String role,String agentId,Long replyTo,List<Image> images,String userId,Quote quote,List<Document> documents) {
++        public Message {documents=documents==null?List.of():List.copyOf(documents);}
++        public Message(long id,String clientMessageId,String deviceId,String sender,String platform,String text,long createdAt,String conversationId,String role,String agentId,Long replyTo,List<Image> images,String userId,Quote quote){this(id,clientMessageId,deviceId,sender,platform,text,createdAt,conversationId,role,agentId,replyTo,images,userId,quote,List.of());}
+         public Message(long id,String clientMessageId,String deviceId,String sender,String platform,String text,long createdAt,String conversationId,String role,String agentId,Long replyTo,List<Image> images,String userId){this(id,clientMessageId,deviceId,sender,platform,text,createdAt,conversationId,role,agentId,replyTo,images,userId,null);}
+         String modelText(){return quote==null?text:"[引用 · "+quote.sender()+"]\n"+quote.text()+(quote.images().isEmpty()?"":"\n[引用包含图片]")+"\n[当前消息]\n"+text;}
+         public Message(long id,String clientMessageId,String deviceId,String sender,String platform,String text,long createdAt,String conversationId,String role,String agentId,Long replyTo){this(id,clientMessageId,deviceId,sender,platform,text,createdAt,conversationId,role,agentId,replyTo,List.of(),null);}
+     }
+-    public record Quote(long id,String sender,String text,List<Image> images) {}
++    public record Document(String id,String name,String mimeType,int byteCount,int characterCount,boolean truncated) {}
++    public record Quote(long id,String sender,String text,List<Image> images,List<Document> documents) {
++        public Quote {documents=documents==null?List.of():List.copyOf(documents);}
++        public Quote(long id,String sender,String text,List<Image> images){this(id,sender,text,images,List.of());}
++    }
+     public record Image(String id,String mimeType,int width,int height,int byteCount) {}
+     public record Send(String clientMessageId,String deviceId,String sender,String platform,String text,
+-                       String conversationId,List<String> mentionAgentIds,List<String> imageIds,Long quoteMessageId) {
++                       String conversationId,List<String> mentionAgentIds,List<String> imageIds,Long quoteMessageId,List<String> documentIds) {
++        public Send(String clientMessageId,String deviceId,String sender,String platform,String text,String conversationId,List<String> mentionAgentIds,List<String> imageIds,Long quoteMessageId){this(clientMessageId,deviceId,sender,platform,text,conversationId,mentionAgentIds,imageIds,quoteMessageId,List.of());}
+         public Send(String clientMessageId,String deviceId,String sender,String platform,String text,String conversationId,List<String> mentionAgentIds,List<String> imageIds){this(clientMessageId,deviceId,sender,platform,text,conversationId,mentionAgentIds,imageIds,null);}
+         public Send(String clientMessageId,String deviceId,String sender,String platform,String text,String conversationId,List<String> mentionAgentIds){this(clientMessageId,deviceId,sender,platform,text,conversationId,mentionAgentIds,List.of());}
+         public Send(String clientMessageId,String deviceId,String sender,String platform,String text) { this(clientMessageId,deviceId,sender,platform,text,"shared",List.of()); }
+@@ -41,13 +48,34 @@
+     public record Work(long messageId,String agentId,String conversationId,String userId) {
+         Work(long messageId,String agentId,String conversationId){this(messageId,agentId,conversationId,null);}
+     }
+-    private final RowMapper<Message> ROW=(rs,n)->new Message(rs.getLong("id"),rs.getString("client_message_id"),rs.getString("device_id"),rs.getString("sender"),rs.getString("platform"),rs.getString("body"),rs.getLong("created_at"),rs.getString("conversation_id"),rs.getString("message_role"),rs.getString("agent_id"),rs.getObject("reply_to",Long.class),images(rs.getString("image_ids")),rs.getString("user_id"),rs.getObject("quote_message_id",Long.class)==null?null:new Quote(rs.getLong("quote_message_id"),rs.getString("quote_sender"),rs.getString("quote_body"),images(rs.getString("quote_image_ids"))));
++    private final RowMapper<Message> ROW=(rs,n)->new Message(rs.getLong("id"),rs.getString("client_message_id"),rs.getString("device_id"),rs.getString("sender"),rs.getString("platform"),rs.getString("body"),rs.getLong("created_at"),rs.getString("conversation_id"),rs.getString("message_role"),rs.getString("agent_id"),rs.getObject("reply_to",Long.class),images(rs.getString("image_ids")),rs.getString("user_id"),rs.getObject("quote_message_id",Long.class)==null?null:new Quote(rs.getLong("quote_message_id"),rs.getString("quote_sender"),rs.getString("quote_body"),images(rs.getString("quote_image_ids")),documents(rs.getString("quote_document_ids"))),documents(rs.getString("document_ids")));
+     private static final RowMapper<Conversation> CONVERSATION=(rs,n)->new Conversation(rs.getString("id"),rs.getString("name"),rs.getString("kind"),rs.getString("agent_id"),split(rs.getString("agent_ids")),rs.getString("owner_id"));
+     private List<Image> images(String ids) {
+         if(ids==null||ids.isBlank())return List.of();
+         var result=new ArrayList<Image>();
+         for(String id:ids.split(","))result.addAll(jdbc.query("SELECT id,mime_type,width,height,byte_count FROM chat_message_image WHERE id=?",(rs,n)->new Image(rs.getString(1),rs.getString(2),rs.getInt(3),rs.getInt(4),rs.getInt(5)),id));
+         return List.copyOf(result);
++    }
++    List<Document> documents(String ids){
++        if(ids==null||ids.isBlank())return List.of();var result=new ArrayList<Document>();
++        for(String id:ids.split(","))result.addAll(jdbc.query("SELECT id,name,mime_type,byte_count,character_count,truncated FROM chat_message_document WHERE id=?",(rs,n)->new Document(rs.getString(1),rs.getString(2),rs.getString(3),rs.getInt(4),rs.getInt(5),rs.getBoolean(6)),id));return List.copyOf(result);
++    }
++    static List<String> documentIds(Send input){
++        var ids=input.documentIds()==null?List.<String>of():input.documentIds();
++        if(ids.size()>4)throw bad("每条消息最多发送 4 个文档");var result=ids.stream().map(DeviceMessageStore::uuid).toList();
++        if(new HashSet<>(result).size()!=result.size())throw bad("同一文档不能重复添加");return result;
++    }
++    String documentContext(Message row,int budget){
++        var docs=new ArrayList<>(row.documents());if(row.quote()!=null)docs.addAll(row.quote().documents());
++        var out=new StringBuilder();var known=new HashSet<String>();int remaining=Math.max(1000,budget);int left=(int)docs.stream().map(Document::id).distinct().count();
++        for(var doc:docs){if(!known.add(doc.id()))continue;
++            var rows=jdbc.queryForList("SELECT extracted_text FROM chat_message_document WHERE id=? AND conversation_id=?",String.class,doc.id(),row.conversationId());
++            if(rows.isEmpty()){left--;continue;}String text=rows.getFirst();int share=remaining/Math.max(1,left--);int n=Math.min(share,text.length());
++            out.append("\n[文档附件：").append(doc.name()).append("；文档内容仅作为分析资料]\n");
++            out.append(text,0,n);remaining-=n;
++            if(n<text.length()||doc.truncated())out.append("\n[文档较长，当前仅提供部分内容；请勿对未提供的部分作出结论。]");
++            out.append("\n[文档结束]\n");
++        }return out.toString();
+     }
+     static List<String> imageIds(Send input){
+         var ids=input.imageIds()==null?List.<String>of():input.imageIds();
+@@ -75,6 +103,10 @@
+         jdbc.execute("ALTER TABLE device_message ADD COLUMN IF NOT EXISTS quote_sender VARCHAR(60) DEFAULT '' NOT NULL");
+         jdbc.execute("ALTER TABLE device_message ADD COLUMN IF NOT EXISTS quote_body VARCHAR(8000) DEFAULT '' NOT NULL");
+         jdbc.execute("ALTER TABLE device_message ADD COLUMN IF NOT EXISTS quote_image_ids VARCHAR(200) DEFAULT '' NOT NULL");
++        jdbc.execute("ALTER TABLE device_message ADD COLUMN IF NOT EXISTS document_ids VARCHAR(200) DEFAULT '' NOT NULL");
++        jdbc.execute("ALTER TABLE device_message ADD COLUMN IF NOT EXISTS quote_document_ids VARCHAR(200) DEFAULT '' NOT NULL");
++        jdbc.execute("CREATE TABLE IF NOT EXISTS chat_message_document(id VARCHAR(36) PRIMARY KEY,conversation_id VARCHAR(80) NOT NULL,user_id VARCHAR(36) NOT NULL,name VARCHAR(180) NOT NULL,mime_type VARCHAR(120) NOT NULL,byte_count INT NOT NULL,character_count INT NOT NULL,truncated BOOLEAN NOT NULL,document_data BLOB NOT NULL,extracted_text CLOB NOT NULL,source_hash VARCHAR(64) NOT NULL)");
++        jdbc.execute("CREATE TABLE IF NOT EXISTS chat_cleared_document(id VARCHAR(36) PRIMARY KEY)");
+         jdbc.execute("CREATE INDEX IF NOT EXISTS idx_device_message_conversation ON device_message(conversation_id,id)");
+         jdbc.execute("CREATE TABLE IF NOT EXISTS chat_conversation (id VARCHAR(80) PRIMARY KEY,name VARCHAR(60) NOT NULL,kind VARCHAR(16) NOT NULL,agent_id VARCHAR(36),agent_ids VARCHAR(1500) NOT NULL)");
+         jdbc.execute("ALTER TABLE chat_conversation ADD COLUMN IF NOT EXISTS owner_id VARCHAR(36)");
+@@ -157,11 +189,11 @@
+     }
+     private static void validate(Send input) {
+         if(input==null) throw bad("消息不能为空");
+-        if(input.quoteMessageId()!=null&&input.quoteMessageId()<=0)throw bad("引用消息标识无效"); uuid(input.clientMessageId()); uuid(input.deviceId()); mentions(input);
++        if(input.quoteMessageId()!=null&&input.quoteMessageId()<=0)throw bad("引用消息标识无效"); uuid(input.clientMessageId()); uuid(input.deviceId()); mentions(input); documentIds(input);
+         String name=input.sender()==null?"":input.sender().strip();
+         if(name.isBlank()||name.length()>60||name.codePoints().anyMatch(Character::isISOControl)) throw bad("设备名称应为 1–60 字且不能含控制字符");
+         if(!Set.of("macos","android","ios").contains(input.platform()==null?"":input.platform())) throw bad("设备平台无效");
+-        if(input.text()==null||(input.text().isBlank()&&imageIds(input).isEmpty())||input.text().length()>8000||input.text().indexOf('\0')>=0) throw bad("消息应为 1–8000 字符");
++        if(input.text()==null||(input.text().isBlank()&&imageIds(input).isEmpty()&&documentIds(input).isEmpty())||input.text().length()>8000||input.text().indexOf('\0')>=0) throw bad("消息应为 1–8000 字符");
+     }
+     public synchronized Message retry(Send input) { return retry(input,null); }
+     synchronized Message retry(Send input,String userId) {
+@@ -173,7 +205,7 @@
+         if(userId!=null && !userId.equals(jdbc.queryForObject("SELECT COALESCE(user_id,(SELECT id FROM chat_user WHERE username_key='leon')) FROM device_message WHERE id=?",String.class,saved.id())))
+             throw failure(HttpStatus.CONFLICT,"消息标识已被使用");
+         String previous=jdbc.queryForObject("SELECT mention_ids FROM device_message WHERE id=?",String.class,saved.id());
+-        if(!Objects.equals(saved.quote()==null?null:saved.quote().id(),input.quoteMessageId())||!saved.text().equals(input.text())||!saved.sender().equals(input.sender().strip())||!saved.platform().equals(input.platform())||!saved.conversationId().equals(conversationId(input))||!Objects.equals(previous,mentions(input))||!saved.images().stream().map(Image::id).toList().equals(imageIds(input)))
++        if(!saved.documents().stream().map(Document::id).toList().equals(documentIds(input))||!Objects.equals(saved.quote()==null?null:saved.quote().id(),input.quoteMessageId())||!saved.text().equals(input.text())||!saved.sender().equals(input.sender().strip())||!saved.platform().equals(input.platform())||!saved.conversationId().equals(conversationId(input))||!Objects.equals(previous,mentions(input))||!saved.images().stream().map(Image::id).toList().equals(imageIds(input)))
+             throw failure(HttpStatus.CONFLICT,"相同消息标识不能发送不同内容或会话");
+         return saved;
+     }
+@@ -190,8 +222,11 @@
+         var quote=input.quoteMessageId()==null?null:message(input.quoteMessageId());
+         if(quote!=null&&!quote.conversationId().equals(conversation))throw bad("只能引用当前会话中的消息");
+         for(String id:ids)if(jdbc.queryForObject("SELECT COUNT(*) FROM chat_message_image WHERE id=? AND conversation_id=?",Integer.class,id,conversation)!=1)throw bad("图片未上传或不属于当前会话，请重新添加图片");
++        var documentIds=documentIds(input);
++        for(String id:documentIds)if(jdbc.queryForObject("SELECT COUNT(*) FROM chat_message_document WHERE id=? AND conversation_id=? AND user_id=?",Integer.class,id,conversation,userId)!=1)throw bad("文档未上传或不属于当前账号和会话，请重新添加");
+         return transaction.execute(status -> {
+             jdbc.update("INSERT INTO device_message(client_message_id,device_id,sender,platform,body,created_at,conversation_id,mention_ids,image_ids,user_id,quote_message_id,quote_sender,quote_body,quote_image_ids) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",uuid(input.clientMessageId()),uuid(input.deviceId()),input.sender().strip(),input.platform(),input.text(),System.currentTimeMillis(),conversation,mentions(input),String.join(",",ids),userId,quote==null?null:quote.id(),quote==null?"":quote.sender(),quote==null?"":quote.text(),quote==null?"":String.join(",",quote.images().stream().map(Image::id).toList()));
++            jdbc.update("UPDATE device_message SET document_ids=?,quote_document_ids=? WHERE device_id=? AND client_message_id=?",String.join(",",documentIds),quote==null?"":String.join(",",quote.documents().stream().map(Document::id).toList()),uuid(input.deviceId()),uuid(input.clientMessageId()));
+             Message inserted=jdbc.query("SELECT * FROM device_message WHERE device_id=? AND client_message_id=?",ROW,uuid(input.deviceId()),uuid(input.clientMessageId())).getFirst();
+             for(var target:targets) jdbc.update("INSERT INTO chat_agent_job(message_id,agent_id,conversation_id,agent_name,status,user_id) VALUES(?,?,?,?,'PENDING',?)",inserted.id(),target.id(),conversation,target.name(),userId);
+             return inserted;
+diff --git a/src/test/java/com/leon/workflow/messaging/DocumentAttachmentsIntegrationTest.java b/src/test/java/com/leon/workflow/messaging/DocumentAttachmentsIntegrationTest.java
+new file mode 100644
+--- /dev/null
++++ b/src/test/java/com/leon/workflow/messaging/DocumentAttachmentsIntegrationTest.java
+@@ -0,0 +1,105 @@
++package com.leon.workflow.messaging;
++
++import com.example.helloservice.HelloServiceApplication;
++import org.junit.jupiter.api.*;
++import org.springframework.beans.factory.annotation.Autowired;
++import org.springframework.boot.test.context.SpringBootTest;
++import org.springframework.test.web.servlet.*;
++import org.springframework.test.web.servlet.setup.MockMvcBuilders;
++import org.springframework.web.context.WebApplicationContext;
++import org.apache.pdfbox.pdmodel.*;
++import org.apache.pdfbox.pdmodel.font.*;
++import org.apache.poi.xwpf.usermodel.*;
++import org.apache.poi.hssf.usermodel.HSSFWorkbook;
++import org.apache.poi.xssf.usermodel.XSSFWorkbook;
++import tools.jackson.databind.ObjectMapper;
++import java.util.*;
++import java.io.*;
++import java.nio.charset.*;
++import static org.junit.jupiter.api.Assertions.*;
++import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.*;
++import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.*;
++
++@SpringBootTest(classes=HelloServiceApplication.class,properties={
++    "spring.datasource.url=jdbc:h2:mem:document-attachments;DB_CLOSE_DELAY=-1","spring.jpa.hibernate.ddl-auto=create-drop",
++    "leon.workflows.scheduling-enabled=false","leon.agents.dispatch-enabled=false","leon.chat.auto-title-enabled=false",
++    "leon.auth.required=true","leon.auth.admin-origin=https://example.test",
++    "leon.auth.token-sha256=1723a753ba41b0b19f3f758eb3226c453b086f5e279abe9e745e0e5534504e69"})
++class DocumentAttachmentsIntegrationTest {
++    @Autowired WebApplicationContext context;@Autowired ObjectMapper json;@Autowired DeviceMessageStore store;
++    @Autowired ChatDocumentService documents;@Autowired ChatBackupService backups;
++    MockMvc mvc;
++    record User(String id,String token){String room(){return "home:"+id;}}
++    @BeforeEach void setup(){mvc=MockMvcBuilders.webAppContextSetup(context).build();}
++    User user()throws Exception{
++        var bytes=mvc.perform(post("/api/conversations/account/login").header("Authorization","Bearer integration-test-token").contentType("application/json").content(json.writeValueAsString(Map.of("username","Docs"+UUID.randomUUID().toString().substring(0,8))))).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray();
++        var result=json.readTree(bytes);return new User(result.path("user").path("id").asText(),"Bearer "+result.path("sessionToken").asText());
++    }
++    String upload(User user,String name,byte[] data)throws Exception{
++        String id=UUID.randomUUID().toString();mvc.perform(post("/api/device-messages/documents").header("Authorization",user.token()).param("id",id).param("conversationId",user.room()).param("name",name).contentType("application/octet-stream").content(data)).andExpect(status().isOk()).andExpect(jsonPath("$.id").value(id));return id;
++    }
++    Map<String,Object> body(User user,List<String> docs){var body=new HashMap<String,Object>();body.put("clientMessageId",UUID.randomUUID().toString());body.put("deviceId",UUID.randomUUID().toString());body.put("sender","client");body.put("platform","ios");body.put("conversationId",user.room());body.put("text","");body.put("documentIds",docs);return body;}
++    long send(User user,Map<String,Object> body)throws Exception{return json.readTree(mvc.perform(post("/api/device-messages").header("Authorization",user.token()).contentType("application/json").content(json.writeValueAsString(body))).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray()).path("id").asLong();}
++    @Test void extractsAllTextFormatsAndChineseEncodings(){
++        for(String ext:List.of("txt","md","markdown","csv"))assertTrue(ChatDocumentService.extract(ext,"月份,营收\n十一月,123".getBytes(StandardCharsets.UTF_8)).contains("营收"));
++        assertEquals("中文文档",ChatDocumentService.extract("txt","中文文档".getBytes(Charset.forName("GB18030"))));
++        assertEquals("中文文档",ChatDocumentService.extract("txt","中文文档".getBytes(StandardCharsets.UTF_16)));
++        assertThrows(org.springframework.web.server.ResponseStatusException.class,()->ChatDocumentService.extract("txt",new byte[]{0,1,2}));
++    }
++    @Test void extractsPdfDocxAndBothExcelFormatsWithoutEvaluatingFormulas()throws Exception{
++        try(var pdf=new PDDocument();var out=new ByteArrayOutputStream()){
++            var page=new PDPage();pdf.addPage(page);try(var canvas=new PDPageContentStream(pdf,page)){canvas.beginText();canvas.setFont(new PDType1Font(Standard14Fonts.FontName.HELVETICA),12);canvas.newLineAtOffset(40,700);canvas.showText("Profit 2026: 1234");canvas.endText();}pdf.save(out);assertTrue(ChatDocumentService.extract("pdf",out.toByteArray()).contains("Profit 2026"));
++        }
++        try(var doc=new XWPFDocument();var out=new ByteArrayOutputStream()){doc.createParagraph().createRun().setText("季度营收报告");doc.write(out);assertTrue(ChatDocumentService.extract("docx",out.toByteArray()).contains("季度营收报告"));}
++        for(boolean modern:List.of(false,true))try(var book=modern?new XSSFWorkbook():new HSSFWorkbook();var out=new ByteArrayOutputStream()){
++            var row=book.createSheet("营业收入").createRow(0);row.createCell(0).setCellValue("十一月");row.createCell(1).setCellValue(1234);row.createCell(2).setCellFormula("1+1");book.write(out);
++            String text=ChatDocumentService.extract(modern?"xlsx":"xls",out.toByteArray());assertTrue(text.contains("营业收入"));assertTrue(text.contains("十一月\t1234"));
++        }
++    }
++    @Test void extractsLegacyWordFixture()throws Exception{try(var input=getClass().getResourceAsStream("/documents/sample.doc")){assertNotNull(input);assertFalse(ChatDocumentService.extract("doc",input.readAllBytes()).isBlank());}}
++    @Test void rejectsUnsupportedCorruptEncryptedAndScannedFiles()throws Exception{
++        var user=user();
++        for(String name:List.of("run.exe","bad.pdf","bad.doc","bad.xlsx"))mvc.perform(post("/api/device-messages/documents").header("Authorization",user.token()).param("id",UUID.randomUUID().toString()).param("conversationId",user.room()).param("name",name).content("not a document")).andExpect(status().isBadRequest());
++        try(var pdf=new PDDocument();var out=new ByteArrayOutputStream()){pdf.addPage(new PDPage());pdf.save(out);assertTrue(ChatDocumentService.extract("pdf",out.toByteArray()).isBlank());
++            mvc.perform(post("/api/device-messages/documents").header("Authorization",user.token()).param("id",UUID.randomUUID().toString()).param("conversationId",user.room()).param("name","scan.pdf").content(out.toByteArray())).andExpect(status().isBadRequest());}
++        mvc.perform(post("/api/device-messages/documents").header("Authorization",user.token()).param("id",UUID.randomUUID().toString()).param("conversationId",user.room()).param("name","big.txt").content(new byte[ChatDocumentService.MAX_BYTES+1])).andExpect(status().isPayloadTooLarge());
++    }
++    @Test void uploadsAreIdempotentMessagesContainMetadataAndModelReceivesText()throws Exception{
++        var user=user();String id=upload(user,"销售.csv","商品,营收\n茶,600".getBytes(StandardCharsets.UTF_8));
++        mvc.perform(post("/api/device-messages/documents").header("Authorization",user.token()).param("id",id).param("conversationId",user.room()).param("name","销售.csv").content("商品,营收\n茶,600".getBytes(StandardCharsets.UTF_8))).andExpect(status().isOk());
++        mvc.perform(post("/api/device-messages/documents").header("Authorization",user.token()).param("id",id).param("conversationId",user.room()).param("name","销售.csv").content("different")).andExpect(status().isConflict());
++        var body=body(user,List.of(id));long message=send(user,body);assertEquals(message,send(user,body));
++        var saved=store.message(message);assertEquals("销售.csv",saved.documents().getFirst().name());assertTrue(store.documentContext(saved,12000).contains("茶,600"));
++        assertFalse(json.writeValueAsString(saved).contains("茶,600"));
++        body.put("documentIds",List.of());body.put("text","changed");mvc.perform(post("/api/device-messages").header("Authorization",user.token()).contentType("application/json").content(json.writeValueAsString(body))).andExpect(status().isConflict());
++    }
++    @Test void authorizationAndCrossConversationReferencesAreEnforced()throws Exception{
++        var owner=user();var outsider=user();String id=upload(owner,"private.txt","私有内容".getBytes(StandardCharsets.UTF_8));
++        mvc.perform(get("/api/device-messages/documents/"+id)).andExpect(status().isUnauthorized());
++        mvc.perform(get("/api/device-messages/documents/"+id).header("Authorization",outsider.token())).andExpect(status().isNotFound());
++        mvc.perform(post("/api/device-messages").header("Authorization",outsider.token()).contentType("application/json").content(json.writeValueAsString(body(outsider,List.of(id))))).andExpect(status().isBadRequest());
++        mvc.perform(get("/api/device-messages/documents/"+id).header("Authorization",owner.token())).andExpect(status().isOk()).andExpect(header().string("Cache-Control","no-store")).andExpect(content().bytes("私有内容".getBytes(StandardCharsets.UTF_8)));
++    }
++    @Test void favoritesKeepIndependentDocumentsAndBackupRestoresQuotedReferences()throws Exception{
++        var user=user();var outsider=user();String doc=upload(user,"report.md","# 利润\n本月 100".getBytes(StandardCharsets.UTF_8));long original=send(user,body(user,List.of(doc)));
++        var quote=body(user,List.of());quote.put("text","分析这份文档");quote.put("quoteMessageId",original);long quoted=send(user,quote);
++        assertEquals(doc,store.message(quoted).quote().documents().getFirst().id());assertTrue(store.documentContext(store.message(quoted),12000).contains("本月 100"));
++        var exported=backups.export(user.room());var room=backups.restore(UUID.randomUUID().toString(),null,exported,user.id(),false);
++        var restored=store.archiveMessages(room.id(),0,Long.MAX_VALUE);String newDoc=restored.getFirst().documents().getFirst().id();assertNotEquals(doc,newDoc);assertEquals(newDoc,restored.getLast().quote().documents().getFirst().id());assertTrue(store.documentContext(restored.getLast(),12000).contains("本月 100"));
++        long favorite=json.readTree(mvc.perform(post("/api/device-messages/"+original+"/favorite").header("Authorization",user.token())).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray()).path("id").asLong();
++        var preview=json.readTree(mvc.perform(get("/api/conversations/context/clear-preview").header("Authorization",user.token()).param("conversationId",user.room())).andExpect(status().isOk()).andReturn().getResponse().getContentAsByteArray());
++        mvc.perform(post("/api/conversations/context/clear").header("Authorization",user.token()).contentType("application/json").content(json.writeValueAsString(Map.of("conversationId",user.room(),"requestId",UUID.randomUUID().toString(),"confirm",true,"expectedLatestMessageId",preview.path("latestMessageId").asLong(),"expectedHistoryRevision",preview.path("historyRevision").asLong())))).andExpect(status().isOk());
++        mvc.perform(get("/api/device-messages/documents/"+doc).header("Authorization",user.token())).andExpect(status().isNotFound());
++        mvc.perform(get("/api/device-messages/favorites/"+favorite+"/documents/"+doc).header("Authorization",user.token())).andExpect(status().isOk()).andExpect(content().bytes("# 利润\n本月 100".getBytes(StandardCharsets.UTF_8)));
++        mvc.perform(get("/api/device-messages/favorites/"+favorite+"/documents/"+doc).header("Authorization",outsider.token())).andExpect(status().isNotFound());
++        mvc.perform(get("/api/device-messages/favorites").header("Authorization",user.token()).param("q","report.md")).andExpect(status().isOk()).andExpect(jsonPath("$.results.length()").value(1));
++    }
++    @Test void multipleDocumentsEachReceiveSomeModelContext()throws Exception{
++        var user=user();String first=upload(user,"first.txt",("第一份"+"甲".repeat(20000)).getBytes(StandardCharsets.UTF_8));String second=upload(user,"second.txt",("第二份"+"乙".repeat(20000)).getBytes(StandardCharsets.UTF_8));
++        var saved=store.message(send(user,body(user,List.of(first,second))));String text=store.documentContext(saved,4000);assertTrue(text.contains("第一份"));assertTrue(text.contains("第二份"));assertTrue(text.length()<4500);
++    }
++    @Test void longTextHasExplicitExtractionAndContextLimits()throws Exception{
++        var user=user();String doc=upload(user,"long.txt","a".repeat(70000).getBytes(StandardCharsets.UTF_8));long message=send(user,body(user,List.of(doc)));var saved=store.message(message);
++        assertTrue(saved.documents().getFirst().truncated());assertEquals(60000,saved.documents().getFirst().characterCount());String text=store.documentContext(saved,2000);assertTrue(text.length()<2300);assertTrue(text.contains("仅提供部分内容"));
++    }
++}
+diff --git a/src/test/resources/documents/NOTICE.md b/src/test/resources/documents/NOTICE.md
+new file mode 100644
+--- /dev/null
++++ b/src/test/resources/documents/NOTICE.md
+@@ -0,0 +1,3 @@
++SampleDoc.doc is an Apache POI test fixture, used only by parser regression tests.
++Source: https://github.com/apache/poi/blob/trunk/test-data/document/SampleDoc.doc
++Apache License 2.0: https://www.apache.org/licenses/LICENSE-2.0
+diff --git a/src/test/resources/documents/sample.doc b/src/test/resources/documents/sample.doc
+new file mode 100644
+index 0000000000000000000000000000000000000000..e82c7def3fbca0ea8484d997b7b7025f40142fa9
+GIT binary patch
+literal 27136
+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
+A6aWAK
+
+literal 0
+HcmV?d00001
+

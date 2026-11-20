@@ -216,6 +216,23 @@ struct SwitchingChecks {
         _ = await waitFor { store.messages.contains { $0.id == 900 } }
         check(store.messages == [newer], "another device clearing history removes stale cached messages on next poll")
         store.setActive(false)
+        store.selectConversation(a.id,refresh:false);store.draft="source draft"
+        let branch=Conversation(id:"branch:copy",name:"分支",kind:"direct",agentId:"a",agentIds:["a"])
+        let branchPath="/api/conversations/\(a.id)/branches"
+        FixtureProtocol.fixture.setup(holding:directoryPaths,responses:[branchPath:try JSONEncoder().encode(branch)])
+        store.beginBranch(message(901,room:a))
+        let created=try await store.createBranch(message(901,room:a),name:"分支",requestId:"request")
+        check(created.id==branch.id && store.conversations.contains(where:{$0.id==branch.id}),"branch appears in the conversation directory")
+        check(store.selectedConversationId==a.id && store.draft=="source draft","branch creation preserves source navigation and draft")
+        store.selectConversation(branch.id,refresh:false);check(store.draft.isEmpty,"branch starts without the unsent source draft")
+        store.selectConversation(a.id,refresh:false);check(store.draft=="source draft","returning from branch restores source draft")
+        let late=Conversation(id:"branch:late",name:"迟到",kind:"direct",agentId:"a",agentIds:["a"])
+        FixtureProtocol.fixture.setup(holding:[branchPath],responses:[branchPath:try JSONEncoder().encode(late)])
+        let branchTask=Task {try await store.createBranch(message(901,room:a),name:"迟到",requestId:"late-request")}
+        _ = await waitFor {FixtureProtocol.fixture.paths().contains(branchPath)}
+        branchTask.cancel();FixtureProtocol.fixture.release(branchPath)
+        do {_ = try await branchTask.value;check(false,"cancelled branch must fail")} catch {}
+        check(!store.conversations.contains(where:{$0.id==late.id}),"cancelled branch response cannot modify navigation state")
         if failures > 0 { exit(1) }
     }
 }

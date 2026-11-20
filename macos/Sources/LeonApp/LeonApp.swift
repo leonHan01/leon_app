@@ -28,6 +28,10 @@ struct LeonApp: App {
 struct ContentView: View {
     @ObservedObject var store: ChatStore
     @State private var historyAgentId: String?
+    @State private var searchPresented = false
+    @State private var favoritesPresented = false
+    @State private var searchRoom: String?
+    @State private var searchTitle = "全部聊天记录"
     private let accent = Color(red: 0.18, green: 0.36, blue: 0.89)
     var body: some View {
         HStack(spacing: 0) {
@@ -36,6 +40,10 @@ struct ContentView: View {
                     Image(systemName: "bubble.left.and.bubble.right.fill").font(.title2).foregroundStyle(accent)
                     Text("Leon").font(.system(size: 25, weight: .bold, design: .rounded))
                 }.padding(.top, 28)
+                Button { searchRoom = nil; searchTitle = "全部聊天记录"; searchPresented = true } label: {
+                    Label("搜索聊天记录", systemImage: "magnifyingglass").foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(9)
+                        .background(.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
+                }.buttonStyle(.plain).disabled(!store.hasConnection).keyboardShortcut("f", modifiers: [.command, .shift])
                 ScrollView {
                     VStack(alignment: .leading, spacing: 10) {
                         HStack {
@@ -75,6 +83,9 @@ struct ContentView: View {
                 }
                 Text("私聊直接回复\n群聊中 @指定 Agent").font(.caption).foregroundStyle(.secondary).lineSpacing(5)
                 Divider()
+                NotificationSettingsView().frame(maxWidth:220)
+                Button { favoritesPresented=true } label: {Label("收藏",systemImage:"star").frame(maxWidth:.infinity,alignment:.leading)}
+                    .buttonStyle(.plain).disabled(!store.hasConnection)
                 Button { store.showUsage = true } label: {
                     Label("Token 用量", systemImage: "chart.bar").frame(maxWidth: .infinity, alignment: .leading)
                 }.buttonStyle(.plain).disabled(!store.hasConnection)
@@ -107,6 +118,8 @@ struct ContentView: View {
                     Spacer()
                     Button { store.endRoundExportOnly = false; store.showEndRound = true } label: { Label("新对话", systemImage: "plus.bubble") }
                         .disabled(!store.hasConnection || store.exportBusy || store.openingDirectConversation).help("结束本轮，可导出到 LeonBook 后开始新对话")
+                    Button { searchRoom = store.selectedConversationId; searchTitle = store.title; searchPresented = true } label: { Image(systemName: "magnifyingglass") }
+                        .disabled(!store.hasConnection || store.openingDirectConversation).help("查找聊天记录").keyboardShortcut("f", modifiers: .command)
                     Button { store.showContext = true } label: { Label("上下文", systemImage: "brain") }
                         .disabled(!store.hasConnection || store.openingDirectConversation).help("查看对话摘要与上下文设置")
                     Button { store.reconnect() } label: { Image(systemName: "arrow.clockwise") }.help("立即同步")
@@ -125,8 +138,11 @@ struct ContentView: View {
                             Spacer()
                         }
                     } else { Text("私聊 · Agent 将直接回复").font(.caption).foregroundStyle(.secondary) }
+                    if let quote=store.quotedMessage {QuoteCard(store:store,quote:quote,room:store.selectedConversationId,title:store.title,cancel:store.cancelQuote)}
+                    DocumentDraftsView(store:store)
                     MentionComposer(store: store)
                     HStack {
+                        DocumentPickerButton(store:store)
                         Text("/ 命令 · ↵ 发送 · Shift+↵ 换行 · 最多 8,000 字符").font(.caption).foregroundStyle(.secondary)
                         Spacer()
                         if store.draft.utf16.count > 8000 { Text("已超出字数限制").font(.caption).foregroundStyle(.red) }
@@ -138,6 +154,13 @@ struct ContentView: View {
                 }.padding(20)
             }.background(Color(nsColor: .windowBackgroundColor))
             }
+        }
+        .overlay(alignment:.bottom) {if !store.collectionNotice.isEmpty {Text(store.collectionNotice).foregroundStyle(.white).padding(12).background(.black.opacity(0.8),in:RoundedRectangle(cornerRadius:7)).padding(.bottom,90)}}
+        .sheet(item:$store.branchMessage) {message in BranchConversationView(store:store,message:message,sourceName:store.title) {store.selectConversation($0.id)}}
+        .modifier(NotificationHost(store:store,visibleRoom:store.selectedConversationId,openRoom:{store.selectConversation($0)}))
+        .sheet(isPresented:$favoritesPresented) {FavoritesView(store:store) {store.selectConversation($0)}}
+        .sheet(isPresented: $searchPresented) {
+            ChatSearchView(store: store, room: searchRoom, title: searchTitle) { id in store.selectConversation(id) }
         }
         .sheet(isPresented: $store.showSettings) { ConnectionView(store: store) }
         .sheet(isPresented: $store.showNewGroup) { NewGroupView(store: store) }
@@ -178,7 +201,7 @@ struct ContentView: View {
                     ForEach(TimelineItem.ordered(messages: store.messages, operations: store.contextOperations, jobs: store.visibleJobs)) { item in
                         switch item {
                         case .message(let message):
-                        bubble(text: message.text, sender: message.sender, detail: (message.role == "assistant" ? "Agent · " : "") + message.date.formatted(date: .abbreviated, time: .shortened), mine: message.deviceId == store.deviceId, agentId: message.agentId, imageIds: (message.images ?? []).map(\.id))
+                        bubble(text: message.text, sender: message.sender, detail: (message.role == "assistant" ? "Agent · " : "") + message.date.formatted(date: .abbreviated, time: .shortened), mine: message.deviceId == store.deviceId, agentId: message.agentId, imageIds: (message.images ?? []).map(\.id), message:message)
                             .id(message.id)
                         case .operation(let operation):
                         HStack(alignment: .top) {
@@ -211,7 +234,7 @@ struct ContentView: View {
                     }
                     ForEach(store.currentPending) { message in
                         VStack(alignment: .trailing, spacing: 6) {
-                            bubble(text: message.text, sender: message.sender, detail: store.sending.contains(message.id) ? "发送中…" : "尚未确认送达服务器", mine: true, imageIds: message.imageIds ?? [])
+                            bubble(text: message.text, sender: message.sender, detail: store.sending.contains(message.id) ? "发送中…" : "尚未确认送达服务器", mine: true, imageIds: message.imageIds ?? [], pendingQuote:message.quote,pendingDocuments:message.documents ?? [])
                             if !store.sending.contains(message.id) {
                                 Button("重试发送") { Task { await store.retry(message) } }.buttonStyle(.borderless)
                             }
@@ -236,7 +259,7 @@ struct ContentView: View {
         }
     }
 
-    private func bubble(text: String, sender: String, detail: String, mine: Bool, agentId: String? = nil, imageIds: [String] = []) -> some View {
+    private func bubble(text: String, sender: String, detail: String, mine: Bool, agentId: String? = nil, imageIds: [String] = [], message:Message? = nil, pendingQuote:MessageQuote? = nil,pendingDocuments:[DocumentAttachment]=[]) -> some View {
         HStack {
             if mine { Spacer(minLength: 70) }
             VStack(alignment: mine ? .trailing : .leading, spacing: 6) {
@@ -249,13 +272,27 @@ struct ContentView: View {
                     Text(sender).font(.caption).foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 10) {
-                    ForEach(imageIds, id: \.self) { id in ChatImageView(store: store, imageId: id) }
-                    if !text.isEmpty { MarkdownMessageView(text, mine: mine).equatable() }
-                }.padding(.horizontal, mine ? 16 : 6).padding(.vertical, mine ? 12 : 8)
+                    ForEach(message?.documents ?? pendingDocuments){document in DocumentCard(store:store,document:document,message:message)}
+                    ForEach(imageIds, id: \.self) { id in ChatImageView(store: store, imageId: id,onQuote:message.map {m in {store.quoteMessage(m)}},onFavorite:message.map {m in {let _ = Task {await store.favoriteMessage(m)}}},onBranch:message.map {m in {store.beginBranch(m)}}) }
+                    if !text.isEmpty { MarkdownMessageView(text, mine: mine, onQuote:message.map {m in {store.quoteMessage(m)}}, onFavorite:message.map {m in {let _ = Task {await store.favoriteMessage(m)}}},onBranch:message.map {m in {store.beginBranch(m)}}) }
+                }.padding(.horizontal, 16).padding(.vertical, 12)
                     .foregroundStyle(mine ? Color.white : Color.primary)
-                    .background(mine ? accent : Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
+                    .background(mine ? accent : Color.primary.opacity(0.055), in: RoundedRectangle(cornerRadius: 14))
+                    .overlay {
+                        if !mine {
+                            RoundedRectangle(cornerRadius: 14).strokeBorder(Color.primary.opacity(0.06), lineWidth: 1)
+                        }
+                    }
+                if let quote=message?.quote ?? pendingQuote {QuoteCard(store:store,quote:quote,room:message?.conversationId ?? store.selectedConversationId,title:store.title)}
                 Text(detail).font(.system(size: 10)).foregroundStyle(.secondary)
             }.frame(maxWidth: mine ? 540 : .infinity, alignment: mine ? .trailing : .leading)
+                .contextMenu {
+                    if let message {
+                        Button("引用") {store.quoteMessage(message)}
+                        Button("收藏") {Task {await store.favoriteMessage(message)}}
+                        Button("从这里创建分支") {store.beginBranch(message)}
+                    }
+                }
         }
     }
 }
@@ -347,12 +384,11 @@ struct ContextSettingsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text("对话上下文 · \(store.title)").font(.title2.bold())
-            Text("每轮回复会携带近期完整对话。较早内容由 AI 压缩成摘要，保留目标、决定和未完成事项。").font(.callout).foregroundStyle(.secondary)
+            Text("回复携带完整对话、已确认事实和相关历史原文；Token 接近预算时才尝试压缩。").font(.callout).foregroundStyle(.secondary)
             if store.contextBusy { ProgressView("正在处理…").controlSize(.small) }
             if let error = store.contextError { Text(error).font(.callout).foregroundStyle(.red) }
             if let info = store.contextInfo {
-                Stepper("保留最近 \(draft.rounds) 轮完整对话", value: $draft.rounds, in: 1...20)
-                Text("默认 10 轮；较早内容累积 4 轮或接近长度预算时压缩。长对话会优先保留最近完整轮次。").font(.caption).foregroundStyle(.secondary)
+                Text(info.compressionMode == "token" ? "按 Token 预算管理上下文，不再按对话轮数自动压缩。" : "当前服务端尚未提供新版记忆策略，请升级服务端。").font(.caption).foregroundStyle(.secondary)
                 Text("上下文输入预算：约 \(info.inputTokenBudget.formatted()) Token，另为回复预留空间。").font(.caption).foregroundStyle(.secondary)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 16) {
@@ -371,7 +407,18 @@ struct ContextSettingsView: View {
                                 if agent.lastCompressedAt > 0 {
                                     Text("摘要更新于 " + Date(timeIntervalSince1970: Double(agent.lastCompressedAt) / 1000).formatted(date: .abbreviated, time: .shortened)).font(.caption).foregroundStyle(.secondary)
                                 }
-                                DisclosureGroup("历史摘要") {
+                                if let count = agent.retrievedRounds, count > 0 { Text("最近检索了 \(count) 轮相关历史原文").font(.caption).foregroundStyle(.secondary) }
+                                if agent.compressionFallback == true { Text("最近请求使用了完整原文回退").font(.caption).foregroundStyle(.secondary) }
+                                DisclosureGroup("已确认事实（\((agent.facts ?? []).count)）") {
+                                    if (agent.facts ?? []).isEmpty { Text("压缩时提取有用户原文依据的事实。").font(.caption).foregroundStyle(.secondary) }
+                                    ForEach(agent.facts ?? []) { fact in
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text("\(fact.speaker)：\(fact.value)").font(.callout).textSelection(.enabled)
+                                            Text("来源消息 #\(fact.sourceMessageId)").font(.caption).foregroundStyle(.secondary)
+                                        }.padding(.top, 4)
+                                    }
+                                }
+                                DisclosureGroup("阶段摘要") {
                                     Text(agent.summary.isEmpty ? "尚未需要压缩，当前使用原始对话。" : agent.summary)
                                         .font(.callout).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
                                 }
@@ -380,15 +427,13 @@ struct ContextSettingsView: View {
                         }
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }.frame(minHeight: 100, maxHeight: 300)
-                Text("可用 /compact 主动压缩，保留最近一轮原文。群聊请选择 Agent。开启新话题保留聊天记录；等待回复或压缩完成后才可更改设置。").font(.caption).foregroundStyle(.secondary)
+                Text("可用 /compact 主动压缩，保留最近一轮原文。群聊请选择 Agent。开启新话题保留聊天记录；压缩失败且完整原文仍在预算内时，会使用原文继续回复。").font(.caption).foregroundStyle(.secondary)
             }
             HStack {
                 Button("开启新话题…") { draft.confirmReset = true }.disabled(store.contextInfo == nil || store.contextBusy || store.contextActionActive)
                 Button("刷新") { Task { await store.loadContext() } }.disabled(store.contextBusy)
                 Spacer()
                 Button("完成") { dismiss() }.keyboardShortcut(.cancelAction).disabled(store.contextBusy)
-                Button("保存设置") { Task { await store.configureContext(rounds: draft.rounds, reset: false) } }
-                    .buttonStyle(.borderedProminent).disabled(store.contextBusy || store.contextActionActive || store.contextInfo == nil || draft.rounds == store.contextInfo?.recentRounds)
             }
         }.padding(28).frame(width: 560)
         .task { await store.loadContext(); draft.rounds = store.contextInfo?.recentRounds ?? 10 }
@@ -402,7 +447,7 @@ struct ContextSettingsView: View {
         .alert("开启新话题？", isPresented: $draft.confirmReset) {
             Button("取消", role: .cancel) {}
             Button("开启新话题") { Task { await store.configureContext(rounds: draft.rounds, reset: true) } }
-        } message: { Text("后续回复将从新的上下文开始，旧摘要不再使用。聊天记录不会删除。") }
+        } message: { Text("后续回复将从新的上下文开始，旧摘要和已确认事实不再使用。聊天记录不会删除。") }
     }
 }
 

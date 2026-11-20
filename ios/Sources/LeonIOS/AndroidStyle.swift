@@ -6,21 +6,22 @@ enum MobileStyle {
     static let green = color(0x07B75A), ink = color(0x191919), muted = color(0x8A8A8A)
     static let line = color(0xE7E7E7), bar = color(0xF7F7F7), chat = color(0xEDEDED)
     static let outgoing = color(0xB2EC86)
-    static let version = "0.12.4"
+    static let version = "0.16.0"
     static func color(_ rgb: UInt32) -> Color {
         Color(red:Double((rgb >> 16) & 255)/255,green:Double((rgb >> 8) & 255)/255,blue:Double(rgb & 255)/255)
     }
 }
 
-enum MobileSymbol { case agents, groups, settings, plus, more, back, chevron, refresh, usage, photo, compact, context, restore, clear, threads, close }
+enum MobileSymbol { case agents, groups, settings, plus, more, back, chevron, refresh, usage, photo, compact, context, restore, clear, threads, newChat, mention, favorite, document, close }
 
 struct MobileIcon: View {
     let symbol: MobileSymbol
     var size: CGFloat = 24
     var color: Color = MobileStyle.ink
+    var lineWidth: CGFloat? = nil
     var body: some View {
         MobileIconPath(symbol:symbol)
-            .stroke(color,style:StrokeStyle(lineWidth:(symbol == .settings ? 1.5 : symbol == .more ? 3.5 : 1.7)*size/24,lineCap:.round,lineJoin:.round))
+            .stroke(color,style:StrokeStyle(lineWidth:(lineWidth ?? (symbol == .settings ? 1.5 : symbol == .more ? 3.5 : 1.7))*size/24,lineCap:.round,lineJoin:.round))
             .overlay { if symbol == .usage { usage.fill(color) } }
             .frame(width:size,height:size).accessibilityHidden(true)
     }
@@ -62,25 +63,33 @@ private struct MobileIconPath: Shape {
         case .chevron:line([(9,6),(15,12),(9,18)])
         case .close:line([(6,6),(18,18)]);line([(18,6),(6,18)])
         case .photo:
-            line([(3,4),(21,4),(21,20),(3,20)]);p.closeSubpath();line([(3,16),(9,10),(14,15),(17,12),(21,16)])
-            p.addEllipse(in:CGRect(x:14.5,y:7,width:3,height:3))
+            p.addRoundedRect(in:CGRect(x:4,y:4,width:16,height:16),cornerSize:CGSize(width:3,height:3))
+            line([(4,16),(9,11),(13,15),(16,12),(20,16)]);p.addEllipse(in:CGRect(x:13.5,y:7,width:3,height:3))
         case .compact:
-            line([(5,3),(9,7),(15,7),(19,3)]);line([(12,3),(12,7)])
-            line([(5,21),(9,17),(15,17),(19,21)]);line([(12,17),(12,21)]);line([(4,12),(20,12)])
-        case .context:
-            line([(7,3),(15,3),(20,8),(20,19)]);quad(18,21,20,21);p.addLine(to:CGPoint(x:6,y:21));quad(4,19,4,21);p.addLine(to:CGPoint(x:4,y:5));quad(7,3,4,3)
-            line([(14,3),(14,9),(20,9)]);line([(8,13),(16,13)]);line([(8,17),(14,17)])
+            line([(12,3),(12,9)]);line([(9,6),(12,9),(15,6)]);line([(6,12),(18,12)])
+            line([(12,21),(12,15)]);line([(9,18),(12,15),(15,18)])
+        case .context,.document:
+            p.addRoundedRect(in:CGRect(x:6,y:3,width:12,height:18),cornerSize:CGSize(width:2,height:2))
+            line([(9,8),(15,8)]);line([(9,12),(15,12)]);line([(9,16),(13,16)])
         case .restore:
             line([(4,14),(4,19)]);quad(6,21,4,21);p.addLine(to:CGPoint(x:18,y:21));quad(20,19,20,21);p.addLine(to:CGPoint(x:20,y:14))
             line([(8,10),(12,14),(16,10)]);line([(12,14),(12,3)])
         case .clear:
             line([(3,6),(21,6)]);line([(9,6),(9,3),(15,3),(15,6)]);line([(5,6),(6,19)]);quad(8,21,6,21);p.addLine(to:CGPoint(x:16,y:21));quad(18,19,18,21);p.addLine(to:CGPoint(x:19,y:6));line([(10,10),(10,17)]);line([(14,10),(14,17)])
-        case .threads:
-            line([(5,3),(17,3)]);quad(19,5,19,3);p.addLine(to:CGPoint(x:19,y:12));quad(17,14,19,14);line([(17,14),(9,14),(5,17),(5,14)]);quad(3,12,3,14);p.addLine(to:CGPoint(x:3,y:5));quad(5,3,3,3)
-            line([(8,7),(15,7)]);line([(8,10),(13,10)]);line([(21,8),(21,17)]);quad(19,19,21,19);line([(19,19),(19,22),(15,19),(11,19)])
+        case .threads,.newChat:
+            line([(7,4),(17,4)]);quad(20,7,20,4);p.addLine(to:CGPoint(x:20,y:14));quad(17,17,20,17)
+            line([(17,17),(11,17),(6,21),(6,17)]);quad(4,14,4,17);p.addLine(to:CGPoint(x:4,y:7));quad(7,4,4,4);p.closeSubpath()
+            if symbol == .threads {line([(8,8.5),(16,8.5)]);line([(8,12.5),(14,12.5)])}
+            else {line([(9,10.5),(15,10.5)]);line([(12,7.5),(12,13.5)])}
+        case .mention:
+            p.addEllipse(in:CGRect(x:8,y:8,width:8,height:8));line([(16,8),(16,14)])
+            curve(21,13,16,18,21,18);p.addLine(to:CGPoint(x:21,y:12));curve(12,3,21,7,17,3)
+            curve(3,12,7,3,3,7);curve(12,21,3,17,7,21);curve(17.5,19,14,21,16,20.5)
         case .refresh:
             p.addArc(center:CGPoint(x:12,y:12),radius:8,startAngle:.degrees(-7),endAngle:.degrees(39),clockwise:true)
             line([(20,4),(20,11),(13,11)])
+        case .favorite:
+            line([(12,3),(14.8,8.7),(21,9.6),(16.5,14),(17.6,20.2),(12,17.3),(6.4,20.2),(7.5,14),(3,9.6),(9.2,8.7)]);p.closeSubpath()
         case .usage:break
         }
         return p.applying(CGAffineTransform(scaleX:rect.width/24,y:rect.height/24))
@@ -110,16 +119,13 @@ struct MobileTextButton: View {
 struct MobileToolArtwork:View {
     let title:String
     let symbol:MobileSymbol
-    let accent:UInt32
-    let surface:UInt32
-    @Environment(\.isEnabled) private var enabled
     var body:some View {
-        VStack(spacing:9) {
-            MobileIcon(symbol:symbol,color:enabled ? MobileStyle.color(accent) : MobileStyle.muted)
-                .frame(width:48,height:48).background(MobileStyle.color(surface),in:RoundedRectangle(cornerRadius:15))
-                .overlay(RoundedRectangle(cornerRadius:15).stroke(.black.opacity(0.03),lineWidth:1))
-            Text(title).font(.system(size:12,weight:.medium)).foregroundStyle(enabled ? MobileStyle.color(0x505B58) : MobileStyle.muted).lineLimit(2)
-        }.frame(maxWidth:.infinity,minHeight:88,alignment:.top).padding(.top,8).contentShape(Rectangle())
+        VStack(spacing:10) {
+            MobileIcon(symbol:symbol,color:.black,lineWidth:1.7)
+                .frame(width:56,height:56).background(.white,in:RoundedRectangle(cornerRadius:16))
+                .overlay(RoundedRectangle(cornerRadius:16).stroke(MobileStyle.color(0xE5E8EB),lineWidth:1))
+            Text(title).font(.system(size:12,weight:.regular)).foregroundStyle(.black).lineLimit(2)
+        }.padding(.top,6).frame(maxWidth:.infinity,minHeight:96,alignment:.top).contentShape(Rectangle())
     }
 }
 struct MobileIconButton: View {
