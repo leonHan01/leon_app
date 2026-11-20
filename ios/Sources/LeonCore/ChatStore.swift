@@ -15,6 +15,7 @@ final class ChatStore: ObservableObject {
     @Published var server = "https://121.40.254.112"
     @Published var status = "尚未登录"
     @Published var error: String?
+    @Published private(set) var notice: UserNotice?
     @Published var agents: [AgentInfo] = []
     @Published var conversations: [Conversation] = []
     @Published var roomID = "shared"
@@ -55,6 +56,7 @@ final class ChatStore: ObservableObject {
     private var imageWork: [UUID:ImageOrigin] = [:]
     private var avatars: [String:Data] = [:]
     private var pictures: [String:Data] = [:]
+    private var noticeTask: Task<Void,Never>?
     var loggedIn: Bool { api != nil }
     var selected: Conversation? { conversations.first { $0.id == roomID } }
     var canSend: Bool { loggedIn && storageHealthy && !configuring && busy == nil && !savingDraft && !clearingHistory && !opening.contains(roomID) && preparingImages == 0 && draft.utf16.count <= 8000 && (!draft.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || !draftImages.isEmpty) }
@@ -64,8 +66,15 @@ final class ChatStore: ObservableObject {
     var availableAgents: [AgentInfo] { agents.filter { $0.enabled && (roomID == "shared" || roomID.hasPrefix("home:") || selected?.agentIds.contains($0.id) == true) } }
     var imageOrigin: ImageOrigin { ImageOrigin(connection:connectionID,room:roomID) }
     func agent(_ id: String?) -> AgentInfo? { agents.first { $0.id == id } }
-    func mine(_ m: Message) -> Bool { m.role != "assistant" && (user.map { m.userId == $0.id } ?? (m.deviceId == deviceID)) }
-    func owns(_ c: Conversation) -> Bool { user != nil && (c.ownerId == user!.id || c.ownerId == nil && user!.home == "shared") }
+    func mine(_ m: Message) -> Bool { (m.role ?? "user") == "user" && (user.map { m.userId == $0.id } ?? (m.deviceId == deviceID)) }
+    func owns(_ c: Conversation) -> Bool { user != nil && (c.ownerId == user!.id || (c.ownerId?.isEmpty ?? true) && user!.home == "shared") }
+    func showNotice(_ text:String) {
+        noticeTask?.cancel();let value = UserNotice(text:text),connection = connectionID;notice = value
+        noticeTask = Task { [weak self] in
+            do {try await Task.sleep(nanoseconds:3_000_000_000)} catch {return}
+            guard let self,self.connectionID == connection,self.notice?.id == value.id else {return};self.notice = nil
+        }
+    }
     init(disk: any Persistence, credentials: any CredentialStorage, factory: @escaping APIFactory = { MessageAPI(base:$0,token:$1) }) {
         self.disk = disk; self.credentials = credentials; self.factory = factory
     }
@@ -121,6 +130,7 @@ final class ChatStore: ObservableObject {
         } catch { await handle(error,connection:connectionID) }
     }
     private func reset() {
+        noticeTask?.cancel();noticeTask = nil;notice = nil
         poller?.cancel(); directoryTask?.cancel(); creationTasks.values.forEach { $0.cancel() }; creationTasks = [:]
         connectionID = UUID(); generation = UUID(); api = nil; user = nil; scope = nil
         connected = false; roomID = "shared"; room = RoomState(); agents = []; conversations = []; pending = []; sending = []; ignored = []
@@ -254,7 +264,7 @@ final class ChatStore: ObservableObject {
         catch { await handle(error,connection:connection) }
     }
     func beginImage(origin: ImageOrigin) -> UUID? {
-        guard loggedIn, origin.connection == connectionID, (origin.room == roomID ? draftImages.count : imageDrafts[origin.room]?.count ?? 0) + imageWork.values.filter({$0 == origin}).count < 4 else { return nil }
+        guard loggedIn, !configuring, !clearingHistory, origin.connection == connectionID, (origin.room == roomID ? draftImages.count : imageDrafts[origin.room]?.count ?? 0) + imageWork.values.filter({$0 == origin}).count < 4 else { return nil }
         let id = UUID(); imageWork[id] = origin; updateImageCount(); return id
     }
     func finishImage(_ id: UUID, image: DraftImage?, failure: Error? = nil) {
@@ -339,13 +349,16 @@ final class ChatStore: ObservableObject {
         if let data = pictures[id] { return data }
         guard let api, let scope else { throw NativeError(message:"请先登录。") }; let connection = connectionID
         let data: Data
-        if let local = try await disk.image(id,scope:scope) { data = local }
-        else { data = try await api.image(id) }
-        if connection == connectionID { if pictures.count >= 48 { pictures.removeAll() }; pictures[id] = data }; return data
+        let local = try await disk.image(id,scope:scope)
+        guard connection == connectionID,!Task.isCancelled else {throw CancellationError()}
+        if let local { data = local } else { data = try await api.image(id) }
+        guard connection == connectionID,!Task.isCancelled else {throw CancellationError()}
+        if pictures.count >= 48 { pictures.removeAll() };pictures[id] = data;return data
     }
     func avatarData(_ id: String) async throws -> Data {
         if let data = avatars[id] { return data }; guard let api else { throw NativeError(message:"请先登录。") }
         let connection = connectionID, data = try await api.avatar(id)
-        if connection == connectionID { if avatars.count >= 64 { avatars.removeAll() }; avatars[id] = data }; return data
+        guard connection == connectionID,!Task.isCancelled else {throw CancellationError()}
+        if avatars.count >= 64 { avatars.removeAll() };avatars[id] = data;return data
     }
 }

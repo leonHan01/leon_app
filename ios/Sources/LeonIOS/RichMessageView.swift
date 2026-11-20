@@ -8,6 +8,7 @@ struct RichMessageView: UIViewRepresentable {
     let mine: Bool
     @Binding var height: CGFloat
     var resized: () -> Void = {}
+    var copied: () -> Void = {}
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration(); configuration.websiteDataStore = .nonPersistent()
@@ -54,7 +55,7 @@ struct RichMessageView: UIViewRepresentable {
                 guard let value = event["height"] as? Double, value.isFinite else { return }
                 let next = CGFloat(min(200000,max(24,value)))
                 if abs(parent.height-next) > 1 { parent.height = next; parent.resized() }
-            case "copy": UIPasteboard.general.string = event["text"] as? String
+            case "copy": if let value = event["text"] as? String {UIPasteboard.general.string = value;parent.copied()}
             case "open": if let value = event["url"] as? String { Self.open(value) }
             case "anchor":
                 if let y = event["y"] as? Double, y.isFinite, let web {
@@ -92,8 +93,10 @@ struct AgentAvatar: View {
         Group { if let image { Image(uiImage:image).resizable().scaledToFit() } else { Image(systemName:"person.crop.square").resizable().scaledToFit().foregroundStyle(.secondary).padding(7) } }
             .padding(2).frame(width:size,height:size).background(MobileStyle.color(0xE1F0E8)).clipShape(RoundedRectangle(cornerRadius:7))
             .task(id:"\(store.connectionID):\(agent?.avatarId ?? "alfred"):\(store.connected)") {
-                image = nil
-                if let data = try? await store.avatarData(agent?.avatarId ?? "alfred") { image = UIImage(data:data) }
+                image = nil;let connection = store.connectionID
+                if let data = try? await store.avatarData(agent?.avatarId ?? "alfred"),!Task.isCancelled,connection == store.connectionID {
+                    image = NativeImageDecoder.image(data,pixels:256,sourceLimit:16000)
+                }
             }
     }
 }
@@ -107,6 +110,7 @@ struct MessagePicture: View {
     @State private var attempt = 0
     @State private var showing = false
     @State private var scale: CGFloat = 1
+    @State private var previewImage:UIImage?
     var body: some View {
         Group {
             if let image { Image(uiImage:image).resizable().scaledToFit().padding(3).frame(width:maxWidth,height:maxWidth*0.75).background(.white,in:RoundedRectangle(cornerRadius:6)).onTapGesture { showing = true } }
@@ -114,14 +118,22 @@ struct MessagePicture: View {
             else { ProgressView().frame(width:maxWidth,height:maxWidth*0.75) }
         }
         .task(id:"\(store.connectionID):\(id):\(attempt)") {
-            failed = false
-            do { let bytes = try await store.imageData(id,retry:attempt > 0); image = UIImage(data:bytes); failed = image == nil }
-            catch { failed = true }
+            image = nil;failed = false;let connection = store.connectionID
+            do {
+                let bytes = try await store.imageData(id,retry:attempt > 0)
+                guard !Task.isCancelled,connection == store.connectionID else {return}
+                image = NativeImageDecoder.image(bytes,pixels:512);failed = image == nil
+            } catch {if !Task.isCancelled,connection == store.connectionID {failed = true}}
         }
-        .sheet(isPresented:$showing) {
+        .onDisappear {image = nil;previewImage = nil}
+        .sheet(isPresented:$showing,onDismiss:{scale = 1;previewImage = nil}) {
             NavigationStack {
-                if let image { Image(uiImage:image).resizable().scaledToFit().scaleEffect(scale).gesture(MagnificationGesture().onChanged {scale = min(5,max(1,$0))})
-                    .toolbar { ToolbarItem(placement:.confirmationAction) { Button("关闭") { showing = false; scale = 1 } } } }
+                if let image = previewImage ?? image { Image(uiImage:image).resizable().scaledToFit().scaleEffect(scale).gesture(MagnificationGesture().onChanged {scale = min(5,max(1,$0))})
+                    .toolbar { ToolbarItem(placement:.confirmationAction) { Button("关闭") { showing = false; scale = 1;previewImage = nil } } } }
+            }
+            .task {
+                let connection = store.connectionID
+                if let bytes = try? await store.imageData(id),!Task.isCancelled,connection == store.connectionID {previewImage = NativeImageDecoder.image(bytes,pixels:1600)}
             }
         }
     }
@@ -170,11 +182,11 @@ struct MessageBubble: View {
                 MessagePicture(store:store,id:id,maxWidth:min(220,contentWidth)).padding(.bottom,5)
             }
             if !message.text.isEmpty {
-                RichMessageView(source:message.text,mine:mine,height:$height,resized:resized)
+                RichMessageView(source:message.text,mine:mine,height:$height,resized:resized,copied:{store.showNotice("已复制")})
                     .frame(width:max(36,bubbleWidth-(wide ? 0 : 4)),height:height)
                     .padding(.leading,!wide && !mine ? 4 : 0).padding(.trailing,!wide && mine ? 4 : 0)
                     .background(MobileBubbleShape(mine:mine,wide:wide).fill(mine ? MobileStyle.outgoing : .white))
-                    .contextMenu {Button {UIPasteboard.general.string = message.text} label:{Label("复制原文",systemImage:"doc.on.doc")}}
+                    .contextMenu {Button {UIPasteboard.general.string = message.text;store.showNotice("已复制")} label:{Label("复制原文",systemImage:"doc.on.doc")}}
             }
             if let outgoing {
                 Text(store.sending.contains(outgoing.id) ? "发送中…" : "发送未完成").font(.system(size:10)).foregroundStyle(MobileStyle.muted).padding(.leading,5).padding(.top,4)

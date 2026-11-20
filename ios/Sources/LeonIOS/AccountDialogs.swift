@@ -68,7 +68,7 @@ func usernames(_ value: String) -> [String] {Array(Set(value.components(separate
 struct NamePrompt: View {
     let title: String
     let note: String
-    var initial = "新对话"
+    var initial = ""
     var close: () -> Void
     var submit: (String) async -> Bool
     @State private var name = ""
@@ -83,6 +83,9 @@ struct NamePrompt: View {
         } actions:{
             MobileTextButton(title:"取消",action:close).disabled(working)
             MobileTextButton(title:"创建") {Task {working = true;defer {working = false};if await submit(name.trimmingCharacters(in:.whitespacesAndNewlines)) {close()}}}.disabled(working || name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || name.utf16.count>60)
-        }.onAppear {name = initial}
+        }.onAppear {
+            if initial.isEmpty {let format = DateFormatter();format.dateFormat = "MM-dd HH:mm";name = "新对话 · "+format.string(from:Date())}
+            else {name = initial}
+        }
     }
 }

@@ -43,7 +43,7 @@ struct AgentProfileView: View {
                 if create {
                     NamePrompt(title:"新建独立对话",note:"新对话从空白开始，原对话保留在主页。",close:{create = false}) {name in
                         guard let result = await store.tool("正在新建对话…",work:{try await $0.newThread(agent:id,name:name,requestId:requestID)}) else {return false}
-                        store.upsert(result);if visible && origin == store.imageOrigin {openRoom(result)};return true
+                        store.upsert(result);store.showNotice("独立对话已创建");if visible && origin == store.imageOrigin {openRoom(result)};return true
                     }
                 }
             }.onAppear {visible = true}.onDisappear {visible = false}

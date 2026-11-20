@@ -29,6 +29,14 @@ struct NativeRootView: View {
         }
         .tint(MobileStyle.green).preferredColorScheme(.light)
         .overlay {dialogs}
+        .overlay(alignment:.bottom) {
+            if let notice = store.notice {
+                Text(notice.text).font(.system(size:13)).foregroundStyle(.white).multilineTextAlignment(.center)
+                    .padding(.horizontal,18).padding(.vertical,12).background(.black.opacity(0.8),in:RoundedRectangle(cornerRadius:9))
+                    .padding(.horizontal,24).padding(.bottom,84).allowsHitTesting(false).id(notice.id)
+            }
+        }
+        .onChange(of:store.notice?.id) {_ in if let notice = store.notice {UIAccessibility.post(notification:.announcement,argument:notice.text)}}
         .onChange(of:tab) {_ in navigation = UUID()}
         .onChange(of:path) {_ in navigation = UUID()}
         .onChange(of:store.user?.id) {id in
@@ -133,7 +141,7 @@ struct NativeRootView: View {
             if group {GroupForm(store:store,close:{group = false}) {name,agents,users in
                 let token = groupNavigation
                 guard let result = await store.tool("正在创建群聊…",work:{try await $0.group(name:name,agentIds:agents,usernames:users)}) else {return false}
-                store.upsert(result)
+                store.upsert(result);store.showNotice("群聊已创建")
                 if token == navigation && tab == 1 && path.isEmpty {openRoom(result)}
                 return true
             }}
@@ -159,7 +167,7 @@ struct NativeRootView: View {
         }
     }
     private func showGroup() {guard store.loggedIn else {return};groupNavigation = navigation;group = true}
-    private func sync() {store.refresh();Task {await store.refreshDirectory()}}
+    private func sync() {store.refresh();store.showNotice("正在同步");Task {await store.refreshDirectory()}}
     private func openRoom(_ room: Conversation) {
         store.select(room.id)
         if let index = path.firstIndex(of:.chat) {path = Array(path.prefix(index+1))} else {path.append(.chat)}

@@ -38,6 +38,16 @@ enum ImagePreparation {
         throw NativeError(message:"图片压缩后仍超过 1 MB，请缩小后发送。")
     }
 }
+enum NativeImageDecoder {
+    static func image(_ data:Data,pixels:Int,sourceLimit:Int = 1600) -> UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData,[kCGImageSourceShouldCache:false] as CFDictionary),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source,0,nil) as? [CFString:Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,let height = properties[kCGImagePropertyPixelHeight] as? Int,
+              width>0,height>0,width<=sourceLimit,height<=sourceLimit,Int64(width)*Int64(height)<=48_000_000,
+              let result = CGImageSourceCreateThumbnailAtIndex(source,0,[kCGImageSourceCreateThumbnailFromImageAlways:true,kCGImageSourceCreateThumbnailWithTransform:true,kCGImageSourceThumbnailMaxPixelSize:pixels,kCGImageSourceShouldCacheImmediately:true] as CFDictionary) else {return nil}
+        return UIImage(cgImage:result)
+    }
+}
 private extension Optional {
     func unwrap(_ message: String) throws -> Wrapped { guard let value = self else { throw NativeError(message:message) }; return value }
 }
@@ -54,6 +64,51 @@ func receiveImage(provider: NSItemProvider, origin: ImageOrigin, store: ChatStor
             switch result { case .success(let image): store.finishImage(work,image:image)
             case .failure(let error): store.finishImage(work,image:nil,failure:error) }
         }
+    }
+}
+@MainActor
+func receiveImage(file:URL,origin:ImageOrigin,store:ChatStore) {
+    guard let work = store.beginImage(origin:origin) else {store.error = "每条最多 4 张图片。";return}
+    Task {
+        let result = await Task.detached {() -> Result<DraftImage,Error> in
+            Result {
+                let scoped = file.startAccessingSecurityScopedResource()
+                defer {
+                    if scoped {file.stopAccessingSecurityScopedResource()}
+                    let path = file.resolvingSymlinksInPath().path
+                    let home = URL(fileURLWithPath:NSHomeDirectory()).resolvingSymlinksInPath().path+"/"
+                    let temporary = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().path+"/"
+                    if path.hasPrefix(home) && (path.hasPrefix(temporary) || file.deletingLastPathComponent().lastPathComponent.hasSuffix("Inbox")) {try? FileManager.default.removeItem(at:file)}
+                }
+                return try ImagePreparation.normalize(ImagePreparation.read(file))
+            }
+        }.value
+        switch result {
+        case .success(let image):store.finishImage(work,image:image)
+        case .failure(let error):store.finishImage(work,image:nil,failure:error)
+        }
+    }
+}
+@MainActor
+struct ImageFilePicker:UIViewControllerRepresentable {
+    let store:ChatStore
+    let origin:ImageOrigin
+    @Environment(\.dismiss) private var dismiss
+    func makeUIViewController(context:Context) -> UIDocumentPickerViewController {
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes:[.image],asCopy:true)
+        picker.allowsMultipleSelection = true;picker.delegate = context.coordinator;return picker
+    }
+    func updateUIViewController(_ controller:UIDocumentPickerViewController,context:Context) {}
+    func makeCoordinator() -> Coordinator {Coordinator(self)}
+    final class Coordinator:NSObject,UIDocumentPickerDelegate {
+        let parent:ImageFilePicker
+        init(_ parent:ImageFilePicker) {self.parent = parent}
+        func documentPicker(_ controller:UIDocumentPickerViewController,didPickDocumentsAt urls:[URL]) {
+            // asCopy keeps provider files in the app's sandbox after dismissal.
+            for file in urls {receiveImage(file:file,origin:parent.origin,store:parent.store)}
+            parent.dismiss()
+        }
+        func documentPickerWasCancelled(_ controller:UIDocumentPickerViewController) {parent.dismiss()}
     }
 }
 @MainActor
@@ -103,7 +158,7 @@ struct NativeComposer: UIViewRepresentable {
         context.coordinator.parent = self
         if view.text != text && view.markedTextRange == nil { view.text = text; view.selectedRange = NSRange(location:min(selection.location,(text as NSString).length),length:0) }
         else if view.markedTextRange == nil, view.selectedRange != selection, NSMaxRange(selection) <= (text as NSString).length { view.selectedRange = selection }
-        view.submit = { context.coordinator.enter() }; view.move = move; view.dismissSuggestions = dismissSuggestions; view.hasSuggestions = suggestionCount > 0
+        view.submit = { [weak view] in if let view {context.coordinator.enter(view)} }; view.move = move; view.dismissSuggestions = dismissSuggestions; view.hasSuggestions = suggestionCount > 0
         view.heightChanged = {next in DispatchQueue.main.async {if abs(context.coordinator.parent.height-next)>0.5 {context.coordinator.parent.height = next}}}
         view.reportHeight()
     }
@@ -115,9 +170,13 @@ struct NativeComposer: UIViewRepresentable {
         func textViewDidBeginEditing(_ view: UITextView) {parent.beganEditing()}
         func textViewDidChangeSelection(_ view: UITextView) { parent.selection = view.selectedRange; parent.composing = view.markedTextRange != nil }
         func textView(_ view: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
-            if text == "\n", view.markedTextRange == nil, (view as? ComposerTextView)?.insertingNewline != true { enter(); return false }; return true
+            if text == "\n", view.markedTextRange == nil, (view as? ComposerTextView)?.insertingNewline != true { enter(view); return false }; return true
         }
-        func enter() { guard !parent.composing else { return }; if parent.suggestionCount > 0 { parent.choose() } else { parent.submit() } }
+        func enter(_ view:UITextView) {
+            guard view.markedTextRange == nil else {return}
+            parent.composing = false
+            if parent.suggestionCount>0 {parent.choose()} else {parent.submit()}
+        }
         func textPasteConfigurationSupporting(_ supporting: UITextPasteConfigurationSupporting, transform item: UITextPasteItem) {
             if item.itemProvider.hasItemConformingToTypeIdentifier(UTType.image.identifier) { parent.pasteProvider(item.itemProvider); item.setNoResult() }
             else { item.setDefaultResult() }
@@ -150,8 +209,10 @@ final class ComposerTextView: UITextView {
         if abs(reportedHeight-next)>0.5 {reportedHeight = next;heightChanged?(next)}
     }
     override var keyCommands: [UIKeyCommand]? {
+        guard markedTextRange == nil else {return super.keyCommands}
         var commands = [UIKeyCommand(input:"\r",modifierFlags:.shift,action:#selector(newline)),UIKeyCommand(input:"\r",modifierFlags:.command,action:#selector(send))]
-        if hasSuggestions { commands += [UIKeyCommand(input:UIKeyCommand.inputUpArrow,modifierFlags:[],action:#selector(up)),UIKeyCommand(input:UIKeyCommand.inputDownArrow,modifierFlags:[],action:#selector(down)),UIKeyCommand(input:"\t",modifierFlags:[],action:#selector(send)),UIKeyCommand(input:UIKeyCommand.inputEscape,modifierFlags:[],action:#selector(escape))] }
+        if hasSuggestions,markedTextRange == nil { commands += [UIKeyCommand(input:UIKeyCommand.inputUpArrow,modifierFlags:[],action:#selector(up)),UIKeyCommand(input:UIKeyCommand.inputDownArrow,modifierFlags:[],action:#selector(down)),UIKeyCommand(input:"\t",modifierFlags:[],action:#selector(send)),UIKeyCommand(input:UIKeyCommand.inputEscape,modifierFlags:[],action:#selector(escape))] }
+        for command in commands {command.wantsPriorityOverSystemBehavior = true}
         return commands + (super.keyCommands ?? [])
     }
     @objc private func newline() { guard markedTextRange == nil else { return }; insertingNewline = true; insertText("\n"); insertingNewline = false }

@@ -12,7 +12,7 @@ struct ZipDocument: FileDocument {
 @MainActor
 struct NativeChatView: View {
     enum Panel {
-        case photos(ImageOrigin,Int),context(String),members(Conversation,Bool),new(AgentInfo,String,ImageOrigin),clear(ClearHistoryPreview),restore(BackupPreview,Data,String?,String,ImageOrigin)
+        case photos(ImageOrigin,Int),imageFiles(ImageOrigin),context(String),members(Conversation,Bool),new(AgentInfo,String,ImageOrigin),clear(ClearHistoryPreview),restore(BackupPreview,Data,String?,String,ImageOrigin)
     }
     @ObservedObject var store:ChatStore
     var openRoom:(Conversation)->Void
@@ -56,10 +56,17 @@ struct NativeChatView: View {
             }
         }.background(MobileStyle.bar.ignoresSafeArea()).foregroundStyle(MobileStyle.ink).toolbar(.hidden,for:.navigationBar)
             .overlay {toolDialogs}
-            .sheet(isPresented:Binding(get:{if case .photos = panel {return true};return false},set:{if !$0,case .photos = panel {panel = nil}})) {
+            .sheet(isPresented:systemImagePickerPresented) {
                 if case .photos(let origin,let limit) = panel {PhotoPicker(store:store,origin:origin,limit:limit)}
+                else if case .imageFiles(let origin) = panel {ImageFilePicker(store:store,origin:origin)}
             }
-            .fileExporter(isPresented:$exporting,document:document,contentType:.zip,defaultFilename:"Leon-聊天备份-\(Int(Date().timeIntervalSince1970)).zip") {result in if case .failure(let error) = result {store.error = error.localizedDescription};document = nil}
+            .fileExporter(isPresented:$exporting,document:document,contentType:.zip,defaultFilename:"Leon-聊天备份-\(Int(Date().timeIntervalSince1970)).zip") {result in
+                switch result {
+                case .success:store.showNotice("聊天备份已保存，文件包含聊天内容及图片，请妥善保管")
+                case .failure(let error):if !isFileCancellation(error) {store.error = error.localizedDescription}
+                }
+                document = nil
+            }
             .fileImporter(isPresented:$importing,allowedContentTypes:[.zip],allowsMultipleSelection:false, onCompletion:importBackup)
             .onReceive(NotificationCenter.default.publisher(for:UIResponder.keyboardWillShowNotification)) {_ in extras = false}
             .onAppear {visible = true;selection = NSRange(location:(store.draft as NSString).length,length:0);firstMessageID = store.room.messages.first?.id}
@@ -72,7 +79,7 @@ struct NativeChatView: View {
             Button("Token 用量",action:openUsage)
             Button("快捷命令") {hideKeyboard();extras = true}
             Button("新建对话") {chooseAgent(for:"new")}
-            Button("立即同步") {store.refresh()}
+            Button("立即同步") {store.refresh();store.showNotice("正在同步")}
             if store.selected?.direct != true {Button("提及 Agent") {chooseAgent(for:"mention")}}
         } label:{MobileIcon(symbol:.more).frame(width:44,height:44).contentShape(Rectangle())}.accessibilityLabel("聊天更多操作")
     }
@@ -176,7 +183,11 @@ struct NativeChatView: View {
     private var commandPanel:some View {
         VStack(spacing:4) {
             HStack(spacing:4) {
-                command("相册",.photo,0x4778B2,0xEAF1FA) {if store.draftImages.count+store.preparingImages<4 {panel = .photos(store.imageOrigin,4-store.draftImages.count-store.preparingImages)}}
+                Menu {
+                    Button("从相册选择") {panel = .photos(store.imageOrigin,4-store.draftImages.count-store.preparingImages)}
+                    Button("从文件选择") {panel = .imageFiles(store.imageOrigin)}
+                } label:{MobileToolArtwork(title:"相册",symbol:.photo,accent:0x4778B2,surface:0xEAF1FA)}
+                    .disabled(commandsDisabled || store.draftImages.count+store.preparingImages>=4).accessibilityIdentifier("chat_tool_images")
                 command("压缩上下文",.compact,0x35896A,0xE7F2EC) {chooseAgent(for:"compact")}
                 command("查看上下文",.context,0x35896A,0xE7F2EC) {panel = .context(store.roomID)}
                 command("新建对话",.plus,0x35896A,0xE7F2EC) {chooseAgent(for:"new")}
@@ -189,23 +200,25 @@ struct NativeChatView: View {
         }.padding(.horizontal,14).padding(.top,6).padding(.bottom,12).accessibilityIdentifier("chat_extras")
     }
     private func command(_ title:String,_ symbol:MobileSymbol,_ accent:UInt32,_ surface:UInt32,action:@escaping ()->Void) -> some View {
-        Button(action:action) {
-            VStack(spacing:9) {
-                MobileIcon(symbol:symbol,color:MobileStyle.color(accent)).frame(width:48,height:48).background(MobileStyle.color(surface),in:RoundedRectangle(cornerRadius:15)).overlay(RoundedRectangle(cornerRadius:15).stroke(.black.opacity(0.03),lineWidth:1))
-                Text(title).font(.system(size:12,weight:.medium)).foregroundStyle(MobileStyle.color(0x505B58)).lineLimit(2)
-            }.frame(maxWidth:.infinity,minHeight:88,alignment:.top).padding(.top,8).contentShape(Rectangle())
-        }.buttonStyle(MobilePressStyle(radius:16)).disabled(store.busy != nil || store.savingDraft || store.opening.contains(store.roomID))
+        Button(action:action) {MobileToolArtwork(title:title,symbol:symbol,accent:accent,surface:surface)}
+            .buttonStyle(MobilePressStyle(radius:16)).disabled(commandsDisabled)
+    }
+    private var commandsDisabled:Bool {!store.loggedIn || store.configuring || store.busy != nil || store.savingDraft || store.opening.contains(store.roomID)}
+    private var systemImagePickerPresented:Binding<Bool> {
+        Binding(get:{switch panel {case .photos,.imageFiles:return true;default:return false}},set:{value in
+            if !value {switch panel {case .photos,.imageFiles:panel = nil;default:break}}
+        })
     }
     @ViewBuilder private var toolDialogs:some View {
         ZStack {
             if let panel {
                 switch panel {
-                case .photos:EmptyView()
+                case .photos,.imageFiles:EmptyView()
                 case .context(let room):ContextPanel(store:store,room:room,close:{self.panel = nil})
                 case .members(let room,let showMembers):MembersPanel(store:store,room:room,showMembers:showMembers,close:{self.panel = nil})
-                case .new(let agent,let request,let origin):NamePrompt(title:"新建对话",note:"与 \(agent.name) 新建独立对话。原对话保留，新对话从空白开始。",close:{self.panel = nil}) {name in
+                case .new(let agent,let request,let origin):NamePrompt(title:"与 \(agent.name) 新建对话",note:"新对话将从空白开始，不携带当前对话的消息和上下文。原对话可从 Agent 主页查看。",close:{self.panel = nil}) {name in
                     guard let result = await store.tool("正在新建对话…",work:{try await $0.newThread(agent:agent.id,name:name,requestId:request)}) else {return false}
-                    store.upsert(result);if visible && origin == store.imageOrigin {openRoom(result)};return true
+                    store.upsert(result);store.showNotice("独立对话已创建");if visible && origin == store.imageOrigin {openRoom(result)};return true
                 }
                 case .clear(let preview):ClearPanel(store:store,preview:preview,backup:{self.panel = nil;Task {await backup()}},close:{self.panel = nil})
                 case .restore(let info,let bytes,let agent,let request,let origin):RestorePanel(store:store,info:info,bytes:bytes,agent:agent,request:request,close:{self.panel = nil}) {result in
@@ -246,7 +259,7 @@ struct NativeChatView: View {
         case "compact":
             let room = store.roomID,key = "\(store.roomID):\(agent.id)",request = compactRequests["\(store.roomID):\(agent.id)"] ?? UUID().uuidString.lowercased()
             compactRequests[key] = request
-            Task {if await store.tool("正在提交压缩…",work:{try await $0.compact(room:room,agent:agent.id,requestId:request)}) != nil {compactRequests.removeValue(forKey:key);store.refresh()}}
+            Task {if await store.tool("正在提交压缩…",work:{try await $0.compact(room:room,agent:agent.id,requestId:request)}) != nil {compactRequests.removeValue(forKey:key);store.showNotice("已提交上下文压缩，完成后自动显示结果");store.refresh()}}
         default:complete(agent)
         }
     }
@@ -273,8 +286,12 @@ struct NativeChatView: View {
                 guard visible,origin == store.imageOrigin else {return}
                 guard agent == nil || read.0.kind == "direct" else {throw NativeError(message:"群聊备份请从群聊入口加载。")}
                 panel = .restore(read.0,read.1,agent,UUID().uuidString.lowercased(),origin)
-            } catch {if origin.connection == store.connectionID {store.error = error.localizedDescription}}
+            } catch {if origin.connection == store.connectionID,!isFileCancellation(error) {store.error = error.localizedDescription}}
         }
+    }
+    private func isFileCancellation(_ error:Error) -> Bool {
+        let value = error as NSError
+        return error is CancellationError || value.domain == NSCocoaErrorDomain && value.code == NSUserCancelledError
     }
     private func timeLabel(_ timestamp:Int64) -> String {
         let date = Date(timeIntervalSince1970:Double(timestamp)/1000)

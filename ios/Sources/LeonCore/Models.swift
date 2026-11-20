@@ -50,6 +50,7 @@ struct Outgoing: Codable, Identifiable, Equatable {
 }
 struct DraftImage: Identifiable, Equatable, Sendable { let id: String; let data: Data }
 struct ImageOrigin: Equatable, Sendable { let connection: UUID; let room: String }
+struct UserNotice: Identifiable, Equatable {let id = UUID();let text:String}
 struct ModelUsage: Codable, Identifiable, Equatable {
     var id: String { provider + ":" + model }
     let provider: String; let model: String; let inputTokens: Int64; let outputTokens: Int64; let totalTokens: Int64

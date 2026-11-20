@@ -6,7 +6,7 @@ enum MobileStyle {
     static let green = color(0x07B75A), ink = color(0x191919), muted = color(0x8A8A8A)
     static let line = color(0xE7E7E7), bar = color(0xF7F7F7), chat = color(0xEDEDED)
     static let outgoing = color(0xB2EC86)
-    static let version = "0.12.1"
+    static let version = "0.12.2"
     static func color(_ rgb: UInt32) -> Color {
         Color(red:Double((rgb >> 16) & 255)/255,green:Double((rgb >> 8) & 255)/255,blue:Double(rgb & 255)/255)
     }
@@ -105,6 +105,21 @@ struct MobileTextButton: View {
     var body: some View {
         Button(action:action) {Text(title).font(.system(size:14)).foregroundStyle(destructive ? Color.red : MobileStyle.green).padding(.horizontal,12).padding(.vertical,8).frame(minHeight:44)}
             .buttonStyle(MobilePressStyle()).opacity(enabled ? 1 : 0.4)
+    }
+}
+struct MobileToolArtwork:View {
+    let title:String
+    let symbol:MobileSymbol
+    let accent:UInt32
+    let surface:UInt32
+    @Environment(\.isEnabled) private var enabled
+    var body:some View {
+        VStack(spacing:9) {
+            MobileIcon(symbol:symbol,color:enabled ? MobileStyle.color(accent) : MobileStyle.muted)
+                .frame(width:48,height:48).background(MobileStyle.color(surface),in:RoundedRectangle(cornerRadius:15))
+                .overlay(RoundedRectangle(cornerRadius:15).stroke(.black.opacity(0.03),lineWidth:1))
+            Text(title).font(.system(size:12,weight:.medium)).foregroundStyle(enabled ? MobileStyle.color(0x505B58) : MobileStyle.muted).lineLimit(2)
+        }.frame(maxWidth:.infinity,minHeight:88,alignment:.top).padding(.top,8).contentShape(Rectangle())
     }
 }
 struct MobileIconButton: View {

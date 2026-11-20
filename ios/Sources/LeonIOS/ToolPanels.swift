@@ -26,7 +26,7 @@ struct ContextPanel: View {
         } actions:{
             MobileTextButton(title:"刷新") {Task {await refresh()}}.disabled(store.busy != nil)
             MobileTextButton(title:"关闭",action:close)
-            MobileTextButton(title:"保存") {Task {if await store.tool("正在保存上下文设置…",work:{try await $0.configureContext(room:room,rounds:rounds)}) != nil {close()}}}.disabled(store.busy != nil || info == nil)
+            MobileTextButton(title:"保存轮数") {Task {if await store.tool("正在保存上下文设置…",work:{try await $0.configureContext(room:room,rounds:rounds)}) != nil {store.showNotice("上下文设置已保存");close()}}}.disabled(store.busy != nil || info == nil)
         }.task {await refresh()}
     }
     private func refresh() async {if let result = await store.tool("正在读取上下文…",work:{try await $0.context(room:room)}) {info = result;rounds = max(1,min(20,result.recentRounds))}}
@@ -48,7 +48,7 @@ struct ClearPanel: View {
                 guard store.sending.isEmpty,!store.savingDraft,store.preparingImages == 0 else {store.error = "请等待发送和图片处理完成。";return}
                 let connection = store.connectionID
                 if let result = await store.tool("正在清理记录…",work:{try await $0.clear(preview,requestId:request)}),connection == store.connectionID,preview.conversationId == store.roomID {
-                    do {try await store.clearLocal(preview.conversationId,revision:result.historyRevision);close()} catch {store.error = error.localizedDescription}
+                    do {try await store.clearLocal(preview.conversationId,revision:result.historyRevision);store.showNotice("聊天记录已清理");close()} catch {store.error = error.localizedDescription}
                 }
             }}.disabled(store.busy != nil)
         }
@@ -72,7 +72,7 @@ struct RestorePanel: View {
             }.padding(.vertical,6)
         } actions:{
             MobileTextButton(title:"取消",action:close).disabled(store.busy != nil)
-            MobileTextButton(title:"加载为新对话") {Task {if let result = await store.tool("正在加载备份…",work:{try await $0.restore(bytes,agent:agent,requestId:request)}) {restored(result);close()}}}.disabled(store.busy != nil)
+            MobileTextButton(title:"加载为新对话") {Task {if let result = await store.tool("正在加载备份…",work:{try await $0.restore(bytes,agent:agent,requestId:request)}) {restored(result);store.showNotice("备份已加载");close()}}}.disabled(store.busy != nil)
         }
     }
 }
@@ -102,7 +102,7 @@ struct MembersPanel: View {
             }
         } actions:{
             if showMembers,store.owns(room),room.id != "shared",!room.id.hasPrefix("home:") {
-                MobileTextButton(title:"添加用户") {Task {if let result = await store.tool("正在添加群成员…",work:{try await $0.members(room:room.id,adding:usernames(names))}) {users = result;names = ""}}}.disabled(usernames(names).isEmpty || usernames(names).count>32 || store.busy != nil)
+                MobileTextButton(title:"添加用户") {Task {if let result = await store.tool("正在添加群成员…",work:{try await $0.members(room:room.id,adding:usernames(names))}) {users = result;names = "";store.showNotice("群成员已添加")}}}.disabled(usernames(names).isEmpty || usernames(names).count>32 || store.busy != nil)
             }
             MobileTextButton(title:"关闭",action:close)
         }.task {if showMembers,let result = await store.tool("正在读取群成员…",work:{try await $0.members(room:room.id,adding:nil)}) {users = result}}

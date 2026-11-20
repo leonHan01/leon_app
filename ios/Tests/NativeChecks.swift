@@ -23,6 +23,8 @@ final class FakeAPI: ChatAPI, @unchecked Sendable {
     var sendHook: ((Outgoing) async throws -> Message)?
     var directHook: ((String) async throws -> Conversation)?
     var usageHook: (() async throws -> [ModelUsage])?
+    var imageHook: ((String) async throws -> Data)?
+    var avatarHook: ((String) async throws -> Data)?
     var sends: [Outgoing] = [];var uploads: [String] = [];var logouts = 0
     func login(_ username: String) async throws -> LoginResult {LoginResult(user:ChatUser(id:"user-1",username:username),sessionToken:"chat_new")}
     func logout() async throws {logouts += 1}
@@ -37,8 +39,8 @@ final class FakeAPI: ChatAPI, @unchecked Sendable {
     func send(_ message: Outgoing) async throws -> Message {sends.append(message);if let sendHook {return try await sendHook(message)};return messageFixture(3,client:message.id,device:message.deviceId)}
     func retryJob(_ job: AgentJob) async throws {}
     func uploadImage(id: String,room: String,data: Data) async throws {uploads.append(id)}
-    func image(_ id: String) async throws -> Data {Data([1,2,3])}
-    func avatar(_ id: String) async throws -> Data {Data([1,2,3])}
+    func image(_ id: String) async throws -> Data {if let imageHook {return try await imageHook(id)};return Data([1,2,3])}
+    func avatar(_ id: String) async throws -> Data {if let avatarHook {return try await avatarHook(id)};return Data([1,2,3])}
     func usage() async throws -> [ModelUsage] {if let usageHook {return try await usageHook()};return []}
     func context(room: String) async throws -> ConversationContext {ConversationContext(conversationId:room,recentRounds:10,inputTokenBudget:32000,topicStartedAfter:0,agents:[])}
     func configureContext(room: String,rounds: Int) async throws -> ConversationContext {try await context(room:room)}
@@ -211,6 +213,7 @@ final class Checks {
         }
         try await checkHTTPContracts()
         try await checkTimeline()
+        try await checkParity()
         print("Native core: \(cases) scenarios passed")
     }
 }
