@@ -1,6 +1,12 @@
 from pathlib import Path
-import hashlib,json
+import hashlib,json,re,os
 root=Path(__file__).resolve().parents[1]
+# Keep the team selected in Xcode when adding UI source files regenerates the
+# project. LEON_IOS_TEAM explicitly overrides it for another developer.
+project_path=root/'Leon.xcodeproj/project.pbxproj'
+existing=project_path.read_text() if project_path.exists() else ''
+selected_team=re.search(r'\bDEVELOPMENT_TEAM\s*=\s*"?([A-Z0-9]{10})"?;',existing)
+team=os.environ.get('LEON_IOS_TEAM') or (selected_team.group(1) if selected_team else None)
 def uid(value): return hashlib.sha1(value.encode()).hexdigest()[:24].upper()
 def quote(value): return json.dumps(str(value),ensure_ascii=False)
 objects=[]
@@ -24,7 +30,8 @@ obj('resources',f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; fi
 obj('frameworks',f'isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = ({uid("build-zlib")},); runOnlyForDeploymentPostprocessing = 0;')
 obj('target',f'isa = PBXNativeTarget; buildConfigurationList = {uid("target-config")}; buildPhases = ({uid("sources")}, {uid("frameworks")}, {uid("resources")},); buildRules = (); dependencies = (); name = Leon; productName = Leon; productReference = {uid("product")}; productType = "com.apple.product-type.application";')
 project_settings={'CLANG_ENABLE_MODULES':'YES','CLANG_ENABLE_OBJC_ARC':'YES','SDKROOT':'iphoneos','IPHONEOS_DEPLOYMENT_TARGET':'16.0','SWIFT_VERSION':'5.0','ENABLE_USER_SCRIPT_SANDBOXING':'YES','SWIFT_STRICT_CONCURRENCY':'minimal'}
-target_settings={'PRODUCT_BUNDLE_IDENTIFIER':'com.leon.ios','PRODUCT_NAME':'Leon','INFOPLIST_FILE':'Info.plist','GENERATE_INFOPLIST_FILE':'NO','CODE_SIGN_STYLE':'Automatic','CURRENT_PROJECT_VERSION':'1','MARKETING_VERSION':'0.12.0','TARGETED_DEVICE_FAMILY':'1,2','SUPPORTED_PLATFORMS':'iphoneos iphonesimulator','SUPPORTS_MACCATALYST':'NO','ASSETCATALOG_COMPILER_APPICON_NAME':'AppIcon','LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/Frameworks','SWIFT_EMIT_LOC_STRINGS':'YES'}
+target_settings={'PRODUCT_BUNDLE_IDENTIFIER':'com.leon.ios','PRODUCT_NAME':'Leon','INFOPLIST_FILE':'Info.plist','GENERATE_INFOPLIST_FILE':'NO','CODE_SIGN_STYLE':'Automatic','CURRENT_PROJECT_VERSION':'2','MARKETING_VERSION':'0.12.1','TARGETED_DEVICE_FAMILY':'1,2','SUPPORTED_PLATFORMS':'iphoneos iphonesimulator','SUPPORTS_MACCATALYST':'NO','ASSETCATALOG_COMPILER_APPICON_NAME':'AppIcon','LD_RUNPATH_SEARCH_PATHS':'$(inherited) @executable_path/Frameworks','SWIFT_EMIT_LOC_STRINGS':'YES'}
+if team:target_settings['DEVELOPMENT_TEAM']=team
 for scope,settings in [('project',project_settings),('target',target_settings)]:
  for config in ['Debug','Release']:
   data=dict(settings)

@@ -211,6 +211,18 @@ public class ChatScreensTest {
         tagged("message-agent-avatar:luna").performClick();tagged("agent-history:thread:one").performClick();assertChat("周末计划");
         activity.onBackPressed();assertTrue(view(R.id.home_screen).isShown());
     }
+    @Test public void chatMenuOpensCurrentAgentDetailsAndKeepsOtherActions() {
+        view(R.id.tab_agents).performClick();openAgentChat("luna");
+        input().setText("保留草稿");view(R.id.chat_more).performClick();
+        var menu=org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu().getMenu();
+        assertNotNull(menu.findItem(menu.getItem(0).getItemId()));
+        assertEquals("Agent 详情",menu.getItem(0).getTitle().toString());
+        assertEquals("会话信息",menu.getItem(1).getTitle().toString());
+        menu.performIdentifierAction(menu.getItem(0).getItemId(),0);
+        assertTrue(view(R.id.agent_detail_screen).isShown());
+        assertEquals("Luna",((TextView)view(R.id.agent_detail_name)).getText().toString());
+        activity.onBackPressed();assertChat("Luna");assertEquals("保留草稿",input().getText().toString());
+    }
     @Test public void oldAgentResponsesAndEmptyHistoriesHaveClearFallbacks() throws Exception {
         var old=new MessageApi.Agent(new JSONObject().put("id","legacy").put("name","旧版助手").put("handle","legacy").put("provider","openai").put("enabled",true));
         session.agents.add(old);session.notifyChanged();view(R.id.tab_agents).performClick();openAgentChat("luna");openProfileFromChat("legacy","旧版助手");

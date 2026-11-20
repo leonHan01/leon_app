@@ -317,7 +317,11 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     }
     private void sendCurrent(){if(session.sendDraft(composer.getText().toString())){composer.setText("");navigation.attachments=false;extras.setVisibility(View.GONE);chatAdd.setRotation(0);scroll.post(()->scroll.fullScroll(View.FOCUS_DOWN));}}
     private void showChatMenu(View anchor){
-        PopupMenu menu=new PopupMenu(this,anchor);menu.getMenu().add("会话信息").setOnMenuItemClickListener(item->{showConversationInfo();return true;});
+        PopupMenu menu=new PopupMenu(this,anchor);
+        var room=session.selected();
+        if(room!=null&&room.kind.equals("direct")&&!room.agentId.isEmpty())
+            menu.getMenu().add("Agent 详情").setOnMenuItemClickListener(item->{openAgentDetails(room.agentId);return true;});
+        menu.getMenu().add("会话信息").setOnMenuItemClickListener(item->{showConversationInfo();return true;});
         if(session.selected()!=null&&session.selected().kind.equals("group"))
             menu.getMenu().add("群成员").setOnMenuItemClickListener(item->{showGroupMembers();return true;});
         menu.getMenu().add("Token 用量").setOnMenuItemClickListener(item->{showUsage();return true;});

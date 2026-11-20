@@ -90,7 +90,7 @@ struct AgentAvatar: View {
     @State private var image: UIImage?
     var body: some View {
         Group { if let image { Image(uiImage:image).resizable().scaledToFit() } else { Image(systemName:"person.crop.square").resizable().scaledToFit().foregroundStyle(.secondary).padding(7) } }
-            .frame(width:size,height:size).background(Color.green.opacity(0.12)).clipShape(RoundedRectangle(cornerRadius:8))
+            .padding(2).frame(width:size,height:size).background(MobileStyle.color(0xE1F0E8)).clipShape(RoundedRectangle(cornerRadius:7))
             .task(id:"\(store.connectionID):\(agent?.avatarId ?? "alfred"):\(store.connected)") {
                 image = nil
                 if let data = try? await store.avatarData(agent?.avatarId ?? "alfred") { image = UIImage(data:data) }
@@ -101,6 +101,7 @@ struct AgentAvatar: View {
 struct MessagePicture: View {
     @ObservedObject var store: ChatStore
     let id: String
+    var maxWidth: CGFloat = 220
     @State private var image: UIImage?
     @State private var failed = false
     @State private var attempt = 0
@@ -108,9 +109,9 @@ struct MessagePicture: View {
     @State private var scale: CGFloat = 1
     var body: some View {
         Group {
-            if let image { Image(uiImage:image).resizable().scaledToFit().frame(maxWidth:230,maxHeight:190).onTapGesture { showing = true } }
+            if let image { Image(uiImage:image).resizable().scaledToFit().padding(3).frame(width:maxWidth,height:maxWidth*0.75).background(.white,in:RoundedRectangle(cornerRadius:6)).onTapGesture { showing = true } }
             else if failed { Button("图片加载失败，点击重试") { attempt += 1 }.font(.caption) }
-            else { ProgressView().frame(width:160,height:90) }
+            else { ProgressView().frame(width:maxWidth,height:maxWidth*0.75) }
         }
         .task(id:"\(store.connectionID):\(id):\(attempt)") {
             failed = false
@@ -127,40 +128,65 @@ struct MessagePicture: View {
 }
 @MainActor
 struct MessageBubble: View {
-    @ObservedObject var store: ChatStore
-    let message: Message
-    var outgoing: Outgoing? = nil
-    var openAgent: (String) -> Void
-    var resized: () -> Void = {}
-    @State private var height: CGFloat = 64
-    private var mine: Bool { outgoing != nil || store.mine(message) }
-    private var wide: Bool { !mine && message.agentId != nil && message.text.unicodeScalars.count > 500 }
-    var body: some View {
-        VStack(alignment:.leading,spacing:7) {
-            if wide { HStack { identity; Text(message.sender).font(.caption).foregroundStyle(.secondary) } }
-            HStack(alignment:.top,spacing:8) {
-                if !mine && !wide { identity }
-                if mine { Spacer(minLength:30) }
-                VStack(alignment:mine ? .trailing : .leading,spacing:6) {
-                    if !mine && !wide && store.selected?.direct != true { Text(message.sender).font(.caption).foregroundStyle(.secondary) }
-                    ForEach(outgoing?.imageIds ?? message.images?.map(\.id) ?? [],id:\.self) { id in MessagePicture(store:store,id:id) }
-                    if !message.text.isEmpty {
-                        RichMessageView(source:message.text,mine:mine,height:$height,resized:resized)
-                            .frame(height:height).background(mine ? Color(red:0.7,green:0.92,blue:0.56) : .white).clipShape(RoundedRectangle(cornerRadius:7))
-                            .contextMenu { Button { UIPasteboard.general.string = message.text } label: {Label("复制原文",systemImage:"doc.on.doc")} }
-                    }
-                    if let outgoing {
-                        Button(store.sending.contains(outgoing.id) ? "正在发送…" : "重试发送") { Task { await store.retry(outgoing) } }
-                            .font(.caption).disabled(store.sending.contains(outgoing.id))
-                    } else { Text(message.date,style:.time).font(.caption2).foregroundStyle(.secondary) }
-                }
-                if !mine && !wide { Spacer(minLength:message.agentId == nil ? 30 : 0) }
-                if mine { identity }
-            }
-        }.padding(.vertical,6)
+    @ObservedObject var store:ChatStore
+    let message:Message
+    var outgoing:Outgoing? = nil
+    var openAgent:(String)->Void
+    let availableWidth:CGFloat
+    var resized:()->Void = {}
+    @State private var height:CGFloat = 44
+    private var mine:Bool {outgoing != nil || store.mine(message)}
+    private var agentReply:Bool {message.role == "assistant" && message.agentId != nil}
+    private var wide:Bool {!mine && agentReply && message.text.unicodeScalars.count>500}
+    private var contentWidth:CGFloat {max(60,availableWidth-(wide ? 0 : 47+(mine || !agentReply ? 44 : 4)))}
+    private var bubbleWidth:CGFloat {
+        // Short plain text wraps tightly; every message still uses the full
+        // Markdown parser, so choosing a width cannot drop a syntax feature.
+        let controls = CharacterSet(charactersIn:"\n\r#*_~`[]()<>\\^=|!:$-.@&")
+        guard !wide,message.text.rangeOfCharacter(from:controls) == nil else {return contentWidth}
+        let natural = ceil((message.text as NSString).size(withAttributes:[.font:UIFont.systemFont(ofSize:14)]).width)+28
+        return min(contentWidth,max(40,natural))
     }
-    @ViewBuilder private var identity: some View {
-        if mine { Text(String(message.sender.prefix(1))).foregroundStyle(.white).frame(width:40,height:40).background(Color.green.opacity(0.65)).clipShape(RoundedRectangle(cornerRadius:8)) }
-        else { Button { if let id = message.agentId { openAgent(id) } } label: { AgentAvatar(store:store,agent:store.agent(message.agentId)) }.buttonStyle(.plain) }
+    var body:some View {
+        VStack(alignment:.leading,spacing:7) {
+            if wide {
+                HStack(spacing:8) {identity;Text(message.sender).font(.system(size:11)).foregroundStyle(MobileStyle.muted)}
+                contents
+            } else {
+                HStack(alignment:.top,spacing:0) {
+                    if mine {Color.clear.frame(width:44,height:1)} else {identity}
+                    contents.padding(.leading,mine ? 0 : 7)
+                    if mine {identity.padding(.leading,7)} else {Color.clear.frame(width:agentReply ? 4 : 44,height:1)}
+                }
+            }
+        }.frame(maxWidth:.infinity,alignment:.leading).padding(.bottom,15)
+    }
+    private var contents:some View {
+        VStack(alignment:mine ? .trailing : .leading,spacing:0) {
+            if !mine && !wide && store.selected?.direct != true {
+                Text(message.sender).font(.system(size:11)).foregroundStyle(MobileStyle.muted).padding(.leading,5).padding(.bottom,5)
+            }
+            ForEach(outgoing?.imageIds ?? message.images?.map(\.id) ?? [],id:\.self) {id in
+                MessagePicture(store:store,id:id,maxWidth:min(220,contentWidth)).padding(.bottom,5)
+            }
+            if !message.text.isEmpty {
+                RichMessageView(source:message.text,mine:mine,height:$height,resized:resized)
+                    .frame(width:max(36,bubbleWidth-(wide ? 0 : 4)),height:height)
+                    .padding(.leading,!wide && !mine ? 4 : 0).padding(.trailing,!wide && mine ? 4 : 0)
+                    .background(MobileBubbleShape(mine:mine,wide:wide).fill(mine ? MobileStyle.outgoing : .white))
+                    .contextMenu {Button {UIPasteboard.general.string = message.text} label:{Label("复制原文",systemImage:"doc.on.doc")}}
+            }
+            if let outgoing {
+                Text(store.sending.contains(outgoing.id) ? "发送中…" : "发送未完成").font(.system(size:10)).foregroundStyle(MobileStyle.muted).padding(.leading,5).padding(.top,4)
+                if !store.sending.contains(outgoing.id) {MobileTextButton(title:"重试发送") {Task {await store.retry(outgoing)}}}
+            }
+        }.frame(maxWidth:.infinity,alignment:mine ? .trailing : .leading)
+    }
+    @ViewBuilder private var identity:some View {
+        if mine {
+            Text(message.sender.isEmpty ? "我" : String(message.sender.prefix(1))).font(.system(size:16)).foregroundStyle(.white).frame(width:40,height:40).background(MobileStyle.color(0x719983),in:RoundedRectangle(cornerRadius:6))
+        } else {
+            Button {if agentReply,let id = message.agentId {openAgent(id)}} label:{AgentAvatar(store:store,agent:store.agent(message.agentId))}.buttonStyle(.plain).accessibilityLabel(agentReply ? "查看 \(message.sender) 的详情" : message.sender)
+        }
     }
 }

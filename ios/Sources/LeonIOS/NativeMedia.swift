@@ -82,31 +82,37 @@ struct NativeComposer: UIViewRepresentable {
     @Binding var text: String
     @Binding var selection: NSRange
     @Binding var composing: Bool
+    @Binding var height: CGFloat
     var suggestionCount: Int
     var submit: () -> Void
     var choose: () -> Void
     var move: (Int) -> Void
     var dismissSuggestions: () -> Void
     var pasteProvider: (NSItemProvider) -> Void
+    var beganEditing: () -> Void
     func makeUIView(context: Context) -> ComposerTextView {
         let view = ComposerTextView(); view.delegate = context.coordinator; view.pasteDelegate = context.coordinator
-        view.font = .preferredFont(forTextStyle:.body); view.adjustsFontForContentSizeCategory = true
-        view.backgroundColor = .secondarySystemBackground; view.layer.cornerRadius = 8
-        view.returnKeyType = .send; view.textContainerInset = UIEdgeInsets(top:10,left:7,bottom:10,right:7)
+        view.font = UIFontMetrics(forTextStyle:.body).scaledFont(for:UIFont.systemFont(ofSize:16)); view.adjustsFontForContentSizeCategory = true
+        view.textColor = UIColor(red:25/255,green:25/255,blue:25/255,alpha:1)
+        view.backgroundColor = .white; view.layer.cornerRadius = 5
+        view.returnKeyType = .send; view.textContainerInset = UIEdgeInsets(top:10,left:11,bottom:10,right:11);view.textContainer.lineFragmentPadding = 0
         view.pasteConfiguration = UIPasteConfiguration(acceptableTypeIdentifiers:[UTType.image.identifier,UTType.plainText.identifier])
-        view.accessibilityLabel = "发送消息"; return view
+        view.accessibilityLabel = "发送消息";view.accessibilityIdentifier = "chat_input"; return view
     }
     func updateUIView(_ view: ComposerTextView, context: Context) {
         context.coordinator.parent = self
         if view.text != text && view.markedTextRange == nil { view.text = text; view.selectedRange = NSRange(location:min(selection.location,(text as NSString).length),length:0) }
         else if view.markedTextRange == nil, view.selectedRange != selection, NSMaxRange(selection) <= (text as NSString).length { view.selectedRange = selection }
         view.submit = { context.coordinator.enter() }; view.move = move; view.dismissSuggestions = dismissSuggestions; view.hasSuggestions = suggestionCount > 0
+        view.heightChanged = {next in DispatchQueue.main.async {if abs(context.coordinator.parent.height-next)>0.5 {context.coordinator.parent.height = next}}}
+        view.reportHeight()
     }
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     final class Coordinator: NSObject, UITextViewDelegate, UITextPasteDelegate {
         var parent: NativeComposer
         init(_ parent: NativeComposer) { self.parent = parent }
-        func textViewDidChange(_ view: UITextView) { parent.text = view.text; parent.selection = view.selectedRange; parent.composing = view.markedTextRange != nil }
+        func textViewDidChange(_ view: UITextView) { parent.text = view.text; parent.selection = view.selectedRange; parent.composing = view.markedTextRange != nil;(view as? ComposerTextView)?.reportHeight() }
+        func textViewDidBeginEditing(_ view: UITextView) {parent.beganEditing()}
         func textViewDidChangeSelection(_ view: UITextView) { parent.selection = view.selectedRange; parent.composing = view.markedTextRange != nil }
         func textView(_ view: UITextView, shouldChangeTextIn range: NSRange, replacementText text: String) -> Bool {
             if text == "\n", view.markedTextRange == nil, (view as? ComposerTextView)?.insertingNewline != true { enter(); return false }; return true
@@ -123,6 +129,26 @@ final class ComposerTextView: UITextView {
     var insertingNewline = false
     var submit: (() -> Void)?; var move: ((Int) -> Void)?; var dismissSuggestions: (() -> Void)?
     var hasSuggestions = false
+    var heightChanged: ((CGFloat) -> Void)?
+    private let placeholderLabel = UILabel()
+    private var reportedHeight:CGFloat = 0
+    override init(frame:CGRect,textContainer:NSTextContainer?) {super.init(frame:frame,textContainer:textContainer);configurePlaceholder()}
+    required init?(coder:NSCoder) {super.init(coder:coder);configurePlaceholder()}
+    private func configurePlaceholder() {placeholderLabel.text = "发送消息";placeholderLabel.textColor = UIColor(white:170/255,alpha:1);placeholderLabel.isUserInteractionEnabled = false;addSubview(placeholderLabel)}
+    override func layoutSubviews() {
+        super.layoutSubviews();placeholderLabel.font = font
+        placeholderLabel.frame = CGRect(x:textContainerInset.left,y:textContainerInset.top,width:max(0,bounds.width-textContainerInset.left-textContainerInset.right),height:font?.lineHeight ?? 20)
+        reportHeight()
+    }
+    func reportHeight() {
+        placeholderLabel.isHidden = !text.isEmpty
+        guard bounds.width>0 else {return}
+        let ideal = sizeThatFits(CGSize(width:bounds.width,height:.greatestFiniteMagnitude)).height
+        let maximum = (font?.lineHeight ?? 20)*4+20,next = min(maximum,max(40,ceil(ideal)))
+        let scrolling = ideal>maximum+0.5
+        if isScrollEnabled != scrolling {isScrollEnabled = scrolling}
+        if abs(reportedHeight-next)>0.5 {reportedHeight = next;heightChanged?(next)}
+    }
     override var keyCommands: [UIKeyCommand]? {
         var commands = [UIKeyCommand(input:"\r",modifierFlags:.shift,action:#selector(newline)),UIKeyCommand(input:"\r",modifierFlags:.command,action:#selector(send))]
         if hasSuggestions { commands += [UIKeyCommand(input:UIKeyCommand.inputUpArrow,modifierFlags:[],action:#selector(up)),UIKeyCommand(input:UIKeyCommand.inputDownArrow,modifierFlags:[],action:#selector(down)),UIKeyCommand(input:"\t",modifierFlags:[],action:#selector(send)),UIKeyCommand(input:UIKeyCommand.inputEscape,modifierFlags:[],action:#selector(escape))] }

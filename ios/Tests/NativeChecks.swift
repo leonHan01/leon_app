@@ -210,6 +210,7 @@ final class Checks {
             try expect(!followed,"redirect forwarded credential request")
         }
         try await checkHTTPContracts()
+        try await checkTimeline()
         print("Native core: \(cases) scenarios passed")
     }
 }
