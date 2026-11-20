@@ -9,9 +9,17 @@ mkdir -p "$bundle/Contents/MacOS" "$bundle/Contents/Resources"
 cp .build/release/LeonApp "$bundle/Contents/MacOS/LeonApp.new"
 mv -f "$bundle/Contents/MacOS/LeonApp.new" "$bundle/Contents/MacOS/LeonApp"
 cp "$project_root/macos/Info.plist" "$bundle/Contents/Info.plist"
+ditto .build/release/SwiftMath_SwiftMath.bundle "$bundle/Contents/Resources/SwiftMath_SwiftMath.bundle"
+cp "$project_root/macos/Vendor/SwiftMath/LICENSE" "$bundle/Contents/Resources/SwiftMath-LICENSE.txt"
+ditto "$project_root/shared/markdown/runtime" "$bundle/Contents/Resources/MarkdownRuntime"
 swift "$project_root/scripts/make-icon.swift" "$project_root/dist/Leon.iconset"
 iconutil -c icns "$project_root/dist/Leon.iconset" -o "$bundle/Contents/Resources/Leon.icns"
-codesign --force --sign - "$bundle"
+signing_identity="${LEON_CODESIGN_IDENTITY:-Leon Local Signing}"
+if [ "$signing_identity" = "-" ]; then
+    echo "A persistent signing identity is required for Keychain access across updates." >&2
+    exit 1
+fi
+codesign --force --sign "$signing_identity" "$bundle"
 codesign --verify --deep --strict "$bundle"
 ditto -c -k --keepParent "$bundle" "$project_root/dist/Leon-macOS.zip"
 echo "Built: $bundle"

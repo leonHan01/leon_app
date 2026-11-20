@@ -4,6 +4,13 @@
     <item name="tab_groups" type="id" />
     <item name="tab_settings" type="id" />
     <item name="home_screen" type="id" />
+    <item name="agent_detail_screen" type="id" />
+    <item name="agent_detail_back" type="id" />
+    <item name="agent_detail_name" type="id" />
+    <item name="agent_detail_description" type="id" />
+    <item name="agent_detail_model" type="id" />
+    <item name="agent_detail_chat" type="id" />
+    <item name="agent_detail_new" type="id" />
     <item name="chat_screen" type="id" />
     <item name="home_title" type="id" />
     <item name="home_add" type="id" />

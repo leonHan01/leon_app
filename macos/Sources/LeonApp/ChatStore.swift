@@ -35,6 +35,29 @@ final class ChatStore: ObservableObject {
         return try await api.imageData(id)
     }
     @Published var agents: [AgentInfo] = []
+    @Published var agentDetailId: String?
+    @Published var creatingAgentConversation = false
+    func showAgentDetails(_ agent: AgentInfo) {
+        navigationRequest = UUID()
+        agentDetailId = agent.id
+    }
+    func agentConversations(_ agentId: String) -> [Conversation] {
+        conversations.filter { $0.kind == "direct" && $0.agentId == agentId }
+    }
+    func createAgentConversation(_ agent: AgentInfo, name: String, requestId: String, fromHistory: Bool = false) async {
+        let title = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let api, agent.enabled, !creatingAgentConversation else { return }
+        guard !title.isEmpty, title.utf16.count <= 60 else { error = "对话名称应为 1–60 字"; return }
+        let connection = connectionId, navigation = navigationRequest
+        error = nil; creatingAgentConversation = true
+        defer { if connection == connectionId { creatingAgentConversation = false } }
+        do {
+            let room = try await api.newThread(agentId: agent.id, name: title, requestId: requestId)
+            guard connection == connectionId else { return }
+            if !conversations.contains(where: { $0.id == room.id }) { conversations.append(room) }
+            if navigation == navigationRequest, agentDetailId == agent.id || (fromHistory && agentDetailId == nil) { selectConversation(room.id) }
+        } catch { if connection == connectionId { self.error = friendly(error) } }
+    }
     @Published var showUsage = false
     @Published var modelUsage: [ModelUsage] = []
     @Published var usageBusy = false
@@ -337,6 +360,7 @@ final class ChatStore: ObservableObject {
     var availableAgents: [AgentInfo] { agents.filter { $0.enabled && (selectedConversation?.agentIds.contains($0.id) ?? (selectedConversationId == "shared")) } }
 
     func selectConversation(_ id: String, refresh: Bool = true) {
+        agentDetailId = nil
         navigationRequest = UUID()
         guard id != selectedConversationId else { return }
         rememberRoom()
@@ -482,6 +506,7 @@ final class ChatStore: ObservableObject {
             let rooms = try await candidate.conversations()
             try await Keychain.save(secret)
             generation = UUID(); connectionId = UUID(); avatarSessionKey = UUID().uuidString
+            agentDetailId = nil; creatingAgentConversation = false
             modelUsage = []; usageError = nil; usageLoadedAt = nil; usageBusy = false
             navigationRequest = UUID(); roomCache = [:]; roomCacheOrder = []
             for creation in directCreations.values { creation.task.cancel() }

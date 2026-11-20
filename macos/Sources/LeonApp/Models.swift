@@ -40,6 +40,7 @@ struct AgentInfo: Codable, Identifiable, Equatable {
     let model: String
     let enabled: Bool
     let avatarId: String?
+    var description: String? = nil
 }
 struct ModelUsage: Codable, Identifiable, Equatable {
     var id: String { provider + ":" + model }
@@ -90,6 +91,39 @@ struct ContextOperation: Codable, Identifiable, Equatable {
         if status == "SUCCEEDED" { return result }
         if kind == "ARCHIVE" { return status == "RUNNING" ? "正在生成本轮对话总结…" : "等待生成本轮对话总结…" }
         return status == "RUNNING" ? "上下文压缩中…" : "等待压缩上下文…"
+    }
+}
+
+enum TimelineItem: Identifiable {
+    case message(Message), operation(ContextOperation), job(AgentJob)
+    var id: String {
+        switch self {
+        case .message(let message): return "message:\(message.id)"
+        case .operation(let operation): return "operation:\(operation.id)"
+        case .job(let job): return "job:\(job.id)"
+        }
+    }
+    static func ordered(messages: [Message], operations: [ContextOperation], jobs: [AgentJob]) -> [TimelineItem] {
+        let operations = operations.enumerated().sorted {
+            let left = $0.element.createdAt > 0 ? $0.element.createdAt : Int64.max
+            let right = $1.element.createdAt > 0 ? $1.element.createdAt : Int64.max
+            return left == right ? $0.offset < $1.offset : left < right
+        }.map(\.element)
+        let jobs = jobs.enumerated().sorted {
+            $0.element.messageId == $1.element.messageId ? $0.offset < $1.offset : $0.element.messageId < $1.element.messageId
+        }.map(\.element)
+        var result: [TimelineItem] = []; var operationIndex = 0; var jobIndex = 0
+        for message in messages {
+            while jobIndex < jobs.count && jobs[jobIndex].messageId < message.id { result.append(.job(jobs[jobIndex])); jobIndex += 1 }
+            while operationIndex < operations.count && operations[operationIndex].createdAt > 0 && operations[operationIndex].createdAt <= message.createdAt {
+                result.append(.operation(operations[operationIndex])); operationIndex += 1
+            }
+            result.append(.message(message))
+            while jobIndex < jobs.count && jobs[jobIndex].messageId == message.id { result.append(.job(jobs[jobIndex])); jobIndex += 1 }
+        }
+        while operationIndex < operations.count { result.append(.operation(operations[operationIndex])); operationIndex += 1 }
+        while jobIndex < jobs.count { result.append(.job(jobs[jobIndex])); jobIndex += 1 }
+        return result
     }
 }
 
@@ -251,6 +285,9 @@ final class MessageAPI: @unchecked Sendable {
     }
     func conversations() async throws -> [Conversation] { try await request(URLRequest(url: base.appendingPathComponent("api/conversations"))) }
     func direct(_ agentId: String) async throws -> Conversation { try await post("api/conversations/direct/\(agentId)", body: [String:String]()) }
+    func newThread(agentId: String, name: String, requestId: String) async throws -> Conversation {
+        try await post("api/conversations/direct/\(agentId)/threads", body: ["name": name, "requestId": requestId])
+    }
     func group(name: String, agentIds: [String]) async throws -> Conversation {
         struct Group: Encodable { let name: String; let agentIds: [String] }
         return try await post("api/conversations/groups", body: Group(name: name, agentIds: agentIds))

@@ -39,8 +39,8 @@ final class MessageApi {
         }
     }
     static final class Agent {
-        final String id, name, handle, provider, avatarId; final boolean enabled;
-        Agent(JSONObject j) throws JSONException { id=j.getString("id");name=j.getString("name");handle=j.getString("handle");provider=j.getString("provider");enabled=j.getBoolean("enabled");avatarId=j.optString("avatarId","alfred"); }
+        final String id, name, handle, provider, model, description, avatarId; final boolean enabled;
+        Agent(JSONObject j) throws JSONException { id=j.getString("id");name=j.getString("name");handle=j.getString("handle");provider=j.getString("provider");model=j.isNull("model")?"":j.optString("model");description=j.isNull("description")?"":j.optString("description");enabled=j.getBoolean("enabled");avatarId=j.optString("avatarId","alfred"); }
     }
     static final class Conversation {
         final String id,name,kind,agentId,ownerId; final List<String> agentIds=new ArrayList<>();

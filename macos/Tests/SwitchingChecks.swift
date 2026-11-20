@@ -80,7 +80,12 @@ struct SwitchingChecks {
         var failures = 0
         func check(_ condition: Bool, _ text: String) { print("\(condition ? "PASS" : "FAIL"): \(text)"); if !condition { failures += 1 } }
         store.conversations = [a, b]
+        let previous = store.selectedConversationId
+        store.showAgentDetails(agent("b"))
+        check(store.agentDetailId == "b" && store.selectedConversationId == previous, "Agent details do not open or create a conversation")
+        check(store.agentConversations("b").map(\.id) == [b.id], "Agent history excludes other Agents")
         store.selectConversation(a.id)
+        check(store.agentDetailId == nil, "Opening a history conversation exits the Agent detail page")
         var started = false
         let task = Task { @MainActor in started = true; await store.openDirect(agent("b")) }
         while !started { await Task.yield() }
@@ -89,6 +94,8 @@ struct SwitchingChecks {
         store.selectConversation(a.id)
         let first = message(1, room: a)
         store.messages = [first]; store.draft = "A draft"
+        store.showAgentDetails(agent("b")); store.agentDetailId = nil
+        check(store.selectedConversationId == a.id && store.draft == "A draft" && store.messages == [first], "Returning from a message Agent profile preserves the original chat and draft")
         let picture = ChatImageDraft(id: UUID().uuidString.lowercased(), data: Data([1, 2, 3]))
         store.draftImages = [picture]
         store.selectConversation(b.id); store.draft = "B draft"; store.draftImages = []
@@ -162,6 +169,20 @@ struct SwitchingChecks {
         check(store.sidebarConversations.map(\.id) == [group.id, orphan.id], "sidebar removes duplicate known Agent rooms and keeps group/orphan history")
         check(store.sidebarAgents.map(\.id) == ["a", "b", "c"], "disabled Agent history remains accessible through its single entry")
         check(store.isSelected(agent("b")), "selected Agent is highlighted on its remaining entry")
+
+        let thread = Conversation(id: "thread:a:1", name: "New topic", kind: "direct", agentId: "a", agentIds: ["a"])
+        FixtureProtocol.fixture.setup(holding: [], responses: ["/api/conversations/direct/a/threads": try JSONEncoder().encode(thread)])
+        store.selectConversation(a.id)
+        await store.createAgentConversation(agent("a"), name: "New topic", requestId: UUID().uuidString, fromHistory: true)
+        check(store.selectedConversationId == thread.id && store.agentConversations("a").contains(thread), "creating from Agent history opens a separate conversation")
+        let later = Conversation(id: "thread:a:2", name: "Later", kind: "direct", agentId: "a", agentIds: ["a"])
+        FixtureProtocol.fixture.setup(holding: ["/api/conversations/direct/a/threads"], responses: ["/api/conversations/direct/a/threads": try JSONEncoder().encode(later)])
+        let newThread = Task { @MainActor in await store.createAgentConversation(agent("a"), name: "Later", requestId: UUID().uuidString, fromHistory: true) }
+        _ = await waitFor { FixtureProtocol.fixture.paths().contains("/api/conversations/direct/a/threads") }
+        store.selectConversation(b.id)
+        FixtureProtocol.fixture.release("/api/conversations/direct/a/threads")
+        await newThread.value
+        check(store.selectedConversationId == b.id && store.agentConversations("a").contains(later), "late creation preserves the newer selection and keeps the new conversation")
 
         store.selectConversation(a.id)
         store.messages = (1...350).map { message(Int64($0), room: a) }

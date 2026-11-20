@@ -1,0 +1,44 @@
+--- a/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java
++++ b/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java
+@@ -135,7 +135,7 @@
+         if(input==null) throw bad("消息不能为空"); uuid(input.clientMessageId()); uuid(input.deviceId()); mentions(input);
+         String name=input.sender()==null?"":input.sender().strip();
+         if(name.isBlank()||name.length()>60||name.codePoints().anyMatch(Character::isISOControl)) throw bad("设备名称应为 1–60 字且不能含控制字符");
+-        if(!Set.of("macos","android").contains(input.platform()==null?"":input.platform())) throw bad("设备平台无效");
++        if(!Set.of("macos","android","ios").contains(input.platform()==null?"":input.platform())) throw bad("设备平台无效");
+         if(input.text()==null||(input.text().isBlank()&&imageIds(input).isEmpty())||input.text().length()>8000||input.text().indexOf('\0')>=0) throw bad("消息应为 1–8000 字符");
+     }
+     public synchronized Message retry(Send input) { return retry(input,null); }
+--- a/src/main/java/com/leon/workflow/messaging/DevicePresenceService.java
++++ b/src/main/java/com/leon/workflow/messaging/DevicePresenceService.java
+@@ -19,7 +19,7 @@
+         if(input==null) throw DeviceMessageStore.failure(HttpStatus.BAD_REQUEST,"设备信息不能为空");
+         String id=DeviceMessageStore.uuid(input.deviceId()),name=input.name()==null?"":input.name().strip();
+         if(name.isBlank()||name.length()>60||name.codePoints().anyMatch(Character::isISOControl)) throw DeviceMessageStore.failure(HttpStatus.BAD_REQUEST,"设备名称应为 1–60 字");
+-        if(!Set.of("macos","android").contains(input.platform()==null?"":input.platform())) throw DeviceMessageStore.failure(HttpStatus.BAD_REQUEST,"设备平台无效");
++        if(!Set.of("macos","android","ios").contains(input.platform()==null?"":input.platform())) throw DeviceMessageStore.failure(HttpStatus.BAD_REQUEST,"设备平台无效");
+         long now=clock.millis();prune(now);
+         if(!devices.containsKey(id)&&devices.size()>=1024) throw DeviceMessageStore.failure(HttpStatus.TOO_MANY_REQUESTS,"在线设备数量已达上限");
+         var device=new Device(id,name,input.platform(),now);devices.put(id,device);return device;
+--- a/src/main/java/com/leon/workflow/messaging/ChatBackupService.java
++++ b/src/main/java/com/leon/workflow/messaging/ChatBackupService.java
+@@ -133,7 +133,7 @@
+         }
+         var ids=new HashMap<Long,DeviceMessageStore.Message>();var usedImages=new HashSet<String>();long previous=0;
+         for(var m:backup.messages()){
+-            if(m==null||m.id()<=previous||!Set.of("user","assistant").contains(m.role())||!Set.of("macos","android","agent").contains(m.platform())||!text(m.sender(),60)||m.text()==null||m.text().length()>8000||m.text().indexOf('\0')>=0||m.createdAt()<0||m.images()==null||m.images().size()>4)throw bad("备份消息无效");
++            if(m==null||m.id()<=previous||!Set.of("user","assistant").contains(m.role())||!Set.of("macos","android","ios","agent").contains(m.platform())||!text(m.sender(),60)||m.text()==null||m.text().length()>8000||m.text().indexOf('\0')>=0||m.createdAt()<0||m.images()==null||m.images().size()>4)throw bad("备份消息无效");
+             DeviceMessageStore.uuid(m.deviceId());
+             if(!Objects.equals(m.conversationId(),room.id()))throw bad("备份消息会话不匹配");
+             if(m.role().equals("assistant")){DeviceMessageStore.uuid(m.agentId());if(!room.agentIds().contains(m.agentId())&&!ChatAccess.personalRoom(room.id()))throw bad("备份回复 Agent 无效");}
+--- a/src/main/resources/static/workspace/agents.js
++++ b/src/main/resources/static/workspace/agents.js
+@@ -63,7 +63,7 @@
+         if (!state.devices.length) $('onlineDevices').append(node('p', '暂无在线设备。打开已连接的 App 后自动显示。', 'subtle'));
+         for (const device of state.devices) {
+             const row = node('div', null, 'presence-device');
+-            row.append(node('span', '', 'presence-dot'), node('strong', device.name), node('small', (device.platform === 'macos' ? 'macOS' : 'Android') + ' · ' + Math.max(0, Math.floor((Date.now() - device.lastSeenAt) / 1000)) + ' 秒前活跃'));
++            row.append(node('span', '', 'presence-dot'), node('strong', device.name), node('small', ({ macos: 'macOS', android: 'Android', ios: 'iOS' }[device.platform] || device.platform) + ' · ' + Math.max(0, Math.floor((Date.now() - device.lastSeenAt) / 1000)) + ' 秒前活跃'));
+             $('onlineDevices').append(row);
+         }
+     } catch (error) { if (epoch === presenceEpoch && viewActive) { $('onlineCount').textContent = '—'; $('onlineDevices').replaceChildren(node('p', '设备状态暂时不可用，下次自动重试。', 'subtle')); } }

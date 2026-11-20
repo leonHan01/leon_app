@@ -157,29 +157,17 @@ final class ChatTools {
         });
     }
     private void discardBackup(){if(session.pendingBackup!=null)session.pendingBackup.delete();session.pendingBackup=null;}
-    void conversations(){
-        if(session.selected()!=null&&session.selected().kind.equals("direct")){conversationsFor(session.selected().agentId);return;}
-        chooseAgent(agent->conversationsFor(agent.id));
+    void newConversation(){
+        if(!ready())return;
+        chooseAgent(this::newConversation);
     }
-    void conversationsFor(String agentId){
-        MessageApi.Agent found=null;for(var agent:session.agents)if(agent.id.equals(agentId)){found=agent;break;}
-        if(found==null){toast("Agent 已不存在");return;}MessageApi.Agent agent=found;
-        showConversations(agent);
-    }
-    private void showConversations(MessageApi.Agent agent){
-        if(!live())return;
-        var rooms=session.agentConversations(agent.id);String[] labels=new String[rooms.size()];
-        for(int i=0;i<labels.length;i++){var room=rooms.get(i);labels[i]=(room.id.equals(session.selectedConversation)?"当前 · ":"")+room.name+(room.id.equals("direct:"+agent.id)?" · 原对话":"");}
-        show(new AlertDialog.Builder(activity).setTitle(agent.name+" 的对话（"+rooms.size()+"）").setItems(labels,(d,index)->openRoom.accept(rooms.get(index)))
-            .setNegativeButton("关闭",null).setNeutralButton("刷新",(d,w)->{
-                if(!ready())return;session.tool("正在更新对话列表…",MessageApi::conversations,list->{session.replaceConversations(list);showConversations(agent);});
-            }).setPositiveButton("新建对话",(d,w)->newConversation(agent)).create());
-    }
-    private void newConversation(MessageApi.Agent agent){
+    void newConversation(MessageApi.Agent agent){
         if(!ready())return;
         EditText name=new EditText(activity);name.setSingleLine();name.setInputType(InputType.TYPE_CLASS_TEXT);String defaultName="新对话 · "+new SimpleDateFormat("MM-dd HH:mm",Locale.CHINA).format(new Date());name.setText(defaultName);
         String request=UUID.randomUUID().toString();
-        AlertDialog next=new AlertDialog.Builder(activity).setTitle("与 "+agent.name+" 新建对话").setView(name).setNegativeButton("取消",null).setPositiveButton("创建",null).create();
+        AlertDialog next=new AlertDialog.Builder(activity).setTitle("与 "+agent.name+" 新建对话")
+            .setMessage("新对话将从空白开始，不携带当前对话的消息和上下文。原对话可从 Agent 主页查看。")
+            .setView(name).setNegativeButton("取消",null).setPositiveButton("创建",null).create();
         show(next);next.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v->{
             if(!ready())return;String title=name.getText().toString().trim();if(title.isEmpty()||title.length()>60){name.setError("名称应为 1–60 字");return;}
             session.tool("正在新建对话…",api->api.newThread(agent.id,request,title),room->{next.dismiss();session.addConversation(room);if(live())openRoom.accept(room);});

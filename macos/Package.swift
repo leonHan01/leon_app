@@ -5,7 +5,10 @@ let package = Package(
     name: "LeonApp",
     platforms: [.macOS(.v13)],
     products: [.executable(name: "LeonApp", targets: ["LeonApp"])],
+    dependencies: [
+        .package(path: "Vendor/SwiftMath")
+    ],
     targets: [
-        .executableTarget(name: "LeonApp")
+        .executableTarget(name: "LeonApp", dependencies: ["SwiftMath"])
     ]
 )

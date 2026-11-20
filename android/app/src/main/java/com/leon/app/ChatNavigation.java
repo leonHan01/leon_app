@@ -6,11 +6,14 @@ final class ChatNavigation {
     Tab tab = Tab.AGENTS;
     boolean inChat;
     boolean attachments;
+    String agentId="";
 
-    void tab(Tab selected) { tab=selected; inChat=false; attachments=false; }
-    void chat() { inChat=true; attachments=false; }
+    void tab(Tab selected) { tab=selected; inChat=false; attachments=false; agentId=""; }
+    void agent(String id) { agentId=id; attachments=false; }
+    void chat() { inChat=true; attachments=false; agentId=""; }
     boolean back() {
         if (attachments) { attachments=false; return true; }
+        if (!agentId.isEmpty()) { agentId=""; return true; }
         if (inChat) { inChat=false; return true; }
         return false;
     }

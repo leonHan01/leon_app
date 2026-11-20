@@ -8,3 +8,5 @@ android/**/build/
 *.keystore
 *.jks
 .tools/
+shared/markdown/node_modules/
+shared/markdown/test-results/

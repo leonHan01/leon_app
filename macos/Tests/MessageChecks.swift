@@ -26,6 +26,7 @@ struct MessageChecks {
         try commandChecks()
         try endpointChecks()
         try decodingChecks()
+        try timelineChecks()
         try await usageChecks()
         try mentionChecks()
         try check(HTTPFailure.message(for: 401)?.contains("令牌") == true, "401 must explain authentication failure")
@@ -44,6 +45,15 @@ struct MessageChecks {
                 print("PASS: Agent directory, private conversation isolation, group creation and mention job protocol")
             }
         } else { print("SKIP: isolated HTTP checks (set LEONAPP_TEST_SERVER and LEONAPP_TEST_TOKEN)") }
+    }
+    static func timelineChecks() throws {
+        let data = Data(#"{"messages":[{"id":1,"clientMessageId":"a","deviceId":"d","sender":"me","platform":"macos","text":"first","createdAt":1000},{"id":2,"clientMessageId":"b","deviceId":"d","sender":"me","platform":"macos","text":"later","createdAt":3000}],"hasMore":false}"#.utf8)
+        let messages = try JSONDecoder().decode(MessagePage.self, from: data).messages
+        let job = AgentJob(messageId: 1, agentId: "sol", agentName: "Sol", status: "FAILED", error: "failed", phase: nil)
+        let operation = ContextOperation(id: "compact", agentId: "sol", agentName: "Sol", status: "FAILED", error: "failed", result: "", createdAt: 2000)
+        let items = TimelineItem.ordered(messages: messages, operations: [operation], jobs: [job])
+        try check(items.map(\.id) == ["message:1", "job:1:sol", "operation:compact", "message:2"], "Failures and context notices must remain in the conversation timeline")
+        try check(TimelineItem.ordered(messages: messages, operations: [], jobs: [job]).map(\.id) == ["message:1", "job:1:sol", "message:2"], "A failed reply must remain after its triggering message")
     }
     static func commandChecks() throws {
         try check(ChatCommand.query(in: "/", selection: NSRange(location: 1, length: 0)) == "", "Slash did not open commands")
@@ -94,6 +104,12 @@ struct MessageChecks {
         }
     }
     static func decodingChecks() throws {
+        let oldAgent = Data(#"{"id":"writer","name":"写作助手","handle":"writer","provider":"openai","model":"test-model","enabled":true}"#.utf8)
+        let legacy = try JSONDecoder().decode(AgentInfo.self, from: oldAgent)
+        try check(legacy.description == nil, "Old Agent responses must remain compatible")
+        let newAgent = Data(#"{"id":"writer","name":"写作助手","handle":"writer","provider":"openai","model":"test-model","enabled":true,"description":"梳理思路与润色文字"}"#.utf8)
+        let profile = try JSONDecoder().decode(AgentInfo.self, from: newAgent)
+        try check(profile.description == "梳理思路与润色文字" && profile.model == "test-model", "Agent profile metadata was lost")
         let data = Data(#"{"messages":[{"id":1,"clientMessageId":"client","deviceId":"device","sender":"手机","platform":"android","text":"你好 🚀\n第二行","createdAt":1700000000123}],"hasMore":false}"#.utf8)
         let page = try JSONDecoder().decode(MessagePage.self, from: data)
         try check(page.messages[0].text == "你好 🚀\n第二行", "Unicode/newline decoding failed")

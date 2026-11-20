@@ -27,6 +27,7 @@ struct LeonApp: App {
 
 struct ContentView: View {
     @ObservedObject var store: ChatStore
+    @State private var historyAgentId: String?
     private let accent = Color(red: 0.18, green: 0.36, blue: 0.89)
     var body: some View {
         HStack(spacing: 0) {
@@ -56,15 +57,18 @@ struct ContentView: View {
                         }
                         Text("AGENTS · 私聊").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary).padding(.top, 18)
                         ForEach(store.sidebarAgents) { agent in
-                            Button { store.selectAgent(agent) } label: {
+                            Button {
+                                historyAgentId = agent.id
+                                store.selectAgent(agent)
+                            } label: {
                                 HStack(spacing: 9) {
                                     AgentAvatarView(store: store, avatarId: agent.avatarId ?? "alfred")
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(agent.name).lineLimit(1)
                                         Text("@\(agent.handle) · \(agent.enabled ? agent.provider : "已停用")").font(.system(size: 10)).foregroundStyle(.secondary)
-                                    }
+                                    }.frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
                                 }.padding(9).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                                    .background(store.isSelected(agent) ? accent.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 9))
+                                    .background((store.agentDetailId == agent.id || store.agentDetailId == nil && store.isSelected(agent)) ? accent.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 9))
                             }.buttonStyle(.plain)
                         }
                     }
@@ -79,10 +83,19 @@ struct ContentView: View {
                 }.buttonStyle(.plain).padding(.bottom, 18)
             }.padding(.horizontal, 20).frame(width: 208).frame(maxHeight: .infinity).background(.regularMaterial)
             Divider()
+            if let agentId = store.agentDetailId {
+                AgentDetailView(store: store, agentId: agentId).id(agentId)
+            } else {
+            if let agentId = historyAgentId, let agent = store.agents.first(where: { $0.id == agentId }) {
+                AgentConversationSidebar(store: store, agent: agent).id(agentId)
+                Divider()
+            }
             VStack(spacing: 0) {
                 HStack {
                     if store.selectedConversation?.kind == "direct" {
-                        AgentAvatarView(store: store, avatarId: store.avatarId(for: store.selectedConversation?.agentId), size: 42)
+                        Button { if let agent = store.agents.first(where: { $0.id == store.selectedConversation?.agentId }) { store.showAgentDetails(agent) } } label: {
+                            AgentAvatarView(store: store, avatarId: store.avatarId(for: store.selectedConversation?.agentId), size: 42)
+                        }.buttonStyle(.plain).accessibilityLabel("查看 Agent 详情").help("查看 Agent 详情")
                     }
                     VStack(alignment: .leading, spacing: 5) {
                         Text(store.title).font(.system(size: 19, weight: .semibold))
@@ -124,6 +137,7 @@ struct ContentView: View {
                     }
                 }.padding(20)
             }.background(Color(nsColor: .windowBackgroundColor))
+            }
         }
         .sheet(isPresented: $store.showSettings) { ConnectionView(store: store) }
         .sheet(isPresented: $store.showNewGroup) { NewGroupView(store: store) }
@@ -134,7 +148,13 @@ struct ContentView: View {
         .alert("暂未完成", isPresented: Binding(get: { store.error != nil && !store.showSettings && !store.showNewGroup && !store.showContext && !store.showUsage && !store.showEndRound && !store.showClearHistory }, set: { if !$0 { store.error = nil } })) {
             Button("知道了") { store.error = nil }
         } message: { Text(store.error ?? "") }
-        .onAppear { NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true) }
+        .onAppear {
+            historyAgentId = store.selectedConversation?.kind == "direct" ? store.selectedConversation?.agentId : nil
+            NSApp.setActivationPolicy(.regular); NSApp.activate(ignoringOtherApps: true)
+        }
+        .onChange(of: store.selectedConversationId) { _ in
+            historyAgentId = store.selectedConversation?.kind == "direct" ? store.selectedConversation?.agentId : nil
+        }
     }
 
     private var timeline: some View {
@@ -155,9 +175,39 @@ struct ContentView: View {
                             Text("选择 Agent 开始私聊，\n或在群聊中 @指定 Agent。").font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
                         }.frame(maxWidth: .infinity).padding(.vertical, 100)
                     }
-                    ForEach(store.messages) { message in
+                    ForEach(TimelineItem.ordered(messages: store.messages, operations: store.contextOperations, jobs: store.visibleJobs)) { item in
+                        switch item {
+                        case .message(let message):
                         bubble(text: message.text, sender: message.sender, detail: (message.role == "assistant" ? "Agent · " : "") + message.date.formatted(date: .abbreviated, time: .shortened), mine: message.deviceId == store.deviceId, agentId: message.agentId, imageIds: (message.images ?? []).map(\.id))
                             .id(message.id)
+                        case .operation(let operation):
+                        HStack(alignment: .top) {
+                            if operation.active { ProgressView().controlSize(.small) }
+                            else { Image(systemName: operation.status == "FAILED" ? "exclamationmark.bubble" : "checkmark.circle") }
+                            Text("\(operation.agentName) · \(operation.progressText)").font(.caption)
+                            Spacer()
+                            if operation.status == "FAILED", operation.kind != "ARCHIVE" {
+                                Button("重试压缩") { Task { await store.compactContext(agentId: operation.agentId) } }
+                                    .buttonStyle(.borderless).disabled(store.contextActionActive)
+                            }
+                            Button("查看摘要") { store.showContext = true }.buttonStyle(.borderless)
+                        }.foregroundStyle(.secondary).padding(12).background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
+                        case .job(let job):
+                        HStack(alignment: .top) {
+                            Image(systemName: job.status == "FAILED" ? "exclamationmark.bubble" : "ellipsis.bubble")
+                            if job.status == "RUNNING" { ProgressView().controlSize(.small) }
+                            Text("\(job.agentName) · \(job.progressText)").font(.caption)
+                                .accessibilityLabel("\(job.agentName) · \(job.progressText)")
+                            Spacer()
+                            if job.status == "FAILED" {
+                                Button("重试回复") { Task { await store.retryJob(job) } }.buttonStyle(.borderless)
+                                Button { store.dismissJob(job) } label: { Image(systemName: "xmark") }
+                                    .buttonStyle(.borderless)
+                                    .help("忽略此失败提示（仅这台 Mac，保留原消息）")
+                                    .accessibilityLabel("忽略 \(job.agentName) 的失败提示")
+                            }
+                        }.foregroundStyle(.secondary).padding(12).background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
+                        }
                     }
                     ForEach(store.currentPending) { message in
                         VStack(alignment: .trailing, spacing: 6) {
@@ -173,35 +223,6 @@ struct ContentView: View {
                             Text(store.exportProgress).font(.caption)
                             Spacer()
                         }.padding(12).background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
-                    }
-                    ForEach(store.contextOperations) { operation in
-                        HStack(alignment: .top) {
-                            if operation.active { ProgressView().controlSize(.small) }
-                            else { Image(systemName: operation.status == "FAILED" ? "exclamationmark.bubble" : "checkmark.circle") }
-                            Text("\(operation.agentName) · \(operation.progressText)").font(.caption)
-                            Spacer()
-                            if operation.status == "FAILED", operation.kind != "ARCHIVE" {
-                                Button("重试压缩") { Task { await store.compactContext(agentId: operation.agentId) } }
-                                    .buttonStyle(.borderless).disabled(store.contextActionActive)
-                            }
-                            Button("查看摘要") { store.showContext = true }.buttonStyle(.borderless)
-                        }.foregroundStyle(.secondary).padding(12).background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
-                    }
-                    ForEach(store.visibleJobs) { job in
-                        HStack(alignment: .top) {
-                            Image(systemName: job.status == "FAILED" ? "exclamationmark.bubble" : "ellipsis.bubble")
-                            if job.status == "RUNNING" { ProgressView().controlSize(.small) }
-                            Text("\(job.agentName) · \(job.progressText)").font(.caption)
-                                .accessibilityLabel("\(job.agentName) · \(job.progressText)")
-                            Spacer()
-                            if job.status == "FAILED" {
-                                Button("重试回复") { Task { await store.retryJob(job) } }.buttonStyle(.borderless)
-                                Button { store.dismissJob(job) } label: { Image(systemName: "xmark") }
-                                    .buttonStyle(.borderless)
-                                    .help("忽略此失败提示（仅这台 Mac，保留原消息）")
-                                    .accessibilityLabel("忽略 \(job.agentName) 的失败提示")
-                            }
-                        }.foregroundStyle(.secondary).padding(12).background(.quaternary, in: RoundedRectangle(cornerRadius: 9))
                     }
                     if store.dismissedFailureCount > 0 {
                         Button("恢复已忽略的失败提示（\(store.dismissedFailureCount)）") { store.restoreDismissedJobs() }
@@ -220,7 +241,11 @@ struct ContentView: View {
             if mine { Spacer(minLength: 70) }
             VStack(alignment: mine ? .trailing : .leading, spacing: 6) {
                 HStack(spacing: 7) {
-                    if let agentId { AgentAvatarView(store: store, avatarId: store.avatarId(for: agentId), size: 28) }
+                    if let agentId, let agent = store.agents.first(where: { $0.id == agentId }) {
+                        Button { store.showAgentDetails(agent) } label: {
+                            AgentAvatarView(store: store, avatarId: store.avatarId(for: agentId), size: 28)
+                        }.buttonStyle(.plain).help("查看 \(agent.name) 的详情")
+                    }
                     Text(sender).font(.caption).foregroundStyle(.secondary)
                 }
                 VStack(alignment: .leading, spacing: 10) {

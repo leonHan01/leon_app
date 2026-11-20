@@ -16,17 +16,24 @@ import io.noties.markwon.ext.strikethrough.StrikethroughPlugin;
 import io.noties.markwon.ext.tables.TableAwareMovementMethod;
 import io.noties.markwon.ext.tables.TablePlugin;
 import io.noties.markwon.ext.tables.TableTheme;
+import io.noties.markwon.ext.latex.JLatexMathPlugin;
+import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin;
 import io.noties.markwon.linkify.LinkifyPlugin;
 import io.noties.markwon.SoftBreakAddsNewLinePlugin;
 import org.commonmark.ext.gfm.tables.TableBlock;
 import org.commonmark.node.Node;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import ru.noties.jlatexmath.JLatexMathAndroid;
 
 /** Native TextView rendering. Reuse the parsers across messages and timeline refreshes. */
 final class MessageMarkdown {
+    private static final ExecutorService MATH_EXECUTOR = Executors.newFixedThreadPool(2);
     private final Markwon incoming;
     private final Markwon outgoing;
 
     MessageMarkdown(Context context) {
+        JLatexMathAndroid.init(context);
         incoming = renderer(context, false);
         outgoing = renderer(context, true);
     }
@@ -48,6 +55,9 @@ final class MessageMarkdown {
 
     private static Markwon renderer(Context context, boolean mine) {
         float density = context.getResources().getDisplayMetrics().density;
+        float textSize = android.util.TypedValue.applyDimension(android.util.TypedValue.COMPLEX_UNIT_SP,
+                14, context.getResources().getDisplayMetrics());
+        var mathInline = MathMarkdown.inlineBuilder();
         int foreground = ChatUi.INK;
         int inset = mine ? 0x22000000 : 0x0E1C2437;
         TableTheme tableTheme = TableTheme.buildWithDefaults(context)
@@ -59,12 +69,28 @@ final class MessageMarkdown {
                 .tableEvenRowBackgroundColor(Color.TRANSPARENT)
                 .build();
         return Markwon.builder(context)
+                .usePlugin(MarkwonInlineParserPlugin.create(mathInline))
+                .usePlugin(new AbstractMarkwonPlugin() {
+                    @Override public void configureParser(org.commonmark.parser.Parser.Builder builder) {
+                        builder.customBlockParserFactory(new MathMarkdown.BlockFactory());
+                    }
+                })
+                .usePlugin(JLatexMathPlugin.create(textSize, builder -> {
+                    builder.inlinesEnabled(true);
+                    builder.executorService(MATH_EXECUTOR);
+                    // On an invalid command, Markwon leaves the original formula text visible.
+                    builder.errorHandler((latex, error) -> null);
+                    builder.theme().textColor(ChatUi.INK).blockFitCanvas(true);
+                }))
                 .usePlugin(SoftBreakAddsNewLinePlugin.create())
                 .usePlugin(StrikethroughPlugin.create())
                 .usePlugin(TablePlugin.create(tableTheme))
                 .usePlugin(LinkifyPlugin.create(Linkify.WEB_URLS))
                 .usePlugin(MovementMethodPlugin.create(TableAwareMovementMethod.create()))
                 .usePlugin(new AbstractMarkwonPlugin() {
+                    @Override public void configureParser(org.commonmark.parser.Parser.Builder builder) {
+                        builder.inlineParserFactory(parserContext -> new CjkEmphasisParser(parserContext, mathInline.build()));
+                    }
                     @Override public void configureTheme(MarkwonTheme.Builder builder) {
                         builder.headingTextSizeMultipliers(new float[]{1.3f, 1.2f, 1.15f, 1.1f, 1.05f, 1f})
                                 .linkColor(mine ? 0xFF176844 : 0xFF287A5B)
