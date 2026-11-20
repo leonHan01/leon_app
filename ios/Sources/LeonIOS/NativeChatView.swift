@@ -74,6 +74,11 @@ struct NativeChatView: View {
     }
     private var chatMenu:some View {
         Menu {
+            Button("查看 Agent 信息") {
+                if store.selected?.direct == true,let id = store.selected?.agentId,!id.isEmpty {showAgentProfile(id)}
+                else if store.availableAgents.isEmpty {store.error = "当前会话暂无可查看的 Agent"}
+                else {choosingAgent = "profile"}
+            }.accessibilityIdentifier("chat_agent_info")
             Button("会话信息") {panel = .members(store.selected ?? Conversation(id:store.roomID,name:"聊天",kind:"group",agentId:nil,agentIds:[]),false)}
             if store.selected?.kind == "group" {Button("群成员") {if let room = store.selected {panel = .members(room,true)}}}
             Button("Token 用量",action:openUsage)
@@ -227,7 +232,7 @@ struct NativeChatView: View {
                 }
             }
             if choosingAgent != nil {
-                MobileDialog(title:choosingAgent == "mention" ? "@哪位 Agent" : "选择 Agent",close:{choosingAgent = nil}) {
+                MobileDialog(title:choosingAgent == "profile" ? "查看哪位 Agent" : choosingAgent == "mention" ? "@哪位 Agent" : "选择 Agent",close:{choosingAgent = nil}) {
                     ForEach(store.availableAgents) {agent in
                         Button {let action = choosingAgent ?? "mention";choosingAgent = nil;perform(action,agent:agent)} label:{
                             HStack(spacing:12) {AgentAvatar(store:store,agent:agent,size:40);VStack(alignment:.leading,spacing:3) {Text(agent.name).font(.system(size:15));Text("@\(agent.handle)").font(.system(size:11)).foregroundStyle(MobileStyle.muted)};Spacer(minLength:0)}.foregroundStyle(MobileStyle.ink).padding(.vertical,10).contentShape(Rectangle())
@@ -238,6 +243,7 @@ struct NativeChatView: View {
         }
     }
     private func hideKeyboard() {UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder),to:nil,from:nil,for:nil)}
+    private func showAgentProfile(_ id:String) {hideKeyboard();extras = false;openAgent(id)}
     private func back() {if extras {extras = false} else {hideKeyboard();dismiss()}}
     private func send() {
         guard !composing else {return};let origin = store.imageOrigin
@@ -255,6 +261,7 @@ struct NativeChatView: View {
     }
     private func perform(_ command:String,agent:AgentInfo) {
         switch command {
+        case "profile":showAgentProfile(agent.id)
         case "new":panel = .new(agent,UUID().uuidString.lowercased(),store.imageOrigin)
         case "compact":
             let room = store.roomID,key = "\(store.roomID):\(agent.id)",request = compactRequests["\(store.roomID):\(agent.id)"] ?? UUID().uuidString.lowercased()

@@ -162,6 +162,13 @@ struct NativeComposer: UIViewRepresentable {
         view.heightChanged = {next in DispatchQueue.main.async {if abs(context.coordinator.parent.height-next)>0.5 {context.coordinator.parent.height = next}}}
         view.reportHeight()
     }
+    func sizeThatFits(_ proposal:ProposedViewSize,uiView:ComposerTextView,context:Context) -> CGSize? {
+        // Once scrolling is disabled for a short draft, UITextView's intrinsic
+        // width follows typed text. Accept the row's width instead, so wrapping
+        // and height reporting cannot push the attachment/send controls away.
+        guard let width = proposal.width,width.isFinite else {return nil}
+        return CGSize(width:max(0,width),height:proposal.height ?? height)
+    }
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     final class Coordinator: NSObject, UITextViewDelegate, UITextPasteDelegate {
         var parent: NativeComposer

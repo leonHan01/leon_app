@@ -47,6 +47,7 @@ struct AgentProfileView: View {
                     }
                 }
             }.onAppear {visible = true}.onDisappear {visible = false}
+            .task {await store.refreshDirectory()}
     }
     private func profile(_ agent: AgentInfo) -> some View {
         VStack(alignment:.leading,spacing:0) {

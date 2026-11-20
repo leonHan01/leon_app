@@ -318,9 +318,12 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     private void sendCurrent(){if(session.sendDraft(composer.getText().toString())){composer.setText("");navigation.attachments=false;extras.setVisibility(View.GONE);chatAdd.setRotation(0);scroll.post(()->scroll.fullScroll(View.FOCUS_DOWN));}}
     private void showChatMenu(View anchor){
         PopupMenu menu=new PopupMenu(this,anchor);
-        var room=session.selected();
-        if(room!=null&&room.kind.equals("direct")&&!room.agentId.isEmpty())
-            menu.getMenu().add("Agent 详情").setOnMenuItemClickListener(item->{openAgentDetails(room.agentId);return true;});
+        menu.getMenu().add("查看 Agent 信息").setOnMenuItemClickListener(item->{
+            var room=session.selected();
+            if(room!=null&&room.kind.equals("direct")&&!room.agentId.isEmpty())openAgentDetails(room.agentId);
+            else showAgents(false,true);
+            return true;
+        });
         menu.getMenu().add("会话信息").setOnMenuItemClickListener(item->{showConversationInfo();return true;});
         if(session.selected()!=null&&session.selected().kind.equals("group"))
             menu.getMenu().add("群成员").setOnMenuItemClickListener(item->{showGroupMembers();return true;});
@@ -616,9 +619,12 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     }
 
     private void showAgents(boolean mention) {
+        showAgents(mention,false);
+    }
+    private void showAgents(boolean mention,boolean details) {
         java.util.List<MessageApi.Agent> directory=new java.util.ArrayList<>();
-        for(MessageApi.Agent agent:mention?session.availableAgents():session.agents)if(agent.enabled)directory.add(agent);
-        if(directory.isEmpty()){Toast.makeText(this,"请先在服务端页面配置并启用 Agent",Toast.LENGTH_LONG).show();return;}
+        for(MessageApi.Agent agent:mention||details?session.availableAgents():session.agents)if(agent.enabled)directory.add(agent);
+        if(directory.isEmpty()){Toast.makeText(this,details?"当前会话暂无可查看的 Agent":"请先在服务端页面配置并启用 Agent",Toast.LENGTH_LONG).show();return;}
         String[] labels=new String[directory.size()];for(int i=0;i<labels.length;i++)labels[i]=directory.get(i).name+"  @"+directory.get(i).handle;
         ArrayAdapter<MessageApi.Agent> adapter=new ArrayAdapter<MessageApi.Agent>(this,android.R.layout.simple_list_item_1,directory){
             @Override public View getView(int position,View recycled,android.view.ViewGroup parent){
@@ -626,7 +632,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
                 item.addView(avatar(agent.avatarId,40));LinearLayout identity=column();identity.setPadding(dp(12),0,0,0);identity.addView(text(agent.name,15,INK));identity.addView(text("@"+agent.handle,11,MUTED));item.addView(identity);return item;
             }
         };
-        new AlertDialog.Builder(this).setTitle(mention?"@哪位 Agent":"与 Agent 私聊").setAdapter(adapter,(d,index)->{if(mention)session.mention(directory.get(index));else openAgent(directory.get(index));}).setNegativeButton("取消",null).show();
+        new AlertDialog.Builder(this).setTitle(details?"查看哪位 Agent":mention?"@哪位 Agent":"与 Agent 私聊").setAdapter(adapter,(d,index)->{if(details)openAgentDetails(directory.get(index).id);else if(mention)session.mention(directory.get(index));else openAgent(directory.get(index));}).setNegativeButton("取消",null).show();
     }
     private void showNewGroup() {
         if(!session.configured())return;

@@ -216,12 +216,31 @@ public class ChatScreensTest {
         input().setText("保留草稿");view(R.id.chat_more).performClick();
         var menu=org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu().getMenu();
         assertNotNull(menu.findItem(menu.getItem(0).getItemId()));
-        assertEquals("Agent 详情",menu.getItem(0).getTitle().toString());
+        assertEquals("查看 Agent 信息",menu.getItem(0).getTitle().toString());
         assertEquals("会话信息",menu.getItem(1).getTitle().toString());
         menu.performIdentifierAction(menu.getItem(0).getItemId(),0);
         assertTrue(view(R.id.agent_detail_screen).isShown());
         assertEquals("Luna",((TextView)view(R.id.agent_detail_name)).getText().toString());
+        assertEquals("帮你梳理思路，规划轻松的日常。",((TextView)view(R.id.agent_detail_description)).getText().toString());
+        assertNotNull(tagged("agent-history:direct:luna"));
+        assertNull(activity.getWindow().getDecorView().findViewWithTag("agent-history:direct:sol"));
         activity.onBackPressed();assertChat("Luna");assertEquals("保留草稿",input().getText().toString());
+    }
+    @Test public void groupMenuChoosesAgentWithoutOpeningAPrivateChat() {
+        view(R.id.tab_groups).performClick();tagged("group:shared").performClick();
+        input().setText("保留群聊草稿");view(R.id.chat_more).performClick();
+        var menu=org.robolectric.shadows.ShadowPopupMenu.getLatestPopupMenu().getMenu();
+        assertEquals("查看 Agent 信息",menu.getItem(0).getTitle().toString());
+        menu.performIdentifierAction(menu.getItem(0).getItemId(),0);
+        var chooser=(android.app.AlertDialog)org.robolectric.shadows.ShadowDialog.getLatestDialog();
+        assertNotNull(chooser);
+        chooser.getListView().performItemClick(null,1,1);
+        assertTrue(view(R.id.agent_detail_screen).isShown());
+        assertEquals("Sol",((TextView)view(R.id.agent_detail_name)).getText().toString());
+        assertNotNull(tagged("agent-history:direct:sol"));
+        assertNull(activity.getWindow().getDecorView().findViewWithTag("agent-history:direct:luna"));
+        assertEquals("shared",session.selectedConversation);
+        activity.onBackPressed();assertChat("设备群聊");assertEquals("保留群聊草稿",input().getText().toString());
     }
     @Test public void oldAgentResponsesAndEmptyHistoriesHaveClearFallbacks() throws Exception {
         var old=new MessageApi.Agent(new JSONObject().put("id","legacy").put("name","旧版助手").put("handle","legacy").put("provider","openai").put("enabled",true));

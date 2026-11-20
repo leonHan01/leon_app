@@ -6,7 +6,7 @@ enum MobileStyle {
     static let green = color(0x07B75A), ink = color(0x191919), muted = color(0x8A8A8A)
     static let line = color(0xE7E7E7), bar = color(0xF7F7F7), chat = color(0xEDEDED)
     static let outgoing = color(0xB2EC86)
-    static let version = "0.12.2"
+    static let version = "0.12.4"
     static func color(_ rgb: UInt32) -> Color {
         Color(red:Double((rgb >> 16) & 255)/255,green:Double((rgb >> 8) & 255)/255,blue:Double(rgb & 255)/255)
     }
