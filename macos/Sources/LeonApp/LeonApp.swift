@@ -28,6 +28,7 @@ struct LeonApp: App {
 struct ContentView: View {
     @ObservedObject var store: ChatStore
     @State private var historyAgentId: String?
+    @StateObject private var viewport=ConversationViewport()
     @State private var searchPresented = false
     @State private var favoritesPresented = false
     @State private var searchRoom: String?
@@ -185,7 +186,7 @@ struct ContentView: View {
             ScrollView {
                 LazyVStack(spacing: 12) {
                     if store.hasOlder {
-                        Button(store.loadingOlder ? "正在加载…" : "加载更早的消息") { Task { await store.loadOlder() } }
+                        Button(store.loadingOlder ? "正在加载…" : "加载更早的消息") { viewport.loadOlder();Task { await store.loadOlder() } }
                             .disabled(store.loadingOlder).buttonStyle(.borderless).padding(.top, 12)
                     }
                     if store.messages.isEmpty && store.currentPending.isEmpty && store.loadingMessages {
@@ -202,7 +203,7 @@ struct ContentView: View {
                         switch item {
                         case .message(let message):
                         bubble(text: message.text, sender: message.sender, detail: (message.role == "assistant" ? "Agent · " : "") + message.date.formatted(date: .abbreviated, time: .shortened), mine: message.deviceId == store.deviceId, agentId: message.agentId, imageIds: (message.images ?? []).map(\.id), message:message)
-                            .id(message.id)
+                            .id(message.id).timelineMessage(message.id)
                         case .operation(let operation):
                         HStack(alignment: .top) {
                             if operation.active { ProgressView().controlSize(.small) }
@@ -251,14 +252,30 @@ struct ContentView: View {
                         Button("恢复已忽略的失败提示（\(store.dismissedFailureCount)）") { store.restoreDismissedJobs() }
                             .buttonStyle(.borderless).font(.caption).foregroundStyle(.secondary)
                     }
-                    Color.clear.frame(height: 1).id("bottom")
+                    Color.clear.frame(height: 1).id("bottom").timelineBottom()
                 }.padding(.horizontal, 12).padding(.vertical, 14)
+                    .timelineContent().trackConversationScroll(viewport)
+            }.timelineViewport()
+            .task(id:store.selectedConversationId) {enterTimeline(proxy)}
+            .onDisappear {viewport.leave(room:store.selectedConversationId)}
+            .onChange(of:store.searchConnectionID) {_ in enterTimeline(proxy)}
+            .onPreferenceChange(TimelineLayoutKey.self) {layout in
+                guard viewport.room==store.selectedConversationId else {return};viewport.geometryChanged(layout,loaded:!store.loadingMessages)
             }
-            .onChange(of: store.messages.last?.id) { _ in proxy.scrollTo("bottom", anchor: .bottom) }
-            .onChange(of: store.currentPending.count) { _ in proxy.scrollTo("bottom", anchor: .bottom) }
+            .onChange(of:store.messages.map(\.id)) {_ in
+                if viewport.room != store.selectedConversationId {enterTimeline(proxy)}
+                viewport.receivedRows(room:store.selectedConversationId,rows:store.messages.map(\.id),pending:store.currentPending.map(\.id),loaded:!store.loadingMessages)
+            }
+            .onChange(of:store.currentPending.map(\.id)) {viewport.pendingChanged($0)}
+            .onChange(of:store.loadingMessages) {viewport.loadedChanged(!$0)}
         }
     }
-
+    private func enterTimeline(_ proxy:ScrollViewProxy){
+        let room=store.selectedConversationId,connection=store.searchConnectionID
+        viewport.enter(room:room,position:store.scrollPositions[room],rows:store.messages.map(\.id),pending:store.currentPending.map(\.id),loaded:!store.loadingMessages,proxy:proxy,anchor:{AnyHashable($0)}) {[weak store=store] position in
+            guard let store,store.selectedConversationId==room,store.searchConnectionID==connection else {return};store.scrollPositions[room]=position
+        }
+    }
     private func bubble(text: String, sender: String, detail: String, mine: Bool, agentId: String? = nil, imageIds: [String] = [], message:Message? = nil, pendingQuote:MessageQuote? = nil,pendingDocuments:[DocumentAttachment]=[]) -> some View {
         HStack {
             if mine { Spacer(minLength: 70) }

@@ -6,6 +6,16 @@ extension Checks {
         Message(id:id,clientMessageId:"timeline-\(id)",deviceId:"device",sender:"Alice",platform:"ios",text:"hello",createdAt:time,conversationId:"shared",role:"user",agentId:nil,replyTo:nil,images:[],userId:nil)
     }
     func checkTimeline() async throws {
+        try await run("cached history keeps the reading anchor and clears positions with history") {
+            let value=await store(api:FakeAPI()),room=value.roomID
+            value.room.messages=(1...500).map {messageFixture(Int64($0))};value.room.loaded=true
+            value.scrollPositions[room]=ConversationScrollPosition(offset:500,messageID:20,messageTop:-10)
+            value.select("group:other");value.select(room)
+            try expect(value.room.messages.count==300 && value.room.messages.contains {$0.id==20},"room cache discarded the reading anchor")
+            try await value.clearLocal(room,revision:2)
+            try expect(value.scrollPositions[room]==nil,"cleared history retained a stale reading position")
+        }
+
         try await run("Android timeline keeps jobs and context notices next to their triggers") {
             let messages = [timedMessage(10,1_000_000),timedMessage(20,1_100_000)]
             let jobs = [AgentJob(messageId:20,agentId:"b",agentName:"B",status:"FAILED",error:"offline"),AgentJob(messageId:10,agentId:"a",agentName:"A",status:"RUNNING",error:"")]

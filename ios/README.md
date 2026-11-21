@@ -2,7 +2,9 @@
 
 独立 SwiftUI / UIKit 应用，最低 iOS 16，面向 iPhone 与 iPad。Android 原生工程、Mac 原生工程继续保留，安装包仅保留各平台最新版本。本目录不依赖 Dart、Flutter、CocoaPods 或第三方 Swift 包。
 
-当前构建：**0.16.0（build 16）** 增加文档附件和系统通知设置，支持 PDF、TXT、DOC / DOCX、XLS / XLSX、Markdown、CSV，并保留会话分支、引用、收藏、搜索与图片保存。APNs 框架已完成；当前免费个人签名不启用后台推送。详见 [文档与通知说明](../docs/documents-and-notifications.md)。新包仅生成，不安装手机，服务端尚未部署。
+当前构建：**0.16.2（build 18）**。首次进入会话显示最新消息；离开后返回保留原先可见消息及屏幕偏移，切换已缓存会话也恢复阅读位置。阅读旧消息时收到回复、富文本完成排版或图片高度变化均保留当前锚点；位置仅在本次连接的内存中保留，清理聊天、退出账号或缓存淘汰会移除。`bash scripts/test-timeline-scroll-ios.sh` 使用独立 Catalyst 测试宿主加载实际聊天界面，核验滚动与原生偏移，不访问服务器或启动游戏。
+
+此前构建：**0.16.0（build 16）** 增加文档附件和系统通知设置，支持 PDF、TXT、DOC / DOCX、XLS / XLSX、Markdown、CSV，并保留会话分支、引用、收藏、搜索与图片保存。APNs 框架已完成；当前免费个人签名不启用后台推送。详见 [文档与通知说明](../docs/documents-and-notifications.md)。2026-11-21 已覆盖安装到 iPhone 16 Pro，设备读回版本为 0.16.0（build 16）；手机锁屏，启动核验尚未完成。本次未部署或重启服务端。
 
 上一轮构建（2026-11-21）：**0.16.0（build 16）** 新增长按消息「从这里创建分支」，复制截至所选消息（含）的历史、图片、文档和引用，创建后进入独立会话。原草稿保留；群聊分支默认仅创建者可见，保留原 Agent。创建不调用模型，失败重试复用请求标识；分支上下文从复制原文重新构建。53 项核心 / HTTP 场景与 iPhoneOS Release 个人签名构建通过，安装包为 `dist/Leon-iOS-personal-0.16.0.ipa`。本次未安装或启动 App；**服务端尚未部署，使用分支需先升级服务端**。
 
@@ -98,7 +100,7 @@ bash scripts/build-ios.sh device
 
 脚本检查完整 Xcode、运行核心与正文检查、准备资源并构建。输出分别是 `dist/Leon-iOS-simulator-unsigned.zip` / `dist/Leon-iOS-device-unsigned.zip`，包含未签名的 `.app`。设备 ZIP 不是可直接安装的 IPA；签名、归档、TestFlight / App Store 分发须在 Xcode 中完成。
 
-当前安装包为 `dist/Leon-iOS-personal-0.16.0.ipa`（约 3 MB）。仅保留各平台最新版本化安装包，构建脚本直接生成的临时产物在整理后去重；历史安装备份目录保留。新包通过 `codesign --verify --deep --strict` 及 ZIP 内容完整性检查。描述文件已确认包含当前 iPhone，个人签名有效期至 **2026-11-27 21:42（北京时间）**。此包仅供已登记设备使用，不能在手机上点开当作 APK 安装；有效期届满需要重新签名安装。个人签名构建使用 Xcode 中选定的 Personal Team，普通构建脚本仍输出未签名版本。
+当前安装包为 `dist/Leon-iOS-personal-0.16.2.ipa`（约 3 MB）。仅保留各平台最新版本化安装包，构建脚本直接生成的临时产物在整理后去重；历史安装备份目录保留。新包通过 `codesign --verify --deep --strict` 及 ZIP 内容完整性检查。描述文件已确认包含当前 iPhone，个人签名有效期至 **2026-11-27 21:42（北京时间）**。此包仅供已登记设备使用，不能在手机上点开当作 APK 安装；有效期届满需要重新签名安装。个人签名构建使用 Xcode 中选定的 Personal Team，普通构建脚本仍输出未签名版本。
 
 `Resources/Markdown` 是被忽略的生成目录；正文补丁只作用于该 iOS 副本，不修改现有两端使用的资源。直接从干净检出打开工程前须执行资源准备步骤。
 

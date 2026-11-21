@@ -84,6 +84,37 @@ public class ChatScreensTest {
         assertFalse(input().isShown());
     }
 
+    @Test public void newConversationStartsAtLatestAndCachedReturnRestoresReadingPosition() throws Exception {
+        view(R.id.tab_agents).performClick();openAgentChat("luna");fillMessages(100,45);layoutAndIdle();assertLatestVisible();
+        chatTimeline().scrollTo(0,chatTimeline().getChildAt(0).getHeight()/2);int saved=chatTimeline().getScrollY();assertTrue(saved>0);backToDirectory();
+        openAgentChat("luna");layoutAndIdle();assertEquals(saved,chatTimeline().getScrollY());
+        backToDirectory();openAgentChat("sol");fillMessages(200,30);layoutAndIdle();assertLatestVisible();
+        backToDirectory();openAgentChat("luna");layoutAndIdle();assertEquals(saved,chatTimeline().getScrollY());
+        tagged("message-agent-avatar:luna").performClick();activity.onBackPressed();layoutAndIdle();assertEquals(saved,chatTimeline().getScrollY());
+    }
+    @Test public void delayedHistoryFollowsLatestButReadingAndPrependingStayInPlace() throws Exception {
+        view(R.id.tab_agents).performClick();openAgentChat("luna");layoutAndIdle();fillMessages(100,45);layoutAndIdle();assertLatestVisible();
+        chatTimeline().scrollTo(0,0);session.messages.add(message(150,"luna","Luna","稍后收到的新回复",false));session.revision++;session.notifyChanged();layoutAndIdle();assertEquals(0,chatTimeline().getScrollY());
+        int[] before=new int[2];tagged("message-actions:100").getLocationOnScreen(before);
+        session.messages.add(0,message(50,"luna","Luna","更早的聊天记录",false));session.revision++;session.notifyChanged();layoutAndIdle();
+        int[] after=new int[2];tagged("message-actions:100").getLocationOnScreen(after);assertTrue(chatTimeline().getScrollY()>0);assertEquals(before[1],after[1]);
+    }
+    @Test public void lateContentLayoutKeepsLatestOnlyWhenFollowingBottom() throws Exception {
+        view(R.id.tab_agents).performClick();openAgentChat("luna");fillMessages(100,35);layoutAndIdle();assertLatestVisible();
+        android.widget.LinearLayout rows=(android.widget.LinearLayout)chatTimeline().getChildAt(0);View expanded=new View(activity);rows.addView(expanded,new android.widget.LinearLayout.LayoutParams(-1,300));layoutAndIdle();assertLatestVisible();
+        chatTimeline().scrollTo(0,0);rows.addView(new View(activity),new android.widget.LinearLayout.LayoutParams(-1,300));layoutAndIdle();assertEquals(0,chatTimeline().getScrollY());
+    }
+    private android.widget.ScrollView chatTimeline(){return (android.widget.ScrollView)tagged("chat-timeline");}
+    private void fillMessages(int start,int count)throws Exception {for(int i=0;i<count;i++)session.messages.add(message(start+i,session.selectedConversation.endsWith("sol")?"sol":"luna","助手","这是一段用于验证进入会话滚动位置的聊天记录，内容需要正常换行。第 "+i+" 条。",false));session.initialLoaded=true;session.revision++;session.notifyChanged();}
+    private void layoutAndIdle(){View root=activity.findViewById(android.R.id.content);for(int i=0;i<5;i++){root.measure(View.MeasureSpec.makeMeasureSpec(360,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(756,View.MeasureSpec.EXACTLY));root.layout(0,0,360,756);org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(16));}}
+    private void assertLatestVisible(){android.widget.ScrollView view=chatTimeline();int range=view.getChildAt(0).getHeight()-view.getHeight();assertTrue("Fixture must need scrolling",range>100);assertTrue("Latest message must be visible: "+view.getScrollY()+"/"+range,Math.abs(range-view.getScrollY())<=1);}
+
+    @Test public void longHistoryCacheRetainsReadingAnchorAndClearRemovesIt()throws Exception {
+        session.select("direct:luna");for(int i=1;i<=500;i++)session.messages.add(message(i,"luna","Luna","消息 "+i,false));session.initialLoaded=true;
+        session.scrollPositions.put("direct:luna",new ChatSession.ScrollPosition(20,-10,500));session.select("direct:sol");session.select("direct:luna");
+        assertEquals(300,session.messages.size());assertTrue(session.messages.stream().anyMatch(m->m.id==20));
+        session.clearLocalHistory("direct:luna",2);assertFalse(session.scrollPositions.containsKey("direct:luna"));
+    }
     @Test public void conversationCacheRestoresOnlyItsOwnHistory() throws Exception {
         session.select("direct:luna");session.messages.add(message(1,"luna","Luna","历史消息",false));
         session.initialLoaded=true;session.hasOlder=true;session.select("direct:sol");

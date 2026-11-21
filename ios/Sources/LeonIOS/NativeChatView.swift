@@ -34,10 +34,12 @@ struct NativeChatView: View {
     @State private var importing = false
     @State private var importOrigin:ImageOrigin?
     @State private var importAgent:String?
-    @State private var sticky = true
+    @StateObject private var viewport=ConversationViewport()
     @State private var visible = false
-    @State private var firstMessageID:Int64?
     @State private var compactRequests:[String:String] = [:]
+    init(store:ChatStore,openRoom:@escaping (Conversation)->Void,openAgent:@escaping (String)->Void,openUsage:@escaping ()->Void,viewport:ConversationViewport?=nil) {
+        self.store=store;self.openRoom=openRoom;self.openAgent=openAgent;self.openUsage=openUsage;_viewport=StateObject(wrappedValue:viewport ?? ConversationViewport())
+    }
     private var token:MentionCompletion.Token? {!composing && store.selected?.direct != true ? MentionCompletion.token(in:store.draft,selection:selection) : nil}
     private var mentionKey:String {"\(store.roomID):\(store.draft):\(selection.location)"}
     private var mentionVisible:Bool {!extras && token != nil && dismissedMention != mentionKey && !store.availableAgents.isEmpty}
@@ -80,7 +82,7 @@ struct NativeChatView: View {
             .fileImporter(isPresented:$importing,allowedContentTypes:[.zip],allowsMultipleSelection:false, onCompletion:importBackup)
             .onChange(of:store.quotedMessage?.id) {_ in if store.quotedMessage != nil {extras=false}}
             .onReceive(NotificationCenter.default.publisher(for:UIResponder.keyboardWillShowNotification)) {_ in extras = false}
-            .onAppear {visible = true;selection = NSRange(location:(store.draft as NSString).length,length:0);firstMessageID = store.room.messages.first?.id}
+            .onAppear {visible = true;selection = NSRange(location:(store.draft as NSString).length,length:0)}
             .onDisappear {visible = false}
     }
     private var chatMenu:some View {
@@ -104,7 +106,7 @@ struct NativeChatView: View {
     private func timeline(_ proxy:ScrollViewProxy,width:CGFloat) -> some View {
         ScrollView {
             LazyVStack(spacing:0) {
-                if store.room.hasOlder {MobileTextButton(title:store.loadingOlder ? "正在加载…" : "加载更早的消息") {Task {await store.older()}}.disabled(store.loadingOlder).frame(maxWidth:.infinity)}
+                if store.room.hasOlder {MobileTextButton(title:store.loadingOlder ? "正在加载…" : "加载更早的消息") {viewport.loadOlder();Task {await store.older()}}.disabled(store.loadingOlder).frame(maxWidth:.infinity)}
                 if store.room.messages.isEmpty && store.currentPending.isEmpty {
                     VStack(spacing:8) {
                         Text(store.opening.contains(store.roomID) ? "正在打开会话…" : "开始和 \(store.selected?.name ?? "Agent") 聊天").font(.system(size:13)).foregroundStyle(MobileStyle.muted)
@@ -112,34 +114,42 @@ struct NativeChatView: View {
                     }.frame(maxWidth:.infinity).padding(.horizontal,16).padding(.top,45).padding(.bottom,35)
                 }
                 ForEach(ChatTimeline.entries(messages:store.room.messages,jobs:store.visibleJobs,operations:store.room.operations)) {entry in
-                    timelineEntry(entry,width:width,resized:{if sticky {DispatchQueue.main.async {proxy.scrollTo("bottom",anchor:.bottom)}}})
+                    timelineEntry(entry,width:width,resized:{viewport.resized()}).id(entry.id)
                 }
                 ForEach(store.currentPending) {outgoing in
-                    MessageBubble(store:store,message:pendingMessage(outgoing),outgoing:outgoing,openAgent:openAgent,availableWidth:width,resized:{if sticky {DispatchQueue.main.async {proxy.scrollTo("bottom",anchor:.bottom)}}})
+                    MessageBubble(store:store,message:pendingMessage(outgoing),outgoing:outgoing,openAgent:openAgent,availableWidth:width,resized:{viewport.resized()})
                 }
                 if store.dismissedCount>0 {MobileTextButton(title:"恢复已忽略的失败提示（\(store.dismissedCount)）") {Task {await store.restoreDismissals()}}.font(.system(size:12))}
-                Color.clear.frame(height:1).id("bottom").onAppear {sticky = true}.onDisappear {sticky = false}
+                Color.clear.frame(height:1).id("bottom").timelineBottom()
             }.padding(.horizontal,12).padding(.top,12).padding(.bottom,18)
-        }.background(MobileStyle.chat).scrollDismissesKeyboard(.interactively).accessibilityIdentifier("chat_timeline")
+                .timelineContent().trackConversationScroll(viewport)
+        }.timelineViewport().background(MobileStyle.chat).scrollDismissesKeyboard(.interactively).accessibilityIdentifier("chat_timeline")
+            .task(id:store.roomID) {enterTimeline(proxy)}
+            .onDisappear {viewport.leave(room:store.roomID)}
+            .onChange(of:store.searchConnectionID) {_ in enterTimeline(proxy)}
+            .onPreferenceChange(TimelineLayoutKey.self) {layout in
+                guard viewport.room==store.roomID else {return};viewport.geometryChanged(layout,loaded:store.room.loaded)
+            }
             .onChange(of:store.room.messages.map(\.id)) {_ in
-                let next = store.room.messages.first?.id,previous = firstMessageID
-                firstMessageID = next
-                DispatchQueue.main.async {
-                    if let previous,let next,next<previous {proxy.scrollTo("message:\(previous)",anchor:.top)}
-                    else if sticky {proxy.scrollTo("bottom",anchor:.bottom)}
-                }
+                if viewport.room != store.roomID {enterTimeline(proxy)}
+                viewport.receivedRows(room:store.roomID,rows:store.room.messages.map(\.id),pending:store.currentPending.map(\.id),loaded:store.room.loaded)
             }
-            .onChange(of:store.currentPending.map(\.id)) {_ in if sticky {DispatchQueue.main.async {proxy.scrollTo("bottom",anchor:.bottom)}}}
+            .onChange(of:store.currentPending.map(\.id)) {viewport.pendingChanged($0)}
+            .onChange(of:store.room.loaded) {viewport.loadedChanged($0)}
             .onChange(of:store.roomID) {_ in
-                sticky = true;extras = false;dismissedMention = "";candidateIndex = 0;panel = nil
-                firstMessageID = store.room.messages.first?.id;selection = NSRange(location:(store.draft as NSString).length,length:0)
-                DispatchQueue.main.async {proxy.scrollTo("bottom",anchor:.bottom)}
+                extras=false;dismissedMention="";candidateIndex=0;panel=nil;selection=NSRange(location:(store.draft as NSString).length,length:0)
             }
+    }
+    private func enterTimeline(_ proxy:ScrollViewProxy){
+        let room=store.roomID,connection=store.searchConnectionID
+        viewport.enter(room:room,position:store.scrollPositions[room],rows:store.room.messages.map(\.id),pending:store.currentPending.map(\.id),loaded:store.room.loaded,proxy:proxy,anchor:{AnyHashable("message:\($0)")}) {[weak store=store] position in
+            guard let store,store.roomID==room,store.searchConnectionID==connection else {return};store.scrollPositions[room]=position
+        }
     }
     @ViewBuilder private func timelineEntry(_ entry:ChatTimeline.Entry,width:CGFloat,resized:@escaping ()->Void) -> some View {
         switch entry {
         case .time(_,let timestamp):Text(timeLabel(timestamp)).font(.system(size:11)).foregroundStyle(MobileStyle.color(0xAAAAAA)).frame(maxWidth:.infinity).padding(.top,10).padding(.bottom,17)
-        case .message(let message):MessageBubble(store:store,message:message,openAgent:openAgent,availableWidth:width,resized:resized)
+        case .message(let message):MessageBubble(store:store,message:message,openAgent:openAgent,availableWidth:width,resized:resized).timelineMessage(message.id)
         case .operation(let operation):Text("\(operation.agentName) · \(operation.progressText)").font(.system(size:12)).foregroundStyle(MobileStyle.muted).frame(maxWidth:.infinity,alignment:.leading).padding(.horizontal,12).padding(.vertical,10)
         case .job(let job):jobNotice(job)
         }

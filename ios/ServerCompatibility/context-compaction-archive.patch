@@ -1,0 +1,886 @@
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -439,9 +439,9 @@
+ 
+ Sol 与 Terra 的应用输入预算统一设为 20,000 个估算 Token，约 16,000 时尝试压缩，压缩后优先保留约 10,000 Token 范围内的最新完整轮次。匹配 OpenAI 的 Sol / Terra 模型及其版本 / 快照名称；Luna 继续使用 3,000，其他模型维持现有配置。此值是应用调用预算，当前仍仅完成本地修改，部署后生效。
+ 
+-压缩使用当前 Agent 的模型，同时输出阶段摘要和结构化事实增量，不增加每轮独立的事实提取调用。事实区分 `fact` / `goal` / `preference` / `decision` / `todo`，每条记录发言者、语义键、来源消息和用户原文依据。只接受本次压缩范围内用户正文中的逐字摘录，不把 Agent 建议、引用或附件中的话写成用户事实。相同用户的相同键以新来源更正，撤销记录也保留版本；重试旧问题只读取当时之前的版本。摘要与事实在同一事务中发布，失败不覆盖原记忆；旧模型返回的纯文字摘要仍兼容，但不会创建未经验证的事实。
+-
+-历史检索使用本地 SQL 关键词 / 中文双字匹配，从同一会话、当前话题边界之后、本次问题之前的原文中找回最多 3 轮相关内容，按完整轮次及剩余 Token 预算装入请求，并附消息编号和发言者。它不读取其他会话、不恢复旧话题、不额外调用模型，不自动读取附件正文或图片。事实、摘要和检索内容均作为参考资料传入，不升级为系统指令。
++压缩使用当前 Agent 的模型，同时输出阶段摘要和结构化事实增量，不增加每轮独立的事实提取调用。事实区分 `fact` / `goal` / `preference` / `decision` / `todo`，每条记录发言者、语义键、来源消息和用户原文依据。只接受本次压缩范围内用户正文中的逐字摘录，不把 Agent 建议、引用或附件中的话写成用户事实。相同用户的相同键以新来源更正，撤销记录也保留版本；重试旧问题只读取当时之前的版本。各批提取的事实可供下一批使用。全部批次成功后，服务端用一个事务发布所有摘要边界和事实版本。任一批失败时保留上次成功的记忆；手动重试从已提交的边界重新压缩。旧模型返回的纯文字摘要仍兼容，但不会创建未经验证的事实。
++
++历史检索先在数据库中按完整编号命中排序，再截取候选，并按关键词与中文双字补充相关结果。支持大小写差异、前导零和带连接符的合同号等编号。从同一会话、当前话题边界之后、本次问题之前的原文中找回最多 3 轮相关内容，按完整轮次及剩余 Token 预算装入请求，并附消息编号和发言者。它不读取其他会话、不恢复旧话题、不额外调用模型，不自动读取附件正文或图片。事实、摘要和检索内容均作为参考资料传入，不升级为系统指令。
+ 
+ 压缩失败时，只有本次压缩前的完整原始请求仍在输入预算内，才回退该请求继续回答，并记录 `compressionFallback=true`；若原始请求已超预算则明确失败，保留原消息供手动重试，不以丢弃旧轮次掩盖压缩失败。已生成的请求快照包含当时选择的事实、检索原文和附件片段。重试仍以原问题为时间边界；如果压缩补录了该问题之前已经发生的撤销或更正，服务端重新筛选旧快照，其余重试复用原快照。
+ 
+@@ -457,7 +457,7 @@
+ 
+ Mac 聊天输入 `/` 呼出命令菜单，支持方向键、Enter/Tab 和 Esc。`/compact`（别名 `/compress`）立即将较早对话用当前 Agent 模型压缩为摘要，保留最近一轮完整原文，无需等待自动阈值；`/context` 查看上下文；`/new` 结束本轮，可选择仅开启全新上下文或先导出再开启；`/export` 导出当前轮次并保留当前上下文。群聊明确选择总结或压缩使用的 Agent，命令不会写成普通消息或触发普通聊天回复。
+ 
+-主动任务持久化在 `chat_context_operation`，按会话与回复互斥，重复请求标识不重复收费。原始对话不删除；重启中断的运行任务标为失败，不自动重放模型调用。`POST /api/conversations/context/compact` 和 `/archive` 接收 `{conversationId,agentId,requestId}`，立即返回 202。分页消息的 `contextOperations` 显示进度和结果。归档冻结当前话题的完整原文边界，使用 AI 对全量历史分批总结，结果由 `GET /api/conversations/context/archive/{id}` 读取，不改变实时上下文。
++主动任务持久化在 `chat_context_operation`，按会话与回复互斥，重复请求标识不重复收费。原始对话不删除；重启中断的运行任务标为失败，不自动重放模型调用。`POST /api/conversations/context/compact` 和 `/archive` 接收 `{conversationId,agentId,requestId}`，立即返回 202。分页消息的 `contextOperations` 显示进度和结果。压缩每页读取最多 32 个完整轮次的正文，分批估算和来源校验复用这页数据。归档冻结当前话题的完整原文边界，使用 AI 对全量历史分批总结，并将已核实的最新事实、发言者和来源消息编号附在摘要中；撤销项从事实清单移除。结果由 `GET /api/conversations/context/archive/{id}` 读取，不改变实时上下文。
+ 
+ Mac 经已安装的 `leonbook` CLI 通信：先固定 `workspace.info` 返回的 root/user，调用 `media.upload` 复制图片和完整原文附件，再 `articles.create` 保存草稿并 `articles.get` 读回校验。文章先展示 AI 总结，再展示原始对话；内容过长时原文完整保存在 Markdown 附件中。文章 slug 和归档标识固定，重复导出不覆盖用户改动或重复创建文章；不直接写 LeonBook 内部数据库或文章文件。
+ 
+diff --git a/src/main/java/com/leon/workflow/messaging/AgentContextManager.java b/src/main/java/com/leon/workflow/messaging/AgentContextManager.java
+--- a/src/main/java/com/leon/workflow/messaging/AgentContextManager.java
++++ b/src/main/java/com/leon/workflow/messaging/AgentContextManager.java
+@@ -150,15 +150,26 @@
+         List<Turn> retained=window.turns();List<Map<String,String>> result=original;boolean fallback=false;
+         // Only token pressure triggers automatic compaction. recent_rounds remains a legacy API/backup field.
+         if(!window.complete()||tokens(original)>=budget*(isLuna(agent)?60:AUTO_COMPACT_PERCENT)/100){
+-            var recent=recentWithinBudget(work,agent,key,recall,memory.throughId(),head,memory.text(),known,current,budget/2);
++            var recent=recentWithinBudget(work,agent,key,recall,window,memory.throughId(),head,memory.text(),known,current,budget/2);
+             long cutoff=recent.isEmpty()?work.messageId():recent.getFirst().anchor();
+-            boolean hasOlder;synchronized(store){hasOlder=!store.contextAnchors(work,memory.throughId(),cutoff,1,false).isEmpty();}
++            boolean hasOlder=!window.turns().isEmpty()&&window.turns().getFirst().anchor()<cutoff;
+             if(hasOlder){
+-                Memory beforeCompression=memory;
+                 String previousRecall=recall.signature();
+                 store.phase(work,"COMPRESSING");
+                 try {
+-                    memory=compress(work,agent,key,policy,memory,cutoff,budget);
++                    var loaded=window.complete()?window.turns().stream().takeWhile(t->t.anchor()<cutoff).map(Turn::rows).toList():null;
++                    var draft=compactBatches(work,agent,key,policy,memory,cutoff,budget,false,loaded);
++                    publishCompression(work,policy,draft,null);
++                    memory=draft.last();
++                }catch(InterruptedException interrupted){throw interrupted;}
++                catch(Exception failed){
++                    if(!window.complete()||tokens(original)>budget){
++                        String reason=failed instanceof AgentModelClient.Failure?clean(failed.getMessage(),key):"请检查模型配置或网络";
++                        throw new AgentModelClient.Failure("上下文压缩未完成："+reason+"。原始上下文超过预算，原聊天记录保留，请手动重试回复");
++                    }
++                    fallback=true;
++                }
++                if(!fallback){
+                     recall=facts.recall(work.conversationId(),agent.id(),policy.epoch(),policy.afterId(),work.messageId());
+                     memory=filtered(memory,recall);
+                     if(!previousRecall.equals(recall.signature())){
+@@ -168,24 +179,6 @@
+                     int factRoom=isLuna(agent)?Math.max(0,budget-tokens(assemble(head,memory.text(),null,recent,current))):budget/5;
+                     known=factPrompt(work,policy,recall,question,Math.min(factBudget(agent),factRoom));
+                     retained=recent;result=assemble(head,memory.text(),known,retained,current);
+-                }catch(InterruptedException interrupted){throw interrupted;}
+-                catch(Exception failed){
+-                    // Fall back only to the complete pre-compaction request: never drop old turns to hide a failure.
+-                    if(!window.complete()||tokens(original)>budget){
+-                        String reason=failed instanceof AgentModelClient.Failure?clean(failed.getMessage(),key):"请检查模型配置或网络";
+-                        throw new AgentModelClient.Failure("上下文压缩未完成："+reason+"。原始上下文超过预算，原聊天记录保留，请手动重试回复");
+-                    }
+-                    // An earlier compaction batch may already have recorded a retraction.
+-                    recall=facts.recall(work.conversationId(),agent.id(),policy.epoch(),policy.afterId(),work.messageId());
+-                    retained=window.turns();
+-                    result=original;
+-                    if(!previousRecall.equals(recall.signature())){
+-                        retained=refreshTurns(work,agent,key,retained,recall);
+-                        current=turn(work,work.messageId(),agent,key,recall);
+-                        known=factPrompt(work,policy,recall,question,Math.min(factBudget(agent),Math.max(0,(budget-tokens(current.messages())-tokens(List.of(head)))/3)));
+-                        result=assemble(head,filtered(beforeCompression,recall).text(),known,retained,current);
+-                    }
+-                    fallback=true;
+                 }
+             }
+         }
+@@ -197,13 +190,13 @@
+         int prefix=result.size()-documentTurns.stream().mapToInt(t->t.messages().size()).sum();
+         var expanded=new ArrayList<>(result.subList(0,prefix));expanded.addAll(flatten(enriched));result=List.copyOf(expanded);
+         var selected=new HashSet<Long>();retained.forEach(t->selected.add(t.anchor()));
+-        List<Long> hits;synchronized(store){checkEpoch(work,policy);hits=history.find(work,policy.afterId(),selected,question,recall);}
++        List<Long> hits;synchronized(store){checkEpoch(work,policy);hits=memory.throughId()>policy.afterId()?history.find(work,policy.afterId(),selected,question,recall):List.of();}
+         int retrieved=0;
+         for(long anchor:hits){
+             var reference=historyReference(work,anchor,key,recall);
+             if(reference==null)continue;
+             if(isLuna(agent)&&tokens(List.of(reference))>350)continue;
+-            var trial=new ArrayList<>(result);trial.add(1,reference);
++            var trial=new ArrayList<>(result);trial.add(1+retrieved,reference);
+             if(tokens(trial)<=budget){result=List.copyOf(trial);retrieved++;}
+             if(retrieved>=(isLuna(agent)?1:3))break;
+         }
+@@ -219,29 +212,38 @@
+     record Window(List<Turn> turns,boolean complete) {}
+     private Window uncompressed(DeviceMessageStore.Work work,AgentRegistry.Agent agent,String key,ConversationFactMemory.Recall recall,Memory memory,Map<String,String> head,Map<String,String> known,Turn current,int budget){
+         var turns=new ArrayList<Turn>();long after=memory.throughId();
++        int available=budget-tokens(assemble(head,memory.text(),known,List.of(),current));
+         while(true){
+-            List<Long> page;synchronized(store){page=store.contextAnchors(work,after,work.messageId(),HISTORY_PAGE,false);}
+-            if(page.isEmpty())return new Window(List.copyOf(turns),true);
+-            for(long anchor:page){
+-                turns.add(turn(work,anchor,agent,key,recall));after=anchor;
+-                if(tokens(assemble(head,memory.text(),known,turns,current))>budget)return new Window(List.copyOf(turns),false);
+-            }
+-            if(page.size()<HISTORY_PAGE)return new Window(List.copyOf(turns),true);
+-        }
+-    }
+-    private List<Turn> recentWithinBudget(DeviceMessageStore.Work work,AgentRegistry.Agent agent,String key,ConversationFactMemory.Recall recall,long after,Map<String,String> head,String summary,Map<String,String> known,Turn current,int target){
++            var page=store.contextPage(work,after,work.messageId(),HISTORY_PAGE,false,false);
++            for(var rows:page.turns()){
++                var next=renderTurn(work,agent,key,recall,rows);
++                turns.add(next);after=next.anchor();
++                available-=messageTokens(next.messages());
++                if(available<0)return new Window(List.copyOf(turns),false);
++            }
++            if(!page.hasMore())return new Window(List.copyOf(turns),true);
++        }
++    }
++    private List<Turn> recentWithinBudget(DeviceMessageStore.Work work,AgentRegistry.Agent agent,String key,ConversationFactMemory.Recall recall,Window window,long after,Map<String,String> head,String summary,Map<String,String> known,Turn current,int target){
+         var recent=new LinkedList<Turn>();long before=work.messageId();
++        int available=target-tokens(assemble(head,summary,known,List.of(),current));
++        if(available<=0)return List.of();
+         while(true){
+-            List<Long> page;synchronized(store){page=store.contextAnchors(work,after,before,HISTORY_PAGE,true);}
+-            if(page.isEmpty())break;
+-            for(long anchor:page){
+-                var next=turn(work,anchor,agent,key,recall);recent.addFirst(next);
+-                if(tokens(assemble(head,summary,known,recent,current))>target){recent.removeFirst();return List.copyOf(recent);}
+-                before=anchor;
+-            }
+-            if(page.size()<HISTORY_PAGE)break;
+-        }
+-        return List.copyOf(recent);
++            List<Turn> candidates;boolean more=false;
++            if(window.complete()){
++                candidates=window.turns().reversed();
++            }else{
++                var page=store.contextPage(work,after,before,HISTORY_PAGE,true,false);
++                candidates=page.turns().stream().map(rows->renderTurn(work,agent,key,recall,rows)).toList();
++                more=page.hasMore();
++            }
++            for(var next:candidates){
++                available-=messageTokens(next.messages());
++                if(available<0)return List.copyOf(recent);
++                recent.addFirst(next);before=next.anchor();
++            }
++            if(!more)return List.copyOf(recent);
++        }
+     }
+     private Map<String,String> historyReference(DeviceMessageStore.Work work,long anchor,String key,ConversationFactMemory.Recall recall){
+         var material=new ArrayList<Map<String,Object>>();
+@@ -349,26 +351,32 @@
+             var runtime=agents.runtime(task.agentId());var agent=runtime.agent;key=runtime.key;
+             if(!agent.enabled())throw new AgentModelClient.Failure("Agent 已停用");
+             var work=new DeviceMessageStore.Work(task.beforeId(),task.agentId(),task.room());
+-            Policy policy;Memory memory;List<Long> latest;
+-            synchronized(store) {
+-                policy=policy(task.room());
+-                latest=store.contextAnchors(work,policy.afterId(),task.beforeId(),1,true);
+-                memory=memory(work,policy,latest.isEmpty()?task.beforeId():latest.getFirst());
+-            }
++            Policy policy;
++            synchronized(store){policy=policy(task.room());}
+             if(task.kind().equals("ARCHIVE")) {
+                 var initial=new Memory(policy.afterId(),"",0,"");
+-                var summary=compress(work,agent,key,policy,initial,task.beforeId(),inputBudget(agent),false);
+-                synchronized(store) {
+-                    jdbc.update("UPDATE chat_context_archive SET summary=? WHERE id=?",summary.text(),task.id());
+-                    jdbc.update("UPDATE chat_context_operation SET status='SUCCEEDED',result='本轮对话总结已生成，可导出到 LeonBook' WHERE id=? AND status='RUNNING'",task.id());
++                var draft=compactBatches(work,agent,key,policy,initial,task.beforeId(),inputBudget(agent),true,null);
++                String summary=filtered(draft.last(),draft.facts().recall()).text();
++                String confirmed=clean(draft.facts().archiveFacts(),key);
++                synchronized(store){
++                    checkEpoch(work,policy);
++                    store.atomic(()->{
++                        jdbc.update("UPDATE chat_context_archive SET summary=?,confirmed_facts=? WHERE id=?",
++                            summary.isBlank()&&confirmed.isBlank()?"本轮没有可保留的已确认事项。":summary,confirmed,task.id());
++                        finishOperation(task.id(),"本轮对话总结已生成，可导出到 LeonBook");
++                        return null;
++                    });
+                 }
+                 return;
+             }
+-            long cutoff=latest.isEmpty()?task.beforeId():latest.getFirst();
+-            List<Long> older;synchronized(store) { older=store.contextAnchors(work,memory.throughId(),cutoff,1,false); }
+-            String result="暂无可压缩的较早对话（保留最近一轮原文）";
+-            if(!older.isEmpty()) { compress(work,agent,key,policy,memory,cutoff,inputBudget(agent));result="上下文压缩完成，已保留最近一轮原文"; }
+-            synchronized(store) { jdbc.update("UPDATE chat_context_operation SET status='SUCCEEDED',result=? WHERE id=? AND status='RUNNING'",result,task.id()); }
++            Memory memory;long cutoff;
++            synchronized(store){
++                var latest=store.contextAnchors(work,policy.afterId(),task.beforeId(),1,true);
++                cutoff=latest.isEmpty()?task.beforeId():latest.getFirst();
++                memory=memory(work,policy,cutoff);
++            }
++            var draft=compactBatches(work,agent,key,policy,memory,cutoff,inputBudget(agent),false,null);
++            publishCompression(work,policy,draft,task.id());
+         } catch(Exception failed) {
+             if(failed instanceof InterruptedException)Thread.currentThread().interrupt();
+             String reason=failed instanceof AgentModelClient.Failure?clean(failed.getMessage(),key):failed instanceof InterruptedException?"服务中断":"请检查模型配置或网络";
+@@ -376,47 +384,83 @@
+             synchronized(store) { jdbc.update("UPDATE chat_context_operation SET status='FAILED',error=? WHERE id=? AND status='RUNNING'",error.substring(0,Math.min(300,error.length())),task.id()); }
+         }
+     }
+-    private Memory compress(DeviceMessageStore.Work work,AgentRegistry.Agent agent,String key,Policy policy,Memory memory,long cutoff,int budget) throws Exception {
+-        return compress(work,agent,key,policy,memory,cutoff,budget,true);
+-    }
+-    private Memory compress(DeviceMessageStore.Work work,AgentRegistry.Agent agent,String key,Policy policy,Memory memory,long cutoff,int budget,boolean persist) throws Exception {
+-        List<Long> old;synchronized(store) { old=store.contextAnchors(work,memory.throughId(),cutoff,HISTORY_PAGE,false); }
+-        while(!old.isEmpty()) {
+-            var recall=facts.recall(work.conversationId(),agent.id(),policy.epoch(),policy.afterId(),work.messageId());
+-            memory=filtered(memory,recall);
+-            Map<String,String> previousFacts=factPrompt(work,policy,recall,"",Math.min(factBudget(agent),budget/5));
+-            var chunk=new ArrayList<Turn>();
+-            for(long anchor:old) {
+-                var next=turn(work,anchor,agent,key,recall);var trial=new ArrayList<>(chunk);trial.add(next);
+-                if(tokens(compressionMessages(agent,work,memory.text(),trial,previousFacts))>budget)break;
+-                chunk.add(next);
+-            }
+-            if(chunk.isEmpty()) throw new AgentModelClient.Failure("较早的单轮对话过长，无法完整压缩；可开启新话题");
+-            var base=compressionMessages(agent,work,memory.text(),chunk,previousFacts);
+-            var enriched=withDocuments(chunk,budget-tokens(base),key,recall);
+-            var request=compressionMessages(agent,work,memory.text(),enriched,previousFacts);
+-            // Transcript framing can round ASCII costs differently from individual chat messages.
+-            if(tokens(request)>budget)request=base;
+-            String answer=clean(model.complete(agent,key,request),key).strip();
+-            var sources=new HashMap<Long,DeviceMessageStore.Message>();
+-            for(var entry:chunk)for(var row:entry.rows())if(row.role().equals("user")&&!recall.hides(row))sources.put(row.id(),row);
+-            var digest=facts.decode(answer,agent.id(),sources);String summary=digest.summary();
+-            if(summary.isBlank()||summary.length()>8000||estimate(summary)>(isLuna(agent)?500:SUMMARY_BUDGET))throw new AgentModelClient.Failure("AI 摘要为空或过长");
+-            memory=new Memory(chunk.getLast().anchor(),summary,System.currentTimeMillis(),recall.signature());
+-            synchronized(store) {
+-                checkEpoch(work,policy);
+-                if(persist){
+-                    final Memory nextMemory=memory;
+-                    store.atomic(()->{
+-                        facts.save(work.conversationId(),policy.epoch(),digest.changes());
+-                        jdbc.update("MERGE INTO chat_context_summary(conversation_id,agent_id,epoch,through_id,summary,created_at,recall_signature) KEY(conversation_id,agent_id,epoch,through_id) VALUES(?,?,?,?,?,?,?)",work.conversationId(),work.agentId(),policy.epoch(),nextMemory.throughId(),nextMemory.text(),nextMemory.createdAt(),nextMemory.recallSignature());
+-                        return null;
+-                    });
++    private record CompressionDraft(Memory last,List<Memory> checkpoints,ConversationFactMemory.WorkingFacts facts){}
++
++    private CompressionDraft compactBatches(DeviceMessageStore.Work work,AgentRegistry.Agent agent,String key,Policy policy,
++                                            Memory memory,long cutoff,int budget,boolean archive,List<List<DeviceMessageStore.Message>> loaded) throws Exception {
++        var working=facts.workingFacts(work.conversationId(),agent.id(),policy.epoch(),policy.afterId(),work.messageId());
++        var checkpoints=new ArrayList<Memory>();
++        String instruction=isLuna(agent)?LUNA_SUMMARY_INSTRUCTION:SUMMARY_INSTRUCTION;
++        int textBudget=budget-tokens(compressionMessages(instruction,"",List.of()));
++        int offset=0;
++        while(true){
++            checkEpoch(work,policy);
++            DeviceMessageStore.TurnPage page;
++            if(loaded==null){
++                page=store.contextPage(work,memory.throughId(),cutoff,HISTORY_PAGE,false,archive);
++            }else{
++                int end=Math.min(offset+HISTORY_PAGE,loaded.size());
++                page=new DeviceMessageStore.TurnPage(loaded.subList(offset,end),end<loaded.size());
++                offset=end;
++            }
++            var turns=page.turns();
++            int index=0;
++            while(index<turns.size()){
++                var recall=working.recall();
++                memory=filtered(memory,recall);
++                var latest=working.latest();
++                var known=facts.prompt(latest.subList(0,Math.min(latest.size(),ConversationFactMemory.PROMPT_CANDIDATES)),"",Math.min(factBudget(agent),budget/5),recall);
++                String preamble=compressionPreamble(memory.text(),known);
++                long remaining=3L*textBudget-tokenThirds(preamble);
++                var chunk=new ArrayList<Turn>();
++                while(index<turns.size()){
++                    var rows=turns.get(index);
++                    var next=renderTurn(work,agent,key,recall,rows);
++                    long cost=tokenThirds(turnTranscript(next));
++                    for(var message:next.messages())cost+=3L*imageTokens(message);
++                    if(cost>remaining)break;
++                    remaining-=cost;chunk.add(next);index++;
+                 }
+-                old=store.contextAnchors(work,memory.throughId(),cutoff,HISTORY_PAGE,false);
+-            }
+-        }
+-        return memory;
++                if(chunk.isEmpty())throw new AgentModelClient.Failure("较早的单轮对话过长，无法完整压缩；可开启新话题");
++                var enriched=withDocuments(chunk,(int)(remaining/3),key,recall);
++                var request=compressionMessages(instruction,preamble,enriched);
++                if(tokens(request)>budget)request=compressionMessages(instruction,preamble,chunk);
++                if(Thread.currentThread().isInterrupted())throw new InterruptedException();
++                String answer=clean(model.complete(agent,key,request),key).strip();
++                if(Thread.currentThread().isInterrupted())throw new InterruptedException();
++                var sources=new HashMap<Long,DeviceMessageStore.Message>();
++                for(var entry:chunk)for(var row:entry.rows())
++                    if(row.role().equals("user")&&!recall.hides(row))sources.put(row.id(),row);
++                var digest=facts.decode(answer,agent.id(),sources);
++                String summary=digest.summary();
++                if(summary.isBlank()||summary.length()>8000||estimate(summary)>(isLuna(agent)?500:SUMMARY_BUDGET))
++                    throw new AgentModelClient.Failure("AI 摘要为空或过长");
++                memory=new Memory(chunk.getLast().anchor(),summary,System.currentTimeMillis(),recall.signature());
++                checkpoints.add(memory);
++                working.stage(digest.changes());
++            }
++            if(!page.hasMore())break;
++        }
++        return new CompressionDraft(memory,List.copyOf(checkpoints),working);
++    }
++    private void publishCompression(DeviceMessageStore.Work work,Policy policy,CompressionDraft draft,String operationId) throws Exception{
++        synchronized(store){
++            checkEpoch(work,policy);
++            store.atomic(()->{
++                facts.save(work.conversationId(),policy.epoch(),draft.facts().changes());
++                // Keep intermediate boundaries for historical retries, publishing them all in the same transaction.
++                for(var point:draft.checkpoints())
++                    jdbc.update("MERGE INTO chat_context_summary(conversation_id,agent_id,epoch,through_id,summary,created_at,recall_signature) KEY(conversation_id,agent_id,epoch,through_id) VALUES(?,?,?,?,?,?,?)",
++                        work.conversationId(),work.agentId(),policy.epoch(),point.throughId(),point.text(),point.createdAt(),point.recallSignature());
++                if(operationId!=null)finishOperation(operationId,draft.checkpoints().isEmpty()
++                    ?"暂无可压缩的较早对话（保留最近一轮原文）":"上下文压缩完成，已保留最近一轮原文");
++                return null;
++            });
++        }
++    }
++    private void finishOperation(String id,String result){
++        if(jdbc.update("UPDATE chat_context_operation SET status='SUCCEEDED',result=? WHERE id=? AND status='RUNNING'",result,id)!=1)
++            throw new IllegalStateException("上下文任务已中止");
+     }
+     public Map<String,Object> archive(String id) {
+         id=DeviceMessageStore.uuid(id);
+@@ -424,7 +468,9 @@
+             var rows=jdbc.queryForList("SELECT * FROM chat_context_archive WHERE id=?",id);
+             if(rows.isEmpty())throw DeviceMessageStore.failure(HttpStatus.NOT_FOUND,"对话归档不存在");
+             var row=rows.getFirst();var op=operation(id);var result=new LinkedHashMap<String,Object>();
+-            result.put("operation",op);result.put("id",id);result.put("title",row.get("title"));result.put("summary",row.get("summary"));
++            result.put("operation",op);result.put("id",id);result.put("title",row.get("title"));
++            String narrative=(String)row.get("summary"),confirmed=(String)row.get("confirmed_facts");
++            result.put("summary",confirmed.isBlank()?narrative:narrative.isBlank()?confirmed:narrative+"\n\n"+confirmed);
+             result.put("conversationId",row.get("conversation_id"));result.put("throughId",row.get("through_id"));
+             if(op.status().equals("SUCCEEDED"))result.put("messages",json.readTree(jdbc.queryForObject("SELECT messages_json FROM chat_context_archive WHERE id=?",String.class,id)));
+             else result.put("messages",List.of());
+@@ -458,10 +504,14 @@
+         return new Memory(memory.throughId(),recall.summary(memory.text(),memory.recallSignature()),memory.createdAt(),memory.recallSignature());
+     }
+     private List<Turn> refreshTurns(DeviceMessageStore.Work work,AgentRegistry.Agent agent,String key,List<Turn> turns,ConversationFactMemory.Recall recall){
+-        return turns.stream().map(t->turn(work,t.anchor(),agent,key,recall)).toList();
++        return turns.stream().map(t->renderTurn(work,agent,key,recall,t.rows())).toList();
+     }
+     private Turn turn(DeviceMessageStore.Work work,long anchor,AgentRegistry.Agent agent,String key,ConversationFactMemory.Recall recall) {
+-        List<DeviceMessageStore.Message> rows; synchronized(store) { rows=store.contextTurn(work,anchor); }
++        var rows=store.contextTurn(work,anchor);
++        return rows.isEmpty()?new Turn(anchor,List.of(),rows):renderTurn(work,agent,key,recall,rows);
++    }
++    private Turn renderTurn(DeviceMessageStore.Work work,AgentRegistry.Agent agent,String key,ConversationFactMemory.Recall recall,List<DeviceMessageStore.Message> rows){
++        var first=rows.getFirst();long anchor=first.replyTo()==null?first.id():first.replyTo();
+         var messages=new ArrayList<Map<String,String>>();
+         for(var row:rows) {
+             boolean mine="assistant".equals(row.role())&&agent.id().equals(row.agentId());
+@@ -519,21 +569,27 @@
+         if(!summary.isBlank()) result.add(Map.of("role","user","content",MEMORY_LABEL+summary));
+         result.addAll(flatten(recent));result.addAll(current.messages());return List.copyOf(result);
+     }
+-    private List<Map<String,String>> compressionMessages(AgentRegistry.Agent agent,DeviceMessageStore.Work work,String previous,List<Turn> chunk,Map<String,String> previousFacts) {
++    private static String compressionPreamble(String previous,Map<String,String> previousFacts){
+         var transcript=new StringBuilder("旧摘要：\n").append(previous.isBlank()?"（无）":previous).append("\n新增历史（按完整轮次）：\n");
+         if(previousFacts!=null)transcript.append("\n已有结构化事实（沿用相同用户的语义键）：\n").append(previousFacts.get("content")).append('\n');
+-        for(var turn:chunk) {
+-            var rows=turn.rows();
+-            transcript.append("\n--- 一轮对话 ---\n");
+-            for(int i=0;i<turn.messages().size();i++){
+-                var message=turn.messages().get(i);var row=rows.get(i);
+-                transcript.append("消息编号 ").append(row.id()).append(" · 原始角色 ").append(row.role()).append(" · 发言者 ").append(row.sender()).append('\n');
+-                transcript.append(message.get("role")).append(": ").append(message.get("content")).append('\n');
+-            }
+-        }
++        return transcript.toString();
++    }
++    private static String turnTranscript(Turn turn){
++        var transcript=new StringBuilder("\n--- 一轮对话 ---\n");
++        for(int i=0;i<turn.messages().size();i++){
++            var message=turn.messages().get(i);var row=turn.rows().get(i);
++            transcript.append("消息编号 ").append(row.id()).append(" · 原始角色 ").append(row.role()).append(" · 发言者 ").append(row.sender()).append('\n');
++            transcript.append(message.get("role")).append(": ").append(message.get("content")).append('\n');
++        }
++        return transcript.toString();
++    }
++    private static List<Map<String,String>> compressionMessages(String instruction,String preamble,List<Turn> chunk){
++        var transcript=new StringBuilder(preamble);
++        for(var turn:chunk)transcript.append(turnTranscript(turn));
+         var ids=chunk.stream().flatMap(t->t.messages().stream()).map(m->m.getOrDefault("imageIds","")).filter(s->!s.isBlank()).toList();
+-        var input=new HashMap<String,String>();input.put("role","user");input.put("content",transcript.toString());if(!ids.isEmpty())input.put("imageIds",String.join(",",ids));
+-        return List.of(Map.of("role","system","content",isLuna(agent)?LUNA_SUMMARY_INSTRUCTION:SUMMARY_INSTRUCTION),Map.copyOf(input));
++        var input=new HashMap<String,String>();input.put("role","user");input.put("content",transcript.toString());
++        if(!ids.isEmpty())input.put("imageIds",String.join(",",ids));
++        return List.of(Map.of("role","system","content",instruction),Map.copyOf(input));
+     }
+     private List<Map<String,String>> decode(String text) {
+         var rows=json.readTree(text);var result=new ArrayList<Map<String,String>>();
+@@ -543,7 +599,8 @@
+     private static String clean(String value,String key) { if(value==null)return "";return key.isEmpty()?value:value.replace(key,"[已隐藏凭据]"); }
+     // Conservative estimate, not provider billing. CJK/emoji reserve more than ASCII; output has its own 2048-token allowance.
+     private static int tokenThirds(int codePoint){return codePoint<128?1:codePoint>0xffff?12:6;}
+-    static int estimate(String text){return (text.codePoints().map(AgentContextManager::tokenThirds).sum()+2)/3;}
++    private static int tokenThirds(String text){return text.codePoints().map(AgentContextManager::tokenThirds).sum();}
++    static int estimate(String text){return (tokenThirds(text)+2)/3;}
+     static int prefixWithinTokens(String text,int budget){
+         int end=0;long remaining=3L*budget;
+         while(end<text.length()){
+@@ -554,7 +611,12 @@
+         }
+         return end;
+     }
+-    static int tokens(List<Map<String,String>> messages) { return 12+messages.stream().mapToInt(m->estimate(m.get("content"))+8+(m.getOrDefault("imageIds","").isBlank()?0:m.get("imageIds").split(",").length*2000)).sum(); }
++    private static int imageTokens(Map<String,String> message){
++        String ids=message.getOrDefault("imageIds","");
++        return ids.isBlank()?0:ids.split(",").length*2000;
++    }
++    private static int messageTokens(List<Map<String,String>> messages){return messages.stream().mapToInt(m->estimate(m.get("content"))+8+imageTokens(m)).sum();}
++    static int tokens(List<Map<String,String>> messages){return 12+messageTokens(messages);}
+     static boolean isLuna(AgentRegistry.Agent agent) {
+         return agent.provider().equalsIgnoreCase("openai") && agent.model().toLowerCase(Locale.ROOT).contains("luna");
+     }
+diff --git a/src/main/java/com/leon/workflow/messaging/ContextHistorySearch.java b/src/main/java/com/leon/workflow/messaging/ContextHistorySearch.java
+--- a/src/main/java/com/leon/workflow/messaging/ContextHistorySearch.java
++++ b/src/main/java/com/leon/workflow/messaging/ContextHistorySearch.java
+@@ -25,18 +25,55 @@
+         return terms.stream().limit(24).toList();
+     }
+     static int score(String text,List<String> terms){String lower=text.toLowerCase(Locale.ROOT);return terms.stream().filter(lower::contains).mapToInt(s->s.length()*s.length()).sum();}
++    // A separator belongs to an identifier only when it joins two ASCII components.
++    private static final Pattern CODE=Pattern.compile("[a-z0-9]+(?:[-_./][a-z0-9]+)*",Pattern.CASE_INSENSITIVE);
++    private static final Pattern CODE_LABEL=Pattern.compile("(?:编号|订单号|合同号|单号|序列号|代码|代号|\\b(?:id|code|sku|ref))\\s*[:：#]?\\s*$",Pattern.CASE_INSENSITIVE);
++    private static String identifierPattern(String question){
++        var codes=new LinkedHashSet<String>();
++        var matcher=CODE.matcher(question==null?"":question);
++        while(matcher.find() && codes.size()<24){
++            String code=matcher.group();
++            boolean labelled=CODE_LABEL.matcher(question).region(Math.max(0,matcher.start()-20),matcher.start()).find();
++            if(code.length()>=2 && (labelled||code.chars().anyMatch(Character::isDigit)))
++                codes.add(Pattern.quote(code.toLowerCase(Locale.ROOT)));
++        }
++        if(codes.isEmpty())return "";
++        return "(?<![a-z0-9])(?<![a-z0-9][-_./])(?:"
++            +String.join("|",codes)+")(?![a-z0-9]|[-_./][a-z0-9])";
++    }
++    private record Hit(boolean exact,int lexical) implements Comparable<Hit>{
++        public int compareTo(Hit other){
++            int priority=Boolean.compare(exact,other.exact);
++            return priority!=0?priority:Integer.compare(lexical,other.lexical);
++        }
++    }
+     List<Long> find(DeviceMessageStore.Work work,long after,Set<Long> excluded,String question,ConversationFactMemory.Recall recall){
+-        var terms=terms(question);if(terms.isEmpty())return List.of();
+-        var args=new ArrayList<Object>(List.of(work.conversationId(),after,work.messageId(),work.messageId()));
+-        var filters=new ArrayList<String>();
++        var terms=terms(question);
++        String pattern=identifierPattern(question);
++        if(terms.isEmpty()&&pattern.isEmpty())return List.of();
++        var args=new ArrayList<Object>();
++        String exact="FALSE";
++        if(!pattern.isEmpty()){exact="REGEXP_LIKE(LOWER(body),?)";args.add(pattern);}
++        String scope="conversation_id=? AND COALESCE(reply_to,id)>? AND COALESCE(reply_to,id)<? AND id<?";
++        args.addAll(List.of(work.conversationId(),after,work.messageId(),work.messageId()));
++        if(!excluded.isEmpty()){
++            scope+=" AND COALESCE(reply_to,id) NOT IN ("+String.join(",",Collections.nCopies(excluded.size(),"?"))+")";
++            args.addAll(excluded);
++        }
++        var filters=new ArrayList<String>();filters.add("exact_hit");
+         for(String term:terms){filters.add("LOWER(body) LIKE ? ESCAPE '!'");args.add("%"+term.replace("!","!!").replace("%","!%").replace("_","!_")+"%");}
+-        var rows=jdbc.query("SELECT COALESCE(reply_to,id) AS anchor,body FROM device_message WHERE conversation_id=? AND COALESCE(reply_to,id)>? AND COALESCE(reply_to,id)<? AND id<? AND ("+String.join(" OR ",filters)+") ORDER BY id DESC LIMIT 256",
+-            (r,n)->Map.entry(r.getLong("anchor"),score(r.getString("body"),terms)),args.toArray());
+-        var scores=new HashMap<Long,Integer>();
+-        for(var row:rows){
+-            for(long anchor:recall.eligibleAnchors(row.getKey()))
+-                if(!excluded.contains(anchor))scores.merge(anchor,row.getValue(),Math::max);
+-        }
+-        return scores.entrySet().stream().sorted(Map.Entry.<Long,Integer>comparingByValue().reversed().thenComparing(Map.Entry.<Long,Integer>comparingByKey().reversed())).limit(8).map(Map.Entry::getKey).toList();
++        // Apply exact priority in SQL before the candidate limit, and keep it when ranking turns.
++        String sql="SELECT anchor,body,exact_hit FROM (SELECT COALESCE(reply_to,id) anchor,id,body,"+exact+
++            " AS exact_hit FROM device_message WHERE "+scope+") WHERE "+String.join(" OR ",filters)+
++            " ORDER BY exact_hit DESC,id DESC LIMIT 256";
++        var scores=new HashMap<Long,Hit>();
++        jdbc.query(sql,row->{
++            Hit hit=new Hit(row.getBoolean("exact_hit"),score(row.getString("body"),terms));
++            for(long anchor:recall.eligibleAnchors(row.getLong("anchor"))){
++                if(!excluded.contains(anchor))scores.merge(anchor,hit,(a,b)->a.compareTo(b)>=0?a:b);
++            }
++        },args.toArray());
++        return scores.entrySet().stream().sorted(Map.Entry.<Long,Hit>comparingByValue().reversed()
++            .thenComparing(Map.Entry.<Long,Hit>comparingByKey().reversed())).limit(8).map(Map.Entry::getKey).toList();
+     }
+ }
+diff --git a/src/main/java/com/leon/workflow/messaging/ConversationFactMemory.java b/src/main/java/com/leon/workflow/messaging/ConversationFactMemory.java
+--- a/src/main/java/com/leon/workflow/messaging/ConversationFactMemory.java
++++ b/src/main/java/com/leon/workflow/messaging/ConversationFactMemory.java
+@@ -10,6 +10,7 @@
+ /** Extractive facts with immutable, speaker-scoped source versions. Historical retries never read future facts. */
+ @Service
+ public class ConversationFactMemory {
++    static final int PROMPT_CANDIDATES=128;
+     private static final Set<String> KINDS=Set.of("fact","goal","preference","decision","todo");
+     public record Fact(String agentId,String subjectId,String speaker,String kind,String key,String value,
+                        long sourceMessageId,String evidence,boolean deleted) {}
+@@ -29,7 +30,7 @@
+         return jdbc.query(LATEST_FACTS+" AND NOT deleted ORDER BY source_message_id DESC,kind,fact_key",FACT_ROW,room,agent,epoch,after,before);
+     }
+     List<Fact> latest(String room,String agent,long epoch,long after,long before) {
+-        return jdbc.query(LATEST_FACTS+" ORDER BY source_message_id DESC,kind,fact_key LIMIT 128",FACT_ROW,room,agent,epoch,after,before);
++        return jdbc.query(LATEST_FACTS+" ORDER BY source_message_id DESC,kind,fact_key LIMIT ?",FACT_ROW,room,agent,epoch,after,before,PROMPT_CANDIDATES);
+     }
+     List<Fact> backupPage(String room,String agent,long epoch,long after,int offset,int limit) {
+         return jdbc.query("""
+@@ -40,9 +41,7 @@
+ 
+     /** Read suppression independently of the small prompt shortlist, as of the original question. */
+     Recall recall(String room,String agent,long epoch,long after,long before) {
+-        var recall=new Recall();
+-        var versions=new ArrayList<List<Object>>();
+-        jdbc.query("""
++        var suppressed=jdbc.query("""
+             SELECT * FROM (
+               SELECT f.*, FIRST_VALUE(fact_value) OVER versions AS current_value,
+                      FIRST_VALUE(deleted) OVER versions AS current_deleted, FIRST_VALUE(source_message_id) OVER versions AS latest_id,
+@@ -51,19 +50,25 @@
+               WINDOW versions AS (PARTITION BY agent_id,subject_id,kind,fact_key ORDER BY source_message_id DESC)
+             ) WHERE (NOT deleted AND (current_deleted OR fact_value<>current_value)) OR (deleted AND preceding_sets=0)
+             ORDER BY agent_id,source_message_id,subject_id,kind,fact_key
+-            """,r->{
+-                String subject=r.getString("subject_id");
+-                long id=r.getLong("source_message_id");
+-                versions.add(List.of(r.getString("agent_id"),id,r.getLong("latest_id"),subject,r.getString("kind"),r.getString("fact_key"),r.getString("fact_value"),r.getBoolean("current_deleted")));
+-                if(r.getBoolean("deleted"))recall.unlinkedRetractions.merge(subject,id,Math::max);
+-                else {
+-                    recall.oldSources.add(id);
+-                    String value=r.getString("fact_value");
+-                    recall.oldValues.computeIfAbsent(subject,ignored->new LinkedHashMap<>()).computeIfAbsent(value,Recall::literal);
+-                    if(!r.getBoolean("current_deleted"))
+-                        recall.replacements.computeIfAbsent(id,ignored->new HashSet<>()).add(r.getLong("latest_id"));
+-                }
+-            },room,agent,agent==null,epoch,after,before);
++            """,(r,n)->new Suppressed(FACT_ROW.mapRow(r,n),r.getLong("latest_id"),r.getBoolean("current_deleted")),
++                room,agent,agent==null,epoch,after,before);
++        return recall(room,after,before,suppressed);
++    }
++
++    private record Suppressed(Fact source,long latestId,boolean deleted) {}
++    private Recall recall(String room,long after,long before,List<Suppressed> suppressed){
++        var recall=new Recall();
++        var versions=new ArrayList<List<Object>>();
++        for(var item:suppressed){
++            var f=item.source();long id=f.sourceMessageId();String subject=f.subjectId();
++            versions.add(List.of(f.agentId(),id,item.latestId(),subject,f.kind(),f.key(),f.value(),item.deleted()));
++            if(f.deleted())recall.unlinkedRetractions.merge(subject,id,Math::max);
++            else {
++                recall.oldSources.add(id);
++                recall.oldValues.computeIfAbsent(subject,ignored->new LinkedHashMap<>()).computeIfAbsent(f.value(),Recall::literal);
++                if(!item.deleted())recall.replacements.computeIfAbsent(id,ignored->new HashSet<>()).add(item.latestId());
++            }
++        }
+         if(!versions.isEmpty())recall.signature=UUID.nameUUIDFromBytes(json.writeValueAsBytes(versions)).toString();
+         for(var entry:recall.unlinkedRetractions.entrySet()){
+             recall.oldSources.addAll(jdbc.queryForList("""
+@@ -80,6 +85,68 @@
+             recall.oldSources.addAll(jdbc.queryForList("SELECT id FROM device_message WHERE conversation_id=? AND id<? AND reply_to IN ("+placeholders+")",Long.class,args.toArray()));
+         }
+         return recall;
++    }
++
++    private record FactKey(String subject,String kind,String key){}
++    private static final Comparator<Fact> SOURCE_ORDER=Comparator.comparing(Fact::agentId)
++        .thenComparingLong(Fact::sourceMessageId).thenComparing(Fact::subjectId).thenComparing(Fact::kind).thenComparing(Fact::key);
++
++    /** One compaction or archive sees its own verified changes. Other requests see only committed facts. */
++    final class WorkingFacts {
++        private final String room;
++        private final long after,before;
++        private final Map<FactKey,NavigableMap<Long,Fact>> histories=new LinkedHashMap<>();
++        private final List<Fact> changes=new ArrayList<>();
++        private Recall cachedRecall;
++        private List<Fact> cachedLatest;
++        WorkingFacts(String room,long after,long before){this.room=room;this.after=after;this.before=before;}
++        private boolean add(Fact f){
++            var key=new FactKey(f.subjectId(),f.kind(),f.key());
++            return histories.computeIfAbsent(key,ignored->new TreeMap<>()).putIfAbsent(f.sourceMessageId(),f)==null;
++        }
++        void stage(List<Fact> verified){
++            for(var f:verified)if(add(f)){changes.add(f);cachedRecall=null;cachedLatest=null;}
++        }
++        List<Fact> changes(){return changes;}
++        List<Fact> latest(){
++            if(cachedLatest==null)cachedLatest=histories.values().stream().map(h->h.lastEntry().getValue()).sorted(SOURCE_ORDER.reversed()).toList();
++            return cachedLatest;
++        }
++        Recall recall(){
++            if(cachedRecall!=null)return cachedRecall;
++            var suppressed=new ArrayList<Suppressed>();
++            for(var versions:histories.values()){
++                var latest=versions.lastEntry().getValue();
++                boolean hasSet=false;
++                for(var f:versions.values()){
++                    if(!f.deleted())hasSet=true;
++                    boolean orphanDelete=f.deleted()&&!hasSet;
++                    boolean superseded=!f.deleted()&&(latest.deleted()||!f.value().equals(latest.value()));
++                    if(orphanDelete||superseded)
++                        suppressed.add(new Suppressed(f,latest.sourceMessageId(),latest.deleted()));
++                }
++            }
++            suppressed.sort(Comparator.comparing(Suppressed::source,SOURCE_ORDER));
++            cachedRecall=ConversationFactMemory.this.recall(room,after,before,suppressed);
++            return cachedRecall;
++        }
++        String archiveFacts(){
++            var recall=recall();
++            var lines=new StringBuilder();
++            for(var f:latest()){
++                if(f.deleted()||recall.hides(f.sourceMessageId(),null)&&!recall.redact(f.value(),f.subjectId()).equals(f.value()))continue;
++                lines.append("\n• ").append(f.speaker()).append(" · ").append(f.key()).append("：").append(f.value())
++                    .append("（消息 #").append(f.sourceMessageId()).append("）");
++            }
++            return lines.isEmpty()?"":"已确认的关键事实"+lines;
++        }
++    }
++
++    WorkingFacts workingFacts(String room,String agent,long epoch,long after,long before){
++        var working=new WorkingFacts(room,after,before);
++        jdbc.query("SELECT * FROM chat_context_fact WHERE conversation_id=? AND agent_id=? AND epoch=? AND source_message_id>? AND source_message_id<?",
++            r->{working.add(FACT_ROW.mapRow(r,0));},room,agent,epoch,after,before);
++        return working;
+     }
+ 
+     static final class Recall {
+diff --git a/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java b/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java
+--- a/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java
++++ b/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java
+@@ -160,6 +160,7 @@
+         jdbc.execute("CREATE INDEX IF NOT EXISTS idx_chat_context_operation_queue ON chat_context_operation(status,conversation_id)");
+         jdbc.execute("ALTER TABLE chat_context_operation ADD COLUMN IF NOT EXISTS kind VARCHAR(16) DEFAULT 'COMPACT' NOT NULL");
+         jdbc.execute("CREATE TABLE IF NOT EXISTS chat_context_archive (id VARCHAR(36) PRIMARY KEY,conversation_id VARCHAR(80) NOT NULL,agent_id VARCHAR(36) NOT NULL,epoch BIGINT NOT NULL,after_id BIGINT NOT NULL,through_id BIGINT NOT NULL,title VARCHAR(200) NOT NULL,summary VARCHAR(8000) NOT NULL DEFAULT '',messages_json CLOB NOT NULL,created_at BIGINT NOT NULL,finished_at BIGINT NOT NULL DEFAULT 0)");
++        jdbc.execute("ALTER TABLE chat_context_archive ADD COLUMN IF NOT EXISTS confirmed_facts CLOB DEFAULT '' NOT NULL");
+         jdbc.execute("CREATE TABLE IF NOT EXISTS chat_helper_memory (conversation_id VARCHAR(80) PRIMARY KEY,history_revision BIGINT NOT NULL,epoch BIGINT NOT NULL,after_id BIGINT NOT NULL,through_id BIGINT NOT NULL,summary VARCHAR(1200) NOT NULL)");
+         jdbc.execute("ALTER TABLE chat_helper_memory ADD COLUMN IF NOT EXISTS recall_signature VARCHAR(36) DEFAULT '' NOT NULL");
+         jdbc.execute("CREATE TABLE IF NOT EXISTS chat_helper_outreach (user_id VARCHAR(36) NOT NULL,local_date VARCHAR(10) NOT NULL,slot INT NOT NULL,agent_id VARCHAR(36) NOT NULL,due_at BIGINT NOT NULL,message_id VARCHAR(36) NOT NULL,status VARCHAR(16) NOT NULL,PRIMARY KEY(user_id,local_date,slot))");
+@@ -351,13 +352,35 @@
+         return jdbc.query("SELECT * FROM device_message WHERE conversation_id=? AND id>? AND id<=? ORDER BY id",ROW,room,after,through);
+     }
+     <T> T atomic(java.util.function.Supplier<T> action) { return transaction.execute(status->action.get()); }
++    private static final String VISIBLE_MESSAGES="((message_role='user' AND id<=?) OR (message_role='assistant' AND (reply_to<? OR (reply_to IS NULL AND id<?))))";
+     /** Anchors keep user/assistant pairs together even when later questions were queued first. */
+     synchronized List<Long> contextAnchors(Work work,long after,long before,int limit,boolean newest) {
+-        return jdbc.query("SELECT DISTINCT COALESCE(reply_to,id) turn_id FROM device_message WHERE conversation_id=? AND COALESCE(reply_to,id)>? AND COALESCE(reply_to,id)<? AND ((message_role='user' AND id<=?) OR (message_role='assistant' AND (reply_to<? OR (reply_to IS NULL AND id<?)))) ORDER BY turn_id "+(newest?"DESC":"ASC")+" LIMIT ?",
+-                (rs,n)->rs.getLong(1),work.conversationId(),after,before,work.messageId(),work.messageId(),work.messageId(),limit);
++        return contextAnchors(work,after,before,limit,newest,false);
++    }
++    private List<Long> contextAnchors(Work work,long after,long before,int limit,boolean newest,boolean frozen){
++        String sql="SELECT DISTINCT COALESCE(reply_to,id) turn_id FROM device_message WHERE conversation_id=? AND COALESCE(reply_to,id)>? AND COALESCE(reply_to,id)<? AND "+VISIBLE_MESSAGES;
++        var args=new ArrayList<Object>(List.of(work.conversationId(),after,before,work.messageId(),work.messageId(),work.messageId()));
++        if(frozen){sql+=" AND id<?";args.add(work.messageId());}
++        sql+=" ORDER BY turn_id "+(newest?"DESC":"ASC")+" LIMIT ?";args.add(limit);
++        return jdbc.queryForList(sql,Long.class,args.toArray());
++    }
++    record TurnPage(List<List<Message>> turns,boolean hasMore) {}
++    /** Look ahead by one anchor id, then fetch just this page's message bodies. */
++    synchronized TurnPage contextPage(Work work,long after,long before,int limit,boolean newest,boolean frozen){
++        var anchors=contextAnchors(work,after,before,limit+1,newest,frozen);
++        if(anchors.isEmpty())return new TurnPage(List.of(),false);
++        long last=anchors.get(Math.min(limit,anchors.size())-1);
++        var args=new ArrayList<Object>(List.of(work.conversationId(),Math.min(anchors.getFirst(),last),Math.max(anchors.getFirst(),last),work.messageId(),work.messageId(),work.messageId()));
++        String sql="SELECT *,COALESCE(reply_to,id) anchor FROM device_message WHERE conversation_id=? AND COALESCE(reply_to,id) BETWEEN ? AND ? AND "+VISIBLE_MESSAGES;
++        if(frozen){sql+=" AND id<?";args.add(work.messageId());}
++        var groups=new LinkedHashMap<Long,List<Message>>();
++        jdbc.query(sql+" ORDER BY anchor "+(newest?"DESC":"ASC")+",CASE WHEN message_role='user' THEN 0 ELSE 1 END,id",r->{
++            groups.computeIfAbsent(r.getLong("anchor"),ignored->new ArrayList<>()).add(ROW.mapRow(r,0));
++        },args.toArray());
++        return new TurnPage(List.copyOf(groups.values()),anchors.size()>limit);
+     }
+     synchronized List<Message> contextTurn(Work work,long anchor) {
+-        return jdbc.query("SELECT * FROM device_message WHERE conversation_id=? AND COALESCE(reply_to,id)=? AND ((message_role='user' AND id<=?) OR (message_role='assistant' AND (reply_to<? OR (reply_to IS NULL AND id<?)))) ORDER BY CASE WHEN message_role='user' THEN 0 ELSE 1 END,id",
++        return jdbc.query("SELECT * FROM device_message WHERE conversation_id=? AND COALESCE(reply_to,id)=? AND "+VISIBLE_MESSAGES+" ORDER BY CASE WHEN message_role='user' THEN 0 ELSE 1 END,id",
+                 ROW,work.conversationId(),anchor,work.messageId(),work.messageId(),work.messageId());
+     }
+     synchronized void phase(Work work,String phase) { jdbc.update("UPDATE chat_agent_job SET phase=? WHERE message_id=? AND agent_id=? AND status='RUNNING'",phase,work.messageId(),work.agentId()); }
+diff --git a/src/test/java/com/leon/workflow/messaging/AgentChatIntegrationTest.java b/src/test/java/com/leon/workflow/messaging/AgentChatIntegrationTest.java
+--- a/src/test/java/com/leon/workflow/messaging/AgentChatIntegrationTest.java
++++ b/src/test/java/com/leon/workflow/messaging/AgentChatIntegrationTest.java
+@@ -404,22 +404,27 @@
+         assertEquals("FAILED",store.page(room.id(),null,null,100).contextOperations().getFirst().status());
+         verifyNoInteractions(model);
+     }
+-    @Test void manualCompressionResumesCompletedBatchesAfterFailure() throws Exception {
++    @Test void manualCompressionRestartsFromCommittedBoundaryAfterFailure() throws Exception {
+         var a=agent("writer");var room=chat.group("test",List.of(a.id()));
+-        for(int i=0;i<10;i++) chat.send(send(room.id(),"history-"+i+"中".repeat(500),List.of()));
++        for(int i=0;i<10;i++)chat.send(send(room.id(),"history-"+i+"中".repeat(500),List.of()));
+         var calls=new java.util.concurrent.atomic.AtomicInteger();
+         when(model.complete(any(),anyString(),anyList())).thenAnswer(call->{
+-            if(calls.incrementAndGet()==2)throw new AgentModelClient.Failure("超时");return "已完成第一批";
++            if(calls.incrementAndGet()==2)throw new AgentModelClient.Failure("超时");return "未发布第一批";
+         });
+         contexts.enqueueCompression(room.id(),a.id(),UUID.randomUUID().toString());engine.runNext();
+         assertEquals("FAILED",store.page(room.id(),null,null,100).contextOperations().getFirst().status());
+-        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM chat_context_summary",Integer.class));
++        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM chat_context_summary",Integer.class));
++        calls.set(0);
+         doAnswer(call->{
+             List<Map<String,String>> input=call.getArgument(2);String text=input.getLast().get("content");
+-            assertTrue(text.contains("已完成第一批")||text.contains("已继续压缩"));assertFalse(text.contains("history-0"));return "已继续压缩";
++            assertFalse(text.contains("未发布第一批"));
++            if(calls.getAndIncrement()==0)assertTrue(text.contains("history-0"));
++            else assertTrue(text.contains("重新压缩"));
++            return "重新压缩";
+         }).when(model).complete(any(),anyString(),anyList());
+         contexts.enqueueCompression(room.id(),a.id(),UUID.randomUUID().toString());engine.runNext();
+         assertEquals("SUCCEEDED",store.page(room.id(),null,null,100).contextOperations().getFirst().status());
++        assertTrue(calls.get()>1);
+         assertEquals(10,store.page(room.id(),null,null,100).messages().size());
+     }
+     @Test void noEarlierHistoryCompletesWithoutPaidModelCall() {
+diff --git a/src/test/java/com/leon/workflow/messaging/ContextMemoryIntegrationTest.java b/src/test/java/com/leon/workflow/messaging/ContextMemoryIntegrationTest.java
+--- a/src/test/java/com/leon/workflow/messaging/ContextMemoryIntegrationTest.java
++++ b/src/test/java/com/leon/workflow/messaging/ContextMemoryIntegrationTest.java
+@@ -240,4 +240,164 @@
+         assertFalse(payload.contains("NOTE333"));assertTrue(payload.contains("BIRD550"));
+     }
+ 
++    @Test void wholeIdentifiersBeatNewerWordsSubstringsAndCompoundCodeFragments() throws Exception {
++        var a=agent("ids");String room=chat.group("编号",List.of(a.id())).id();
++        var exact=send(room,"计划使用 HoTel-4821/A、000731 和 ARCH-IV。");
++        for(int i=0;i<265;i++)send(room,"plan 计划 HOTEL-48210/A PRE-HOTEL-4821/A HOTEL-4821/A-X 0007319 ARCH-IVE");
++        var boundary=send(room,"已讨论");
++        jdbc.update("INSERT INTO chat_context_summary(conversation_id,agent_id,epoch,through_id,summary,created_at) VALUES(?,?,0,?,'行程',1)",room,a.id(),boundary.id());
++        var search=new ContextHistorySearch(jdbc);
++        for(String code:List.of("hotel-4821/a","000731","ARCH-IV")){
++            var q=send(room,"plan 计划编号 "+code+" 怎么安排？");
++            var work=new DeviceMessageStore.Work(q.id(),a.id(),room);
++            var hits=search.find(work,0,Set.of(),q.text(),new ConversationFactMemory.Recall());
++            assertEquals(exact.id(),hits.getFirst());
++            assertFalse(search.find(work,exact.id(),Set.of(),q.text(),new ConversationFactMemory.Recall()).contains(exact.id()));
++            assertFalse(search.find(work,0,Set.of(exact.id()),q.text(),new ConversationFactMemory.Recall()).contains(exact.id()));
++            var firstReference=contexts.prepare(work,a,KEY).stream().filter(m->m.get("content").startsWith("历史原文检索")).findFirst().orElseThrow();
++            assertTrue(firstReference.get("content").contains(exact.text()));
++        }
++    }
++
++    @Test void multiBatchCompactionStagesVerifiedFactsAndRollsBackOnFailure() throws Exception {
++        var a=agent("staging");String room=chat.group("分批",List.of(a.id())).id();
++        var baseline=send(room,"旧进展");remember(a,baseline,"progress","旧进展",false);
++        jdbc.update("INSERT INTO chat_context_summary(conversation_id,agent_id,epoch,through_id,summary,created_at) VALUES(?,?,0,?,'原始进展',1)",room,a.id(),baseline.id());
++        var first=send(room,"预算是5000元");
++        for(int i=0;i<31;i++)send(room,"短轮次"+i);
++        var correction=send(room,"预算改为8000元");send(room,"保留最后一轮");
++        var calls=new AtomicInteger();
++        doAnswer(call->{
++            List<Map<String,String>> request=call.getArgument(2);String input=request.getLast().get("content");
++            var info=contexts.info(room).agents().getFirst();
++            assertEquals("原始进展",info.summary());assertEquals(1,info.facts().size());
++            int n=calls.incrementAndGet();
++            if(n%2==1){assertTrue(input.contains(first.text()));return factJson(first.id(),"5000元",first.text(),"set");}
++            assertTrue(input.contains("已有结构化事实"));assertTrue(input.contains("5000元"));assertTrue(input.contains(correction.text()));
++            if(n==2)throw new AgentModelClient.Failure("第二批超时");
++            return factJson(correction.id(),"8000元",correction.text(),"set");
++        }).when(model).complete(any(),anyString(),anyList());
++        contexts.enqueueCompression(room,a.id(),UUID.randomUUID().toString());engine.runNext();
++        assertEquals("FAILED",store.page(room,null,null,100).contextOperations().getFirst().status());
++        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM chat_context_fact WHERE conversation_id=?",Integer.class,room));
++        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM chat_context_summary WHERE conversation_id=?",Integer.class,room));
++        contexts.enqueueCompression(room,a.id(),UUID.randomUUID().toString());engine.runNext();
++        assertEquals("SUCCEEDED",store.page(room,null,null,100).contextOperations().getFirst().status());assertEquals(4,calls.get());
++        assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM chat_context_fact WHERE conversation_id=?",Integer.class,room));
++        assertEquals(3,jdbc.queryForObject("SELECT COUNT(*) FROM chat_context_summary WHERE conversation_id=?",Integer.class,room));
++        assertTrue(contexts.info(room).agents().getFirst().facts().stream().anyMatch(f->f.value().equals("8000元")));
++    }
++
++    @Test void thirtyTwoTurnsReadOnePageEvenWhenSplitAcrossModelCalls() throws Exception {
++        var a=agent("reads");String room=chat.group("读库",List.of(a.id())).id();
++        for(int i=0;i<33;i++)send(room,"正文-"+i+" "+"中".repeat(120));
++        var counted=spy(store);
++        var manager=new AgentContextManager(counted,jdbc,agents,model,json);
++        var calls=new AtomicInteger();var material=new StringBuilder();
++        doAnswer(call->{
++            List<Map<String,String>> request=call.getArgument(2);
++            assertTrue(AgentContextManager.tokens(request)<=AgentContextManager.inputBudget(a));
++            material.append(request.getLast().get("content"));calls.incrementAndGet();return "进展";
++        }).when(model).complete(any(),anyString(),anyList());
++        manager.enqueueCompression(room,a.id(),UUID.randomUUID().toString());manager.executeCompression(manager.claimCompression());
++        assertEquals("SUCCEEDED",store.page(room,null,null,100).contextOperations().getFirst().status());assertTrue(calls.get()>1);
++        verify(counted,times(1)).contextPage(any(),anyLong(),anyLong(),eq(32),eq(false),eq(false));
++        verify(counted,never()).contextTurn(any(),anyLong());
++        for(int i=0;i<32;i++)assertEquals(2,material.toString().split("正文-"+i+" ",-1).length);
++        assertFalse(material.toString().contains("正文-32 "));
++    }
++
++    private Map<String,Object> change(DeviceMessageStore.Message m,String key,String value,String op){
++        return Map.of("sourceMessageId",m.id(),"kind","fact","key",key,"value",value,"evidence",m.text(),"op",op);
++    }
++    @Test void archiveCombinesCommittedAndNewFactsAcrossBatchesUsingFinalVersionsOnly() throws Exception {
++        var a=agent("exportfacts");String room=chat.group("合同",List.of(a.id())).id();
++        var place=send(room,"已经确认交付地点为青竹园");remember(a,place,"交付地点","青竹园",false);
++        var id=send(room,"合同编号是 ORCHID779");
++        var seat=send(room,"座位代号为 WREN533");
++        for(int i=0;i<29;i++)send(room,"进展"+i);
++        var corrected=send(room,"合同编号改为 MAPLE842");var withdrawn=send(room,"忘记座位代号");
++        var calls=new AtomicInteger();
++        doAnswer(call->{
++            List<Map<String,String>> request=call.getArgument(2);assertFalse(request.toString().contains("FUTURE999"));
++            if(calls.incrementAndGet()==1)return json.writeValueAsString(Map.of("summary","已讨论合同。","facts",List.of(
++                change(id,"合同编号","ORCHID779","set"),change(seat,"座位代号","WREN533","set"))));
++            assertTrue(request.getLast().get("content").contains("ORCHID779"));
++            return json.writeValueAsString(Map.of("summary","已讨论合同 ORCHID779 和座位 WREN533。","facts",List.of(
++                change(corrected,"合同编号","MAPLE842","set"),change(withdrawn,"座位代号","","delete"))));
++        }).when(model).complete(any(),anyString(),anyList());
++        var job=contexts.enqueueArchive(room,a.id(),UUID.randomUUID().toString());send(room,"未来合同 FUTURE999");engine.runNext();
++        var frozenWork=new DeviceMessageStore.Work(withdrawn.id()+1,a.id(),room);
++        var page1=store.contextPage(frozenWork,0,frozenWork.messageId(),32,false,true);
++        var page2=store.contextPage(frozenWork,page1.turns().getLast().getFirst().id(),frozenWork.messageId(),32,false,true);
++        assertEquals(32,page1.turns().size(),"page1 hasMore="+page1.hasMore()+" page2="+page2.turns().size()+" calls="+calls.get());
++        assertTrue(page1.hasMore(),"page2="+page2.turns().size()+" calls="+calls.get());
++        assertEquals(2,page2.turns().size());
++        assertEquals(2,calls.get());
++        var result=contexts.archive(job.id());String summary=result.get("summary").toString();
++        assertEquals("SUCCEEDED",store.page(room,null,null,100).contextOperations().getFirst().status(),result.get("operation").toString());
++        assertTrue(summary.contains("青竹园"),summary);
++        assertTrue(summary.contains("MAPLE842"),summary);
++        assertTrue(summary.contains(corrected.sender()),summary);
++        assertTrue(summary.contains("#"+corrected.id()),summary);
++        assertFalse(summary.contains("ORCHID779"));assertFalse(summary.contains("WREN533"));assertFalse(summary.contains("FUTURE999"));
++        assertTrue(result.get("messages").toString().contains("ORCHID779"));assertEquals(2,calls.get());
++        assertEquals(1,jdbc.queryForObject("SELECT COUNT(*) FROM chat_context_fact WHERE conversation_id=?",Integer.class,room));
++        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM chat_context_summary WHERE conversation_id=?",Integer.class,room));
++    }
++
++    @Test void automaticSecondBatchFailureFallsBackWithNoPartialFactsOrSummary() throws Exception {
++        var a=agent("autobatch");String room=chat.group("自动回退",List.of(a.id())).id();
++        var first=send(room,"盒子编号为 WREN485");
++        for(int i=0;i<100;i++)send(room,"自动轮"+i+"甲".repeat(8));
++        var q=send(room,"继续处理");
++        var calls=new AtomicInteger();
++        doAnswer(call->{
++            List<Map<String,String>> request=call.getArgument(2);assertTrue(compression(request));
++            if(calls.incrementAndGet()==1)return factJson(first.id(),"WREN485",first.text(),"set");
++            assertTrue(request.getLast().get("content").contains("WREN485"));
++            throw new AgentModelClient.Failure("第二批超时");
++        }).when(model).complete(any(),anyString(),anyList());
++        var counted=spy(store);
++        var manager=new AgentContextManager(counted,jdbc,agents,model,json);
++        var request=manager.prepare(new DeviceMessageStore.Work(q.id(),a.id(),room),a,KEY);
++        verify(counted,times(4)).contextPage(any(),anyLong(),anyLong(),eq(32),eq(false),eq(false));
++        verify(counted,times(1)).contextTurn(any(),anyLong());
++        assertEquals(2,calls.get());assertTrue(contexts.info(room).agents().getFirst().compressionFallback());
++        assertTrue(request.toString().contains(first.text()));assertTrue(request.toString().contains("自动轮99"));
++        assertTrue(AgentContextManager.tokens(request)<=AgentContextManager.inputBudget(a));
++        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM chat_context_fact WHERE conversation_id=?",Integer.class,room));
++        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM chat_context_summary WHERE conversation_id=?",Integer.class,room));
++    }
++
++    @Test void abortedTaskRollsBackFactsAndCheckpointsAtPublication() throws Exception {
++        var a=agent("atomicpublish");String room=chat.group("提交",List.of(a.id())).id();
++        var source=send(room,"代号是 MAPLE554");
++        for(int i=0;i<33;i++)send(room,"短消息"+i);
++        var count=new AtomicInteger();
++        doAnswer(call->{
++            if(count.incrementAndGet()==1)return factJson(source.id(),"MAPLE554",source.text(),"set");
++            contexts.recoverCompressions();
++            return "两批都完成";
++        }).when(model).complete(any(),anyString(),anyList());
++        contexts.enqueueCompression(room,a.id(),UUID.randomUUID().toString());engine.runNext();
++        assertEquals(2,count.get());
++        assertEquals("FAILED",store.page(room,null,null,100).contextOperations().getFirst().status());
++        assertTrue(contexts.info(room).agents().getFirst().facts().isEmpty());
++        assertEquals(0,jdbc.queryForObject("SELECT COUNT(*) FROM chat_context_summary WHERE conversation_id=?",Integer.class,room));
++    }
++
++    @Test void archiveFactSectionSurvivesBeyondNarrativeColumnSize() throws Exception {
++        var a=agent("longarchive");String room=chat.group("大归档",List.of(a.id())).id();
++        for(int i=0;i<48;i++){
++            String value="reference-"+i+"-"+"x".repeat(160);
++            var source=send(room,value);remember(a,source,"reference"+i,value,false);
++        }
++        doReturn("核对完毕").when(model).complete(any(),anyString(),anyList());
++        var op=contexts.enqueueArchive(room,a.id(),UUID.randomUUID().toString());engine.runNext();
++        String summary=contexts.archive(op.id()).get("summary").toString();
++        assertTrue(summary.startsWith("核对完毕"));assertTrue(summary.length()>8000);
++        for(int i=0;i<48;i++)assertTrue(summary.contains("reference-"+i+"-"+"x".repeat(160)));
++    }
++
+ }

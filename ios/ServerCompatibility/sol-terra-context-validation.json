@@ -1,0 +1,57 @@
+{
+  "date": "2026-11-21",
+  "status": "implemented and locally verified; not deployed",
+  "solAndTerra": {
+    "estimatedInputTokenBudget": 20000,
+    "automaticCompressionPercent": 80,
+    "recentHistoryTargetTokens": 10000
+  },
+  "lunaEstimatedInputTokenBudget": 3000,
+  "tests": {
+    "total": 49,
+    "failures": 0,
+    "errors": 0,
+    "suites": [
+      {
+        "name": "LunaContextIntegrationTest",
+        "tests": 7,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "ContextMemoryIntegrationTest",
+        "tests": 9,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      {
+        "name": "AgentChatIntegrationTest",
+        "tests": 33,
+        "failures": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    ]
+  },
+  "package": "passed with Java 21",
+  "sourceManifest": [
+    {
+      "path": "src/main/java/com/leon/workflow/messaging/AgentContextManager.java",
+      "before": "4df4e72885b10f5643f540b1866a4cd9f74eed0575646bfc730817d764567bd8",
+      "after": "61aacc4ddeb4f85c22dbf6af96a167eca87043c5f9217e2221023dc8069bf540"
+    },
+    {
+      "path": "src/test/java/com/leon/workflow/messaging/LunaContextIntegrationTest.java",
+      "before": "b12faa4c51d11b0712f22a32bad8eaccea57f4b436bae8b33ec33510dfae7b9a",
+      "after": "9ac8cd0fdf46e2f4ae0b6360a21934abcabcded6fdf32bfe60db28c75ac9f154"
+    },
+    {
+      "path": "README.md",
+      "before": "181789f813c9feb0caaac4146ef07f497cc4bd2063c3c293a9908cb187a5663a",
+      "after": "3b7b533d45c6a7a06b4b0b4afda60fec45d9493721cd2c636b86a4422faabaf7"
+    }
+  ],
+  "patch": "sol-terra-context.patch"
+}

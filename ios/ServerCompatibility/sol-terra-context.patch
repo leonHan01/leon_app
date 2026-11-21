@@ -1,6 +1,24 @@
 diff --git a/src/main/java/com/leon/workflow/messaging/AgentContextManager.java b/src/main/java/com/leon/workflow/messaging/AgentContextManager.java
 --- a/src/main/java/com/leon/workflow/messaging/AgentContextManager.java
 +++ b/src/main/java/com/leon/workflow/messaging/AgentContextManager.java
+@@ -96,7 +96,7 @@
+         synchronized(store) {
+             var conversation=store.conversation(room);var policy=policy(room);
+             var members=agents.list().stream().filter(a->ChatAccess.personalRoom(conversation.id())||conversation.agentIds().contains(a.id())).toList();
+-            var rows=new ArrayList<AgentInfo>();int budget=12000;
++            var rows=new ArrayList<AgentInfo>();int budget=Integer.MAX_VALUE;
+             for(var agent:members) {
+                 budget=Math.min(budget,inputBudget(agent));
+                 var memory=memory(new DeviceMessageStore.Work(Long.MAX_VALUE,agent.id(),room),policy,Long.MAX_VALUE);
+@@ -105,7 +105,7 @@
+                 if(phases.isEmpty() && jdbc.queryForObject("SELECT COUNT(*) FROM chat_context_operation WHERE conversation_id=? AND agent_id=? AND status='RUNNING'",Integer.class,room,agent.id())>0) phases=List.of("COMPRESSING");
+                 rows.add(new AgentInfo(agent.id(),agent.name(),memory.text(),memory.createdAt(),snapshots.isEmpty()?0:((Number)snapshots.getFirst().get("estimated_tokens")).intValue(),snapshots.isEmpty()?0:((Number)snapshots.getFirst().get("retained_rounds")).intValue(),phases.isEmpty()?"":phases.getFirst(),facts.current(room,agent.id(),policy.epoch(),policy.afterId(),Long.MAX_VALUE),snapshots.isEmpty()?0:((Number)snapshots.getFirst().get("retrieved_rounds")).intValue(),!snapshots.isEmpty()&&Boolean.TRUE.equals(snapshots.getFirst().get("compression_fallback"))));
+             }
+-            return new Info(room,policy.recentRounds(),budget,policy.afterId(),rows,"token");
++            return new Info(room,policy.recentRounds(),budget==Integer.MAX_VALUE?12000:budget,policy.afterId(),rows,"token");
+         }
+     }
+     public Info configure(String room,int rounds,boolean reset) {
 @@ -465,6 +465,7 @@
      static int inputBudget(AgentRegistry.Agent agent) {
          if(isLuna(agent)) return 3000;

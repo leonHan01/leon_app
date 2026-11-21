@@ -16,8 +16,8 @@ android {
         manifestPlaceholders = [vivoAppId: vivoAppId ?: 'unconfigured', vivoAppKey: vivoAppKey ?: 'unconfigured']
         minSdk 26
         targetSdk 35
-        versionCode 30
-        versionName '0.15.0'
+        versionCode 32
+        versionName '0.15.2'
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17

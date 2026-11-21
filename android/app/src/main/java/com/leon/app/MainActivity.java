@@ -47,6 +47,10 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     private String usageSignature="";
     private String renderedConversation="",homeSignature="",attachmentSignature="";
     private long renderedRevision=-1;
+    private boolean timelineOnScreen,followingLatest=true,scrollTrackingPaused;
+    private ChatSession.ScrollPosition entryRestorePosition,lastScrollPosition;
+    private int renderedConnection=-1;
+    private int scrollEntryGeneration,scrollRenderGeneration;
     private final List<MessageApi.Agent> mentionCandidates=new ArrayList<>();
     private int mentionIndex;
     private String mentionKey="",dismissedMentionKey="",mentionRenderKey="";
@@ -70,7 +74,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     }
     @Override public Object onRetainNonConfigurationInstance(){return session;}
     @Override protected void onStart(){super.onStart();session.start();if(notifications!=null)notifications.start();}
-    @Override protected void onStop(){if(notifications!=null)notifications.stop();session.stop();super.onStop();}
+    @Override protected void onStop(){saveScrollPosition();if(notifications!=null)notifications.stop();session.stop();super.onStop();}
     @Override protected void onSaveInstanceState(Bundle out){
         chatSearch.save(out);
         out.putString("homeTab",navigation.tab.name());out.putBoolean("chat",navigation.inChat);
@@ -138,11 +142,14 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     }
     private void showScreen(){
         boolean detail=!navigation.agentId.isEmpty();
+        if(timelineOnScreen&&(!navigation.inChat||detail))saveScrollPosition();
+        boolean entering=navigation.inChat&&!detail&&!timelineOnScreen;timelineOnScreen=navigation.inChat&&!detail;
+        if(entering)beginLatestEntry();
         homeScreen.setVisibility(navigation.inChat||detail?View.GONE:View.VISIBLE);chatScreen.setVisibility(navigation.inChat&&!detail?View.VISIBLE:View.GONE);
         agentDetailScreen.setVisibility(detail?View.VISIBLE:View.GONE);
         extras.setVisibility(navigation.inChat&&!detail&&navigation.attachments?View.VISIBLE:View.GONE);chatAdd.setRotation(navigation.attachments?45:0);
         if(detail){hideMentionSuggestions(false);renderAgentDetail();}
-        else if(navigation.inChat){changed();session.refreshImages();}
+        else if(navigation.inChat){changed();session.refreshImages();if(entering){if(entryRestorePosition!=null)afterTimelineLayout(this::timelineResized);else scrollToLatest();}}
         else{hideMentionSuggestions(false);renderHome();}
     }
     private void renderHome(){
@@ -292,8 +299,10 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         roomTitle=text("聊天",16,INK);roomTitle.setId(R.id.chat_title);roomTitle.setSingleLine();roomTitle.setHorizontallyScrolling(false);roomTitle.setEllipsize(TextUtils.TruncateAt.END);roomTitle.setGravity(Gravity.CENTER);
         bar.addView(roomTitle,new LinearLayout.LayoutParams(0,dp(48),1));ImageButton more=ui.icon(R.drawable.ic_more,"聊天更多操作");more.setId(R.id.chat_more);more.setOnClickListener(view->showChatMenu(more));bar.addView(more);chatScreen.addView(bar);chatScreen.addView(ui.divider(0));
         roomStatus=text("",11,MUTED);roomStatus.setSingleLine();roomStatus.setHorizontallyScrolling(false);roomStatus.setEllipsize(TextUtils.TruncateAt.END);roomStatus.setGravity(Gravity.CENTER);roomStatus.setPadding(dp(12),dp(6),dp(12),dp(6));chatScreen.addView(roomStatus);
-        scroll=new ScrollView(this);scroll.setFillViewport(true);scroll.setOnScrollChangeListener((view,x,y,oldX,oldY)->session.refreshImages());
-        timeline=column();timeline.setPadding(dp(12),dp(12),dp(12),dp(18));scroll.addView(timeline);chatScreen.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+        scroll=new ChatTimelineScrollView(this,()->{followingLatest=false;scrollTrackingPaused=false;scrollRenderGeneration++;});scroll.setTag("chat-timeline");scroll.setFillViewport(true);
+        scroll.setOnScrollChangeListener((view,x,y,oldX,oldY)->{if(!scrollTrackingPaused){followingLatest=nearLatest();saveScrollPosition();}session.refreshImages();});
+        scroll.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{if(b-t!=ob-ot)timelineResized();});
+        timeline=column();timeline.setPadding(dp(12),dp(12),dp(12),dp(18));scroll.addView(timeline);timeline.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{if(b-t!=ob-ot)timelineResized();});chatScreen.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
         LinearLayout inputArea=column();inputArea.setBackgroundColor(ChatUi.BAR);inputArea.addView(ui.divider(0));
         mentionPanel=column();mentionPanel.setPadding(dp(10),dp(6),dp(10),dp(6));mentionPanel.setBackgroundColor(Color.WHITE);mentionPanel.setVisibility(View.GONE);
         TextView mentionTitle=text("提及 Agent",12,MUTED);mentionTitle.setPadding(dp(6),dp(5),dp(6),dp(5));mentionPanel.addView(mentionTitle);
@@ -356,7 +365,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     private void chooseImages(){
         Intent picker=new Intent(Intent.ACTION_OPEN_DOCUMENT);picker.setType("image/*");picker.addCategory(Intent.CATEGORY_OPENABLE);picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true);startActivityForResult(picker,42);
     }
-    private void sendCurrent(){if(session.sendDraft(composer.getText().toString())){composer.setText("");navigation.attachments=false;extras.setVisibility(View.GONE);chatAdd.setRotation(0);scroll.post(()->scroll.fullScroll(View.FOCUS_DOWN));}}
+    private void sendCurrent(){if(session.sendDraft(composer.getText().toString())){composer.setText("");navigation.attachments=false;extras.setVisibility(View.GONE);chatAdd.setRotation(0);followingLatest=true;scrollToLatest();}}
     private void showChatMenu(View anchor){
         PopupMenu menu=new PopupMenu(this,anchor);
         menu.getMenu().add("查看 Agent 信息").setOnMenuItemClickListener(item->{showConversationList();return true;});
@@ -505,6 +514,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
 
     @Override public void changed(){
         if(homeScreen==null)return;
+        if(renderedConnection!=session.connectionStamp()){renderedConnection=session.connectionStamp();renderedConversation="";entryRestorePosition=null;lastScrollPosition=null;}
         if(notifications!=null)notifications.changed(navigation.inChat?session.selectedConversation:null);
         renderUsage();tools.changed();if(chatSearch!=null)chatSearch.changed();if(favorites!=null)favorites.changed();
         if(!session.configured()&&navigation.tab!=ChatNavigation.Tab.SETTINGS&&session.status.equals("登录已失效，请重新登录。")){
@@ -523,7 +533,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         roomStatus.setText(subtitle);roomStatus.setVisibility(subtitle.isEmpty()?View.GONE:View.VISIBLE);
         boolean direct=session.selected()!=null&&session.selected().kind.equals("direct");mentionButton.setVisibility(direct?View.GONE:View.VISIBLE);mentionButton.setEnabled(!session.availableAgents().isEmpty());updateQuickCommandWidths();
         if(!composer.getText().toString().equals(session.draft)){composer.setText(session.draft);composer.setSelection(composer.length());}
-        if(!renderedConversation.equals(session.selectedConversation)){renderedConversation=session.selectedConversation;hideMentionSuggestions(false);dismissedMentionKey="";mentionKey="";renderedRevision=-1;attachmentSignature="";timeline.setTag(null);RichMarkdownView.releaseTree(timeline);timeline.removeAllViews();}
+        if(!renderedConversation.equals(session.selectedConversation)){beginLatestEntry();renderedConversation=session.selectedConversation;hideMentionSuggestions(false);dismissedMentionKey="";mentionKey="";renderedRevision=-1;attachmentSignature="";timeline.setTag(null);RichMarkdownView.releaseTree(timeline);timeline.removeAllViews();}
         if(notifications!=null)notifications.changed(navigation.inChat?session.selectedConversation:null);
         updateSend();renderQuotePreview();renderDocumentDrafts();renderAttachments();updateMentionSuggestions();
         if(renderedRevision!=session.revision){renderMessages();renderedRevision=session.revision;}
@@ -535,10 +545,49 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         composer.setError(length>8000?"消息最多 8,000 字符":null);
     }
     @Override public void error(String message){if(!isFinishing()&&!isDestroyed())new AlertDialog.Builder(this).setTitle("暂未完成").setMessage(message).setPositiveButton("知道了",null).show();}
+    private int latestOffset(){return Math.max(0,timeline.getHeight()+scroll.getPaddingTop()+scroll.getPaddingBottom()-scroll.getHeight());}
+    private boolean nearLatest(){return latestOffset()-scroll.getScrollY()<dp(48);}
+    private void beginLatestEntry(){scrollEntryGeneration++;scrollRenderGeneration++;scrollTrackingPaused=false;entryRestorePosition=session.scrollPositions.get(session.selectedConversation);lastScrollPosition=entryRestorePosition;followingLatest=entryRestorePosition==null;}
+    private ChatSession.ScrollPosition currentScrollPosition(){
+        int y=scroll.getScrollY();for(int i=0;i<timeline.getChildCount();i++){
+            View row=timeline.getChildAt(i);Object tag=row.getTag();if(tag instanceof String&&((String)tag).startsWith("message-row:")&&row.getBottom()>y&&row.getTop()<y+scroll.getHeight())return new ChatSession.ScrollPosition(Long.parseLong(((String)tag).substring(12)),row.getTop()-y,y);
+        }return new ChatSession.ScrollPosition(0,0,y);
+    }
+    private void saveScrollPosition(){
+        if(scroll==null||timeline==null||!timelineOnScreen||scrollTrackingPaused||renderedConversation.isEmpty()||renderedConnection!=session.connectionStamp())return;
+        lastScrollPosition=currentScrollPosition();session.scrollPositions.put(renderedConversation,lastScrollPosition);
+    }
+    private void restoreScrollPosition(ChatSession.ScrollPosition saved){
+        int target=saved.offset;View anchor=saved.message==0?null:timeline.findViewWithTag("message-row:"+saved.message);if(anchor!=null)target=anchor.getTop()-saved.top;
+        scrollTrackingPaused=true;scroll.scrollTo(0,Math.max(0,Math.min(latestOffset(),target)));scrollTrackingPaused=false;
+        followingLatest=nearLatest();saveScrollPosition();
+    }
+    private void timelineResized(){
+        if(!timelineOnScreen||scrollTrackingPaused)return;
+        if(entryRestorePosition!=null){ChatSession.ScrollPosition saved=entryRestorePosition;if(saved.message!=0&&timeline.findViewWithTag("message-row:"+saved.message)==null&&!session.initialLoaded)return;entryRestorePosition=null;restoreScrollPosition(saved);}
+        else if(followingLatest)scrollToLatest();else if(lastScrollPosition!=null)restoreScrollPosition(lastScrollPosition);
+    }
+    private void scrollToLatest(){
+        if(!timelineOnScreen||!followingLatest||scrollTrackingPaused)return;int entry=scrollEntryGeneration;String room=session.selectedConversation;
+        afterTimelineLayout(()->{if(entry!=scrollEntryGeneration||!room.equals(session.selectedConversation)||!timelineOnScreen||!followingLatest||scrollTrackingPaused)return;scroll.scrollTo(0,latestOffset());session.refreshImages();});
+    }
+    private void afterTimelineLayout(Runnable action){
+        ViewTreeObserver observer=timeline.getViewTreeObserver();
+        ViewTreeObserver.OnGlobalLayoutListener listener=new ViewTreeObserver.OnGlobalLayoutListener(){
+            private boolean completed;
+            @Override public void onGlobalLayout(){if(completed)return;completed=true;if(observer.isAlive())observer.removeOnGlobalLayoutListener(this);action.run();}
+        };
+        observer.addOnGlobalLayoutListener(listener);
+        scroll.post(()->{if(!timeline.isLayoutRequested())listener.onGlobalLayout();});
+    }
     private void renderMessages(){
-        int previousY=scroll.getScrollY(),previousHeight=timeline.getHeight();boolean nearBottom=timeline.getChildCount()==0||previousHeight-scroll.getHeight()-previousY<dp(100);
-        Object firstTag=timeline.getTag();long firstId=session.messages.isEmpty()?0:session.messages.get(0).id;boolean prepended=firstTag instanceof Long&&firstId<(Long)firstTag;
-        timeline.setTag(firstId);RichMarkdownView.releaseTree(timeline);timeline.removeAllViews();older=action("加载更早的消息");older.setTextColor(MUTED);older.setOnClickListener(view->session.older());older.setVisibility(session.hasOlder?View.VISIBLE:View.GONE);timeline.addView(older);
+        int previousY=scroll.getScrollY(),previousHeight=timeline.getHeight();
+        if(session.messages.isEmpty()&&session.currentPending().isEmpty()){entryRestorePosition=null;lastScrollPosition=null;session.scrollPositions.remove(session.selectedConversation);followingLatest=true;}
+        ChatSession.ScrollPosition preserved=entryRestorePosition!=null?entryRestorePosition:!followingLatest&&!renderedConversation.isEmpty()?currentScrollPosition():null;
+        boolean nearBottom=preserved==null&&(followingLatest||timeline.getChildCount()==0);
+        scrollTrackingPaused=true;int request=++scrollRenderGeneration,entry=scrollEntryGeneration;String expectedRoom=session.selectedConversation;
+        Object firstTag=timeline.getTag();long firstId=session.messages.isEmpty()?0:session.messages.get(0).id;boolean prepended=firstTag instanceof Long&&firstId>0&&firstId<(Long)firstTag;
+        timeline.setTag(firstId);RichMarkdownView.releaseTree(timeline);timeline.removeAllViews();older=action("加载更早的消息");older.setTextColor(MUTED);older.setOnClickListener(view->{followingLatest=false;session.older();});older.setVisibility(session.hasOlder?View.VISIBLE:View.GONE);timeline.addView(older);
         if(session.messages.isEmpty()&&session.currentPending().isEmpty()){
             TextView empty=text(session.openingConversation()?"正在打开会话…":"开始和 "+session.title()+" 聊天",13,MUTED);empty.setGravity(Gravity.CENTER);empty.setPadding(dp(16),dp(45),dp(16),dp(35));timeline.addView(empty);
         }
@@ -569,7 +618,13 @@ public final class MainActivity extends Activity implements ChatSession.Listener
             Button restore=action("恢复已忽略的失败提示（"+session.dismissedFailureCount()+"）");restore.setTextSize(12);restore.setTextColor(MUTED);
             restore.setTag("restore-dismissed-jobs");restore.setOnClickListener(view->session.restoreDismissedJobs());timeline.addView(restore);
         }
-        scroll.post(()->{if(prepended)scroll.scrollTo(0,previousY+timeline.getHeight()-previousHeight);else if(nearBottom)scroll.fullScroll(View.FOCUS_DOWN);else scroll.scrollTo(0,previousY);session.refreshImages();});
+        afterTimelineLayout(()->{
+            if(entry!=scrollEntryGeneration||request!=scrollRenderGeneration||!expectedRoom.equals(session.selectedConversation))return;
+            if(preserved!=null){scrollTrackingPaused=false;entryRestorePosition=null;restoreScrollPosition(preserved);}
+            else if(prepended)scroll.scrollTo(0,previousY+timeline.getHeight()-previousHeight);
+            else if(nearBottom)scroll.scrollTo(0,latestOffset());else scroll.scrollTo(0,previousY);
+            scrollTrackingPaused=false;followingLatest=nearLatest();saveScrollPosition();session.refreshImages();
+        });
     }
     private void addJobNotice(MessageApi.Job job){
             LinearLayout notice=row();notice.setGravity(Gravity.CENTER_VERTICAL);notice.setPadding(dp(12),dp(3),dp(6),dp(3));notice.setBackground(shape(0xFFE4E4E4,6));
@@ -594,7 +649,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     }
     private void addBubble(String body,String sender,String detail,boolean mine,JSONObject retry,String agentId,List<String> images,MessageApi.Message original,List<ChatDocument> pendingDocs){
         boolean wideAgentReply=!mine&&agentId!=null&&!agentId.isEmpty()&&body.codePointCount(0,body.length())>500;
-        LinearLayout message=row();message.setGravity(Gravity.TOP);LinearLayout.LayoutParams mp=new LinearLayout.LayoutParams(-1,-2);mp.bottomMargin=dp(15);
+        LinearLayout message=row();if(original!=null)message.setTag("message-row:"+original.id);message.setGravity(Gravity.TOP);LinearLayout.LayoutParams mp=new LinearLayout.LayoutParams(-1,-2);mp.bottomMargin=dp(15);
         LinearLayout content=column();content.setGravity(mine?Gravity.END:Gravity.START);
         for(var doc:original!=null?original.documents:pendingDocs){content.addView(documents.card(doc,null,null,original==null?null:()->showMessageActions(original)),new LinearLayout.LayoutParams(-1,-2));}
         if(original!=null){content.setTag("message-actions:"+original.id);content.setOnLongClickListener(v->{showMessageActions(original);return true;});}

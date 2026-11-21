@@ -71,3 +71,8 @@ python3 ios/Tools/generate-project.py
 代码已同步到同级 `leon_lite_workflow`，并做本地构建与测试。兼容补丁为 `ios/ServerCompatibility/document-attachments.patch`、`ios/ServerCompatibility/message-notifications.patch`，按此前引用 / 收藏补丁、文档、通知的顺序使用；会话分支补丁由原分支功能单独提供。
 
 本轮不部署或重启服务端、不安装手机客户端，也不启动 App、游戏或模拟器。新接口需升级服务端；平台端到端验收需使用新版客户端和实际设备。
+
+
+## 后续安装交付
+
+2026-11-21 交付记录：Android 0.15.0（build 30）已重新打包并验证签名与 vivo 配置；iOS 0.16.0（build 16）已覆盖安装到已连接的 iPhone 16 Pro，设备读回版本一致。手机当时锁屏，尚未完成启动核验。本次未部署或重启服务端。

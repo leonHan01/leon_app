@@ -3,6 +3,7 @@ import Combine
 
 @MainActor
 final class ChatStore: ObservableObject {
+    var scrollPositions:[String:ConversationScrollPosition]=[:]
     func openQuotedRoom(_ id:String) {select(id)}
     @Published var branchMessage:Message?
     func beginBranch(_ message:Message) {
@@ -269,6 +270,7 @@ final class ChatStore: ObservableObject {
         } catch { await handle(error,connection:connectionID) }
     }
     private func reset() {
+        scrollPositions=[:]
         noticeTask?.cancel();noticeTask = nil;notice = nil
         poller?.cancel(); directoryTask?.cancel(); creationTasks.values.forEach { $0.cancel() }; creationTasks = [:]
         connectionID = UUID(); generation = UUID(); api = nil; user = nil; scope = nil
@@ -317,9 +319,9 @@ final class ChatStore: ObservableObject {
         guard id != roomID else { return }
         quoteDrafts[roomID]=quotedMessage
         drafts[roomID] = draft; imageDrafts[roomID] = draftImages;documentDrafts[roomID]=draftDocuments
-        var kept = room; kept.hasOlder = kept.hasOlder || kept.messages.count > 300; kept.messages = Array(kept.messages.suffix(300))
+        var kept=room;let range=ConversationScrollPosition.cacheRange(ids:kept.messages.map(\.id),anchor:scrollPositions[roomID]?.messageID);kept.hasOlder=kept.hasOlder || range.lowerBound>0;kept.messages=Array(kept.messages[range])
         cache[roomID] = kept; cacheOrder.removeAll {$0 == roomID}; cacheOrder.append(roomID)
-        while cacheOrder.count > 8 { cache.removeValue(forKey:cacheOrder.removeFirst()) }
+        while cacheOrder.count > 8 {let evicted=cacheOrder.removeFirst();cache.removeValue(forKey:evicted);scrollPositions.removeValue(forKey:evicted)}
         roomID = id; room = cache.removeValue(forKey:id) ?? RoomState(); cacheOrder.removeAll {$0 == id}
         quotedMessage=quoteDrafts[id]
         draft = drafts[id] ?? ""; draftImages = imageDrafts[id] ?? [];draftDocuments=documentDrafts[id] ?? []; generation = UUID(); loadingOlder = false; updateImageCount(); refresh()
@@ -475,7 +477,7 @@ final class ChatStore: ObservableObject {
     func clearLocal(_ id: String, revision: Int64) async throws {
         let connection = connectionID, oldScope = scope
         clearingHistory = true; defer {if connection == connectionID {clearingHistory = false}}
-        revisions[id] = revision; cache.removeValue(forKey:id); cacheOrder.removeAll {$0 == id}; drafts.removeValue(forKey:id); imageDrafts.removeValue(forKey:id)
+        scrollPositions.removeValue(forKey:id);revisions[id] = revision; cache.removeValue(forKey:id); cacheOrder.removeAll {$0 == id}; drafts.removeValue(forKey:id); imageDrafts.removeValue(forKey:id)
         imageWork = imageWork.filter {$0.value.room != id}; updateImageCount()
         let removed = pending.filter {$0.conversationId == id}; pending.removeAll {$0.conversationId == id}
         documentGeneration=UUID();importingDocuments=false;documentDrafts.removeValue(forKey:id);if roomID==id {draftDocuments=[]}

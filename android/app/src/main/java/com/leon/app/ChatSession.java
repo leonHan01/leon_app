@@ -13,6 +13,8 @@ import java.util.concurrent.*;
 /** Retained across rotations. All state changes occur on the main looper. */
 final class ChatSession {
     interface Listener { void changed(); void error(String message); }
+    static final class ScrollPosition {final long message;final int top,offset;ScrollPosition(long message,int top,int offset){this.message=message;this.top=top;this.offset=offset;}}
+    final Map<String,ScrollPosition> scrollPositions=new HashMap<>();
     final SharedPreferences prefs;
     final SecretStore secrets;
     final String deviceId;
@@ -185,7 +187,7 @@ final class ChatSession {
     void addConversation(MessageApi.Conversation room){upsertRoom(room);notifyChanged();}
     void replaceConversations(List<MessageApi.Conversation> rooms){conversations.clear();conversations.addAll(rooms);notifyChanged();}
     void clearLocalHistory(String room,long revision){
-        historyRevisions.put(room,revision);historyCache.remove(room);
+        scrollPositions.remove(room);historyRevisions.put(room,revision);historyCache.remove(room);
         quoteDrafts.remove(room);if(room.equals(selectedConversation))quotedMessage=null;
         drafts.remove(room);imageDrafts.remove(room);documentDrafts.remove(room);documentEpoch++;preparingDocuments=0;if(room.equals(selectedConversation))draftDocuments.clear();
         pending.removeIf(message->{if(!message.optString("conversationId","shared").equals(room))return false;removeImageFiles(message);return true;});savePending();
@@ -210,7 +212,9 @@ final class ChatSession {
         final List<MessageApi.Job> jobs;
         final boolean loaded,older;
         RoomSnapshot(ChatSession session){
-            int start=Math.max(0,session.messages.size()-300);messages=new ArrayList<>(session.messages.subList(start,session.messages.size()));
+            int start=Math.max(0,session.messages.size()-300);ScrollPosition position=session.scrollPositions.get(session.selectedConversation);
+            if(position!=null&&session.messages.size()>300)for(int i=0;i<session.messages.size();i++)if(session.messages.get(i).id==position.message){start=Math.max(0,Math.min(i-80,session.messages.size()-300));break;}
+            messages=new ArrayList<>(session.messages.subList(start,Math.min(session.messages.size(),start+300)));
             jobs=new ArrayList<>(session.jobs);loaded=session.initialLoaded;older=session.hasOlder||start>0;
         }
     }
@@ -222,7 +226,7 @@ final class ChatSession {
     void select(String id) {
         if(id.equals(selectedConversation))return;
         historyCache.remove(selectedConversation);historyCache.put(selectedConversation,new RoomSnapshot(this));
-        while(historyCache.size()>8)historyCache.remove(historyCache.keySet().iterator().next());
+        while(historyCache.size()>8){String evicted=historyCache.keySet().iterator().next();historyCache.remove(evicted);scrollPositions.remove(evicted);}
         quoteDrafts.put(selectedConversation,quotedMessage);
         documentDrafts.put(selectedConversation,new ArrayList<>(draftDocuments));drafts.put(selectedConversation,draft);imageDrafts.put(selectedConversation,new ArrayList<>(draftImages));selectedConversation=id;quotedMessage=quoteDrafts.get(id);draft=drafts.getOrDefault(id,"");
         draftImages.clear();draftImages.addAll(imageDrafts.getOrDefault(id,List.of()));draftDocuments.clear();draftDocuments.addAll(documentDrafts.getOrDefault(id,List.of()));
@@ -451,7 +455,7 @@ final class ChatSession {
         selectedConversation="shared";
         avatarCache.evictAll();
         avatarWaiters.clear();
-        historyCache.clear();
+        historyCache.clear();scrollPositions.clear();
         historyRevisions.clear();
         unconfirmedRooms.clear();
         creatingRooms.clear();

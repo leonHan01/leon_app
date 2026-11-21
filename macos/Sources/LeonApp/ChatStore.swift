@@ -3,6 +3,7 @@ import CryptoKit
 
 @MainActor
 final class ChatStore: ObservableObject {
+    var scrollPositions:[String:ConversationScrollPosition]=[:]
     func openQuotedRoom(_ id:String) {selectConversation(id)}
     @Published var branchMessage:Message?
     func beginBranch(_ message:Message) {
@@ -215,7 +216,7 @@ final class ChatStore: ObservableObject {
             dismissedJobKeys = Set(dismissedJobKeys.filter { !ids.contains($0.components(separatedBy: "#")[0]) }); saveDismissals()
             for message in pending where (message.conversationId ?? "shared") == room { ChatImageFiles.remove(message.imageIds ?? [], scope: pendingKey);DocumentFiles.remove(message.documentIds ?? [],scope:pendingKey) }
             pending.removeAll { ($0.conversationId ?? "shared") == room }; savePending()
-            drafts[room] = ""; imageDrafts[room] = [];documentDrafts.removeValue(forKey:room);documentGeneration=UUID();importingDocuments=false
+            scrollPositions.removeValue(forKey:room);drafts[room] = ""; imageDrafts[room] = [];documentDrafts.removeValue(forKey:room);documentGeneration=UUID();importingDocuments=false
             roomCache.removeValue(forKey: room); roomCacheOrder.removeAll { $0 == room }
             let prefix = pendingKey + ".archive." + room + ":"
             for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix(prefix) { UserDefaults.standard.removeObject(forKey: key) }
@@ -237,7 +238,7 @@ final class ChatStore: ObservableObject {
         if (historyRevision != nil && historyRevision != revision) || (historyRevision == nil && revision > 0) {
             quotedMessage=nil;quoteDrafts.removeValue(forKey:selectedConversationId)
             messages = []; jobs = []; contextOperations = []; contextInfo = nil; hasOlder = false
-            roomCache.removeValue(forKey: selectedConversationId); roomCacheOrder.removeAll { $0 == selectedConversationId }
+            scrollPositions.removeValue(forKey:selectedConversationId);roomCache.removeValue(forKey: selectedConversationId); roomCacheOrder.removeAll { $0 == selectedConversationId }
             api?.clearImageCache()
         }
         historyRevision = revision
@@ -437,11 +438,12 @@ final class ChatStore: ObservableObject {
     }
     func isSelected(_ agent: AgentInfo) -> Bool { selectedConversation?.kind == "direct" && selectedConversation?.agentId == agent.id }
     private func rememberRoom() {
-        let kept = Array(messages.suffix(300))
+        let range=ConversationScrollPosition.cacheRange(ids:messages.map(\.id),anchor:scrollPositions[selectedConversationId]?.messageID)
+        let kept=Array(messages[range])
         roomCache[selectedConversationId] = RoomSnapshot(messages: kept, jobs: jobs, operations: contextOperations,
-            context: contextInfo, loaded: initialLoaded || !messages.isEmpty, hasOlder: hasOlder || kept.count < messages.count, historyRevision: historyRevision)
+            context: contextInfo, loaded: initialLoaded || !messages.isEmpty, hasOlder: hasOlder || range.lowerBound>0, historyRevision: historyRevision)
         roomCacheOrder.removeAll { $0 == selectedConversationId }; roomCacheOrder.append(selectedConversationId)
-        while roomCacheOrder.count > 12 { roomCache.removeValue(forKey: roomCacheOrder.removeFirst()) }
+        while roomCacheOrder.count > 12 {let evicted=roomCacheOrder.removeFirst();roomCache.removeValue(forKey:evicted);scrollPositions.removeValue(forKey:evicted)}
     }
     var currentPending: [Outgoing] { pending.filter { ($0.conversationId ?? "shared") == selectedConversationId } }
     var selectedConversation: Conversation? { conversations.first { $0.id == selectedConversationId } }
@@ -599,7 +601,7 @@ final class ChatStore: ObservableObject {
             generation = UUID(); connectionId = UUID(); avatarSessionKey = UUID().uuidString
             agentDetailId = nil; creatingAgentConversation = false
             modelUsage = []; usageError = nil; usageLoadedAt = nil; usageBusy = false
-            navigationRequest = UUID(); roomCache = [:]; roomCacheOrder = []
+            scrollPositions=[:];navigationRequest = UUID(); roomCache = [:]; roomCacheOrder = []
             for creation in directCreations.values { creation.task.cancel() }
             directCreations = [:]; unconfirmedDirectRooms = []
             directoryRefresh?.cancel(); directoryRefresh = nil; lastDirectoryRefresh = Date()
