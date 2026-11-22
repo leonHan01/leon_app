@@ -184,6 +184,7 @@ final class ChatStore: ObservableObject {
     private var generation = UUID()
     private var poller: Task<Void,Never>?
     private var directoryTask: Task<Void,Never>?
+    private var directoryRevision = UUID()
     private var creationTasks: [String:Task<Conversation,Error>] = [:]
     private var drafts: [String:String] = [:]
     private var imageDrafts: [String:[DraftImage]] = [:]
@@ -208,6 +209,24 @@ final class ChatStore: ObservableObject {
     func mine(_ m: Message) -> Bool { (m.role ?? "user") == "user" && (user.map { m.userId == $0.id } ?? (m.deviceId == deviceID)) }
     func owns(_ c: Conversation) -> Bool { user != nil && (c.ownerId == user!.id || (c.ownerId?.isEmpty ?? true) && user!.home == "shared") }
     func managesGroup(_ c:Conversation) -> Bool {c.kind == "group" && c.id != "shared" && !c.id.hasPrefix("home:") && owns(c)}
+    func canRenameConversation(_ conversation: Conversation) -> Bool {
+        owns(conversation) && busy == nil && !configuring && !opening.contains(conversation.id)
+    }
+
+    func renameConversation(_ conversation: Conversation, name: String) async -> Bool {
+        guard canRenameConversation(conversation) else { return false }
+        guard let renamed = await tool("正在重命名…", requireSelectedRoom: false, work: {
+            try await $0.renameConversation(conversation.id, name: name)
+        }) else { return false }
+        guard renamed.id == conversation.id else {
+            error = "服务端返回的会话不匹配，请刷新列表。"
+            return false
+        }
+        directoryRevision = UUID()
+        if let index = conversations.firstIndex(where: { $0.id == renamed.id }) { conversations[index] = renamed }
+        showNotice("对话已重命名")
+        return true
+    }
     func showNotice(_ text:String) {
         noticeTask?.cancel();let value = UserNotice(text:text),connection = connectionID;notice = value
         noticeTask = Task { [weak self] in
@@ -304,12 +323,12 @@ final class ChatStore: ObservableObject {
         refresh()
     }
     func refreshDirectory() async {
-        guard let api else { return }; let connection = connectionID
+        guard let api else { return }; let connection = connectionID, revision = directoryRevision
         async let directory = api.agents(); async let rooms = api.conversations()
         async let presence: Void? = try? api.heartbeat(deviceId:deviceID,name:user?.username ?? "iPhone")
         do {
             let (newAgents,newRooms) = try await (directory,rooms)
-            guard connection == connectionID, !Task.isCancelled else { return }
+            guard connection == connectionID, revision == directoryRevision, !Task.isCancelled else { return }
             agents = newAgents
             conversations = newRooms + conversations.filter { old in (opening.contains(old.id) || old.id == roomID) && !newRooms.contains(where:{$0.id == old.id}) }
         } catch { if !Task.isCancelled { await handle(error,connection:connection) } }
@@ -487,11 +506,11 @@ final class ChatStore: ObservableObject {
         catch {if connection == connectionID {storageHealthy = false};throw error}
         if connection == connectionID && roomID == id {refresh()}
     }
-    func tool<T>(_ label: String, work: (any ChatAPI) async throws -> T) async -> T? {
+    func tool<T>(_ label: String, requireSelectedRoom: Bool = true, work: (any ChatAPI) async throws -> T) async -> T? {
         guard let api, busy == nil, !configuring, !opening.contains(roomID) else { return nil }
         let connection = connectionID, selected = roomID; busy = label
         defer { if connection == connectionID { busy = nil } }
-        do { let value = try await work(api); return connection == connectionID && selected == roomID ? value : nil }
+        do { let value = try await work(api); return connection == connectionID && (!requireSelectedRoom || selected == roomID) ? value : nil }
         catch { await handle(error,connection:connection); return nil }
     }
     func loadUsage() async {

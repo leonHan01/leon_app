@@ -67,25 +67,44 @@ func usernames(_ value: String) -> [String] {Array(Set(value.components(separate
 @MainActor
 struct NamePrompt: View {
     let title: String
-    let note: String
+    let note: String?
     var initial = ""
+    var submitTitle = "创建"
     var close: () -> Void
     var submit: (String) async -> Bool
     @State private var name = ""
     @State private var working = false
+    private var trimmedName: String { name.trimmingCharacters(in:.whitespacesAndNewlines) }
     var body: some View {
         MobileDialog(title:title,close:{if !working {close()}}) {
             VStack(alignment:.leading,spacing:0) {
-                Text(note).font(.system(size:13)).foregroundStyle(MobileStyle.muted).padding(.vertical,6)
+                if let note { Text(note).font(.system(size:13)).foregroundStyle(MobileStyle.muted).padding(.vertical,6) }
                 MobileField(label:"对话名称") {TextField("名称",text:$name).accessibilityIdentifier("thread_name")}
                 if working {ProgressView().padding(.vertical,12)}
             }.disabled(working)
         } actions:{
             MobileTextButton(title:"取消",action:close).disabled(working)
-            MobileTextButton(title:"创建") {Task {working = true;defer {working = false};if await submit(name.trimmingCharacters(in:.whitespacesAndNewlines)) {close()}}}.disabled(working || name.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty || name.utf16.count>60)
+            MobileTextButton(title:submitTitle) {
+                let value = trimmedName
+                working = true
+                Task {defer {working = false};if await submit(value) {close()}}
+            }.disabled(working || !(1...60).contains(trimmedName.utf16.count))
         }.onAppear {
             if initial.isEmpty {let format = DateFormatter();format.dateFormat = "MM-dd HH:mm";name = "新对话 · "+format.string(from:Date())}
             else {name = initial}
+        }
+    }
+}
+
+@MainActor
+struct RenameConversationPrompt: View {
+    @ObservedObject var store: ChatStore
+    let room: Conversation
+    var close: () -> Void
+
+    var body: some View {
+        NamePrompt(title:"重命名对话",note:nil,initial:room.name,submitTitle:"保存",close:close) { name in
+            await store.renameConversation(room, name:name)
         }
     }
 }

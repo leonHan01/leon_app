@@ -350,6 +350,9 @@ final class MessageAPI: NotificationAPI, @unchecked Sendable {
         return data
     }
     func conversations() async throws -> [Conversation] { try await request(URLRequest(url: base.appendingPathComponent("api/conversations"))) }
+    func renameConversation(_ id: String, name: String) async throws -> Conversation {
+        try await post("api/conversations/rename", body: ["conversationId": id, "name": name])
+    }
     func direct(_ agentId: String) async throws -> Conversation { try await post("api/conversations/direct/\(agentId)", body: [String:String]()) }
     func newThread(agentId: String, name: String, requestId: String) async throws -> Conversation {
         try await post("api/conversations/direct/\(agentId)/threads", body: ["name": name, "requestId": requestId])
@@ -485,6 +488,10 @@ final class MessageAPI: NotificationAPI, @unchecked Sendable {
             if http.statusCode==404,req.url?.path.hasSuffix("/branches")==true {
                 let failure=try? JSONDecoder().decode(Failure.self,from:data)
                 throw ClientError.message(failure?.message ?? failure?.detail ?? "服务端尚未支持对话分支，请先升级服务端。")
+            }
+            if http.statusCode == 404, req.url?.path.hasSuffix("/conversations/rename") == true {
+                let failure = try? JSONDecoder().decode(Failure.self, from: data)
+                throw ClientError.message(failure?.message ?? failure?.detail ?? "服务端尚未支持重命名对话，请先升级服务端。")
             }
             if let message = HTTPFailure.message(for: http.statusCode) { throw ClientError.message(message) }
             let failure = try? JSONDecoder().decode(Failure.self, from: data)

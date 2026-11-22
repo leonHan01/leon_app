@@ -200,4 +200,34 @@ final class ChatTools {
             session.tool("正在新建对话…",api->api.newThread(agent.id,request,title),room->{next.dismiss();session.addConversation(room);if(live())openRoom.accept(room);});
         });
     }
+
+    void renameConversation(MessageApi.Conversation room) {
+        if (!ready() || !session.canRenameConversation(room)) return;
+        int connection = session.connectionStamp();
+        EditText name = new EditText(activity);
+        name.setSingleLine();
+        name.setHint("对话名称");
+        name.setText(room.name);
+        name.setSelectAllOnFocus(true);
+        AlertDialog next = new AlertDialog.Builder(activity).setTitle("重命名对话")
+            .setView(name).setNegativeButton("取消", null).setPositiveButton("保存", null).create();
+        show(next);
+        if (!next.isShowing()) return;
+        next.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+            if (connection != session.connectionStamp()) {
+                next.dismiss();
+                return;
+            }
+            if (!ready() || !session.canRenameConversation(room)) return;
+            String title = name.getText().toString().trim();
+            if (title.isEmpty() || title.length() > 60 || title.codePoints().anyMatch(Character::isISOControl)) {
+                name.setError("对话名称应为 1–60 字且不能含控制字符");
+                return;
+            }
+            session.renameConversation(room, title, () -> {
+                next.dismiss();
+                toast("对话已重命名");
+            });
+        });
+    }
 }

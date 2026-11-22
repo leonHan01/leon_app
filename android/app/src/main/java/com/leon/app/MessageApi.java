@@ -107,6 +107,9 @@ final class MessageApi {
     private static String encode(String value) throws Exception {return URLEncoder.encode(value,StandardCharsets.UTF_8.name());}
     List<Agent> agents() throws Exception { JSONArray rows=new JSONArray(requestText("/api/agents",null));List<Agent> result=new ArrayList<>();for(int i=0;i<rows.length();i++)result.add(new Agent(rows.getJSONObject(i)));return result; }
     List<Conversation> conversations() throws Exception { JSONArray rows=new JSONArray(requestText("/api/conversations",null));List<Conversation> result=new ArrayList<>();for(int i=0;i<rows.length();i++)result.add(new Conversation(rows.getJSONObject(i)));return result; }
+    Conversation renameConversation(String id, String name) throws Exception {
+        return new Conversation(request("/api/conversations/rename", new JSONObject().put("conversationId", id).put("name", name)));
+    }
     Conversation branch(String room,long message,String requestId,String name)throws Exception {
         if(message<=0||room==null||!room.matches("[A-Za-z0-9:-]{1,80}"))throw new IOException("分支消息标识无效");
         return new Conversation(request("/api/conversations/"+room+"/branches",new JSONObject().put("messageId",message).put("requestId",requestId).put("name",name)));

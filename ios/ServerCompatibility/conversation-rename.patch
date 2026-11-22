@@ -153,7 +153,15 @@
          var a=agent("writer");var empty=chat.createDirect(a.id(),UUID.randomUUID().toString(),"新对话");
 --- a/src/test/java/com/leon/workflow/messaging/ChatAccountIntegrationTest.java
 +++ b/src/test/java/com/leon/workflow/messaging/ChatAccountIntegrationTest.java
-@@ -104,6 +104,39 @@
+@@ -9,6 +9,7 @@
+ import org.springframework.jdbc.core.JdbcTemplate;
+ import org.springframework.test.context.bean.override.mockito.MockitoBean;
+ import org.springframework.test.web.servlet.MockMvc;
++import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
+ import org.springframework.test.web.servlet.setup.MockMvcBuilders;
+ import org.springframework.web.context.WebApplicationContext;
+ import tools.jackson.databind.ObjectMapper;
+@@ -104,6 +105,47 @@
          mvc.perform(get("/api/device-messages").param("conversationId",group).header("Authorization",eve.authorization())).andExpect(status().isOk());
          mvc.perform(post("/api/conversations/account/logout").header("Authorization",eve.authorization())).andExpect(status().isOk());
          mvc.perform(get("/api/conversations").header("Authorization",eve.authorization())).andExpect(status().isUnauthorized());
@@ -178,18 +186,26 @@
 +        mvc.perform(rename(direct, "私聊新名称").header("Authorization",owner.authorization())).andExpect(status().isOk());
 +        mvc.perform(rename("shared", "我的设备").header("Authorization",owner.authorization()))
 +            .andExpect(status().isOk()).andExpect(jsonPath("$.id").value("home:"+owner.id()));
-+        mvc.perform(get("/api/conversations").header("Authorization",owner.authorization()))
-+            .andExpect(jsonPath("$[?(@.id == '"+direct+"')].name").value(List.of("私聊新名称")));
-+        mvc.perform(get("/api/conversations").header("Authorization",member.authorization()))
-+            .andExpect(jsonPath("$[?(@.id == '"+group+"')].name").value(List.of("新群名称")))
-+            .andExpect(jsonPath("$[?(@.id == 'home:"+member.id()+"')].name").value(List.of("设备群聊")));
++        assertEquals("私聊新名称", conversationNames(owner).get(direct));
++        var memberRooms = conversationNames(member);
++        assertEquals("新群名称", memberRooms.get(group));
++        assertEquals("设备群聊", memberRooms.get("home:"+member.id()));
 +        mvc.perform(get("/api/device-messages").param("conversationId",group).header("Authorization",member.authorization()))
 +            .andExpect(jsonPath("$.messages[0].id").value(message)).andExpect(jsonPath("$.historyRevision").value(0));
 +    }
 +
-+    private org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder rename(String id, String name) {
++    private MockHttpServletRequestBuilder rename(String id, String name) {
 +        return post("/api/conversations/rename").contentType("application/json")
 +            .content(json.writeValueAsString(Map.of("conversationId",id,"name",name)));
++    }
++
++    private Map<String,String> conversationNames(Account account) throws Exception {
++        var result = mvc.perform(get("/api/conversations").header("Authorization",account.authorization()))
++            .andExpect(status().isOk()).andReturn().getResponse();
++        var names = new HashMap<String,String>();
++        for (var conversation : json.readTree(result.getContentAsByteArray()))
++            names.put(conversation.path("id").asText(), conversation.path("name").asText());
++        return names;
      }
  
      private AgentRegistry.Agent groupAgent(String label){

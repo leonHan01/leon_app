@@ -64,6 +64,10 @@ struct ContentView: View {
                                 }.frame(maxWidth: .infinity, alignment: .leading).padding(10).contentShape(Rectangle())
                                     .background(store.selectedConversationId == room.id ? accent.opacity(0.10) : Color.clear, in: RoundedRectangle(cornerRadius: 9))
                             }.buttonStyle(.plain)
+                                .contextMenu {
+                                    Button("重命名对话…") { store.conversationToRename = room }
+                                        .disabled(!store.canRenameConversation(room))
+                                }
                         }
                         Text("AGENTS · 私聊").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary).padding(.top, 18)
                         ForEach(store.sidebarAgents) { agent in
@@ -106,7 +110,14 @@ struct ContentView: View {
                         }.buttonStyle(.plain).accessibilityLabel("查看 Agent 详情").help("查看 Agent 详情")
                     }
                     VStack(alignment: .leading, spacing: 5) {
-                        Text(store.title).font(.system(size: 19, weight: .semibold))
+                        HStack(spacing: 8) {
+                            Text(store.title).font(.system(size: 19, weight: .semibold)).lineLimit(1)
+                            if let room = store.selectedConversation {
+                                Button { store.conversationToRename = room } label: { Image(systemName: "pencil") }
+                                    .disabled(!store.canRenameConversation(room))
+                                    .help("重命名对话").accessibilityLabel("重命名对话")
+                            }
+                        }
                         HStack(spacing: 6) {
                             Circle().fill(store.connected ? .green : .orange).frame(width: 6, height: 6)
                             Text(store.status).font(.caption).foregroundStyle(.secondary).lineLimit(2)
@@ -167,6 +178,7 @@ struct ContentView: View {
         .sheet(isPresented: $store.showUsage) { TokenUsageView(store: store) }
         .sheet(isPresented: $store.showEndRound) { EndRoundView(store: store) }
         .sheet(isPresented: $store.showClearHistory) { ClearHistoryView(store: store) }
+        .sheet(item: $store.conversationToRename) { room in RenameConversationView(store: store, room: room) }
         .sheet(item: $store.conversationToDelete) { room in DeleteConversationView(store: store, room: room) }
         .alert("暂未完成", isPresented: Binding(get: { store.error != nil && !store.showSettings && !store.showNewGroup && !store.showContext && !store.showUsage && !store.showEndRound && !store.showClearHistory && store.conversationToDelete == nil }, set: { if !$0 { store.error = nil } })) {
             Button("知道了") { store.error = nil }

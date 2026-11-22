@@ -182,14 +182,15 @@ public final class MainActivity extends Activity implements ChatSession.Listener
             for(MessageApi.Conversation room:session.conversations)if(!room.kind.equals("direct")){
                 count++;ImageView icon=new ImageView(this);icon.setImageResource(R.drawable.ic_groups);icon.setImageTintList(ColorStateList.valueOf(Color.WHITE));
                 icon.setPadding(dp(10),dp(10),dp(10),dp(10));icon.setBackground(shape(0xFF62AA88,7));
-                addDirectoryRow(icon,room.name,(room.id.equals("shared")||room.id.startsWith("home:"))?"设备消息与 Agent 群聊":room.agentIds.size()+" 位 Agent","group:"+room.id,()->openGroup(room));
+                View item = addDirectoryRow(icon,room.name,(room.id.equals("shared")||room.id.startsWith("home:"))?"设备消息与 Agent 群聊":room.agentIds.size()+" 位 Agent","group:"+room.id,()->openGroup(room));
+                addConversationRowActions(item, room);
             }
             if(count==0)emptyHome("还没有群聊",session.configured()?"点击右上角 ＋，选择 Agents 创建群聊。":"连接服务后即可查看和创建群聊。");
         }else{
             homeRows.setId(R.id.settings_list);renderSettingsPage();
         }
     }
-    private void addDirectoryRow(View avatar,String title,String detail,String tag,Runnable action){
+    private View addDirectoryRow(View avatar,String title,String detail,String tag,Runnable action){
         LinearLayout item=row();item.setGravity(Gravity.CENTER_VERTICAL);item.setPadding(dp(16),dp(13),dp(16),dp(13));
         item.setTag(tag);item.setContentDescription(title+"，"+detail);item.setBackground(ui.ripple(Color.WHITE,0));item.setFocusable(true);item.setOnClickListener(view->action.run());
         if(tag.startsWith("agent:")){
@@ -202,6 +203,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         LinearLayout.LayoutParams lp=new LinearLayout.LayoutParams(0,-2,1);lp.leftMargin=dp(13);item.addView(labels,lp);
         ImageView arrow=new ImageView(this);arrow.setImageResource(R.drawable.ic_chevron);arrow.setImageTintList(ColorStateList.valueOf(0xFFBBBBBB));item.addView(arrow,new LinearLayout.LayoutParams(dp(18),dp(18)));
         homeRows.addView(item);homeRows.addView(ui.divider(77));
+        return item;
     }
     private void emptyHome(String title,String detail){
         LinearLayout empty=column();empty.setGravity(Gravity.CENTER);empty.setPadding(dp(28),dp(80),dp(28),dp(40));
@@ -287,6 +289,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         if(rooms.isEmpty()){TextView empty=text("暂无历史对话，开始聊聊吧。",14,MUTED);empty.setPadding(dp(4),dp(24),dp(4),dp(24));agentDetailRows.addView(empty);}
         for(var room:rooms){
             LinearLayout item=row();item.setGravity(Gravity.CENTER_VERTICAL);item.setPadding(dp(14),dp(16),dp(14),dp(16));item.setBackground(ui.ripple(Color.WHITE,14));item.setFocusable(true);item.setTag("agent-history:"+room.id);item.setContentDescription("打开对话："+room.name);item.setOnClickListener(view->openGroup(room));
+            addConversationRowActions(item, room);
             ImageView icon=new ImageView(this);icon.setImageResource(R.drawable.ic_threads);icon.setImageTintList(ColorStateList.valueOf(GREEN));item.addView(icon,new LinearLayout.LayoutParams(dp(24),dp(24)));
             TextView roomName=text(room.name,15,INK);roomName.setPadding(dp(12),0,dp(8),0);item.addView(roomName,new LinearLayout.LayoutParams(0,-2,1));ImageView arrow=new ImageView(this);arrow.setImageResource(R.drawable.ic_chevron);item.addView(arrow,new LinearLayout.LayoutParams(dp(18),dp(18)));
             LinearLayout.LayoutParams rp=new LinearLayout.LayoutParams(-1,-2);rp.bottomMargin=dp(8);agentDetailRows.addView(item,rp);
@@ -371,6 +374,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         menu.getMenu().add("查看 Agent 信息").setOnMenuItemClickListener(item->{showConversationList();return true;});
         menu.getMenu().add(0,R.id.find_chat_history,Menu.NONE,"查找聊天记录").setOnMenuItemClickListener(item->{hideKeyboard();chatSearch.show(session.selectedConversation,session.title());return true;});
         menu.getMenu().add("会话信息").setOnMenuItemClickListener(item->{showConversationInfo();return true;});
+        addRenameAction(menu, session.selected());
         if(session.selected()!=null&&session.selected().kind.equals("group"))
             menu.getMenu().add("群成员").setOnMenuItemClickListener(item->{showGroupMembers();return true;});
         if(session.managesGroup(session.selected())){
@@ -383,6 +387,23 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         menu.getMenu().add("新建对话").setOnMenuItemClickListener(item->{tools.newConversation();return true;});
         menu.getMenu().add("立即同步").setOnMenuItemClickListener(item->{session.refresh();return true;});
         if(session.selected()!=null&&!session.selected().kind.equals("direct"))menu.getMenu().add("提及 Agent").setOnMenuItemClickListener(item->{showAgents(true);return true;});menu.show();
+    }
+    private void addConversationRowActions(View row, MessageApi.Conversation room) {
+        if (!session.owns(room)) return;
+        row.setOnLongClickListener(anchor -> {
+            PopupMenu menu = new PopupMenu(this, anchor);
+            addRenameAction(menu, room);
+            menu.show();
+            return true;
+        });
+    }
+    private void addRenameAction(PopupMenu menu, MessageApi.Conversation room) {
+        if (!session.owns(room)) return;
+        menu.getMenu().add("重命名对话").setEnabled(session.canRenameConversation(room)).setOnMenuItemClickListener(item -> {
+            hideKeyboard();
+            tools.renameConversation(room);
+            return true;
+        });
     }
     private void showConversationInfo(){
         LinearLayout content=column();content.setPadding(dp(22),dp(12),dp(22),dp(12));content.addView(text(session.status,12,MUTED));

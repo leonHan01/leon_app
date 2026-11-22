@@ -9,6 +9,7 @@ protocol ChatAPI: AnyObject, Sendable {
     func logout() async throws
     func agents() async throws -> [AgentInfo]
     func conversations() async throws -> [Conversation]
+    func renameConversation(_ id: String, name: String) async throws -> Conversation
     func heartbeat(deviceId: String, name: String) async throws
     func page(room: String, after: Int64?, before: Int64?) async throws -> MessagePage
     func search(query: String, room: String?, before: Int64?) async throws -> ChatSearchPage
@@ -40,6 +41,9 @@ protocol ChatAPI: AnyObject, Sendable {
     func restore(_ bytes: Data, agent: String?, requestId: String) async throws -> Conversation
 }
 extension ChatAPI {
+    func renameConversation(_ id: String, name: String) async throws -> Conversation {
+        throw NativeError(message:"服务端尚未支持重命名对话，请升级服务端。")
+    }
     func branch(room:String,message:Int64,name:String,requestId:String) async throws -> Conversation {throw NativeError(message:"服务端尚未支持对话分支，请升级服务端。")}
     func uploadDocument(_ document:DocumentAttachment,room:String,data:Data) async throws {throw NativeError(message:"文档接口不可用。")}
     func document(_ id:String,favorite:Int64?) async throws -> Data {throw NativeError(message:"文档接口不可用。")}
@@ -99,6 +103,9 @@ final class MessageAPI: ChatAPI, NotificationAPI, @unchecked Sendable {
     func logout() async throws { _ = try await request("api/conversations/account/logout", body: Data("{}".utf8)) }
     func agents() async throws -> [AgentInfo] { try await get("api/agents") }
     func conversations() async throws -> [Conversation] { try await get("api/conversations") }
+    func renameConversation(_ id: String, name: String) async throws -> Conversation {
+        try await post("api/conversations/rename", ["conversationId":id, "name":name])
+    }
     func heartbeat(deviceId: String, name: String) async throws {
         _ = try await request("api/device-messages/presence", body: JSONSerialization.data(withJSONObject: ["deviceId":deviceId,"name":name,"platform":"ios"]))
     }

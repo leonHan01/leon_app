@@ -13,6 +13,7 @@ struct ZipDocument: FileDocument {
 struct NativeChatView: View {
     enum Panel {
         case photos(ImageOrigin,Int),imageFiles(ImageOrigin),context(String),members(Conversation,Bool),inviteUsers(Conversation),inviteAgents(Conversation),new(AgentInfo,String,ImageOrigin),clear(ClearHistoryPreview),restore(BackupPreview,Data,String?,String,ImageOrigin)
+        case rename(Conversation)
     }
     @ObservedObject var store:ChatStore
     var openRoom:(Conversation)->Void
@@ -91,6 +92,10 @@ struct NativeChatView: View {
             Button("收藏") {hideKeyboard();favorites = true}
             Button("查找聊天记录") {hideKeyboard();searching = true}.accessibilityIdentifier("find_chat_history")
             Button("会话信息") {panel = .members(store.selected ?? Conversation(id:store.roomID,name:"聊天",kind:"group",agentId:nil,agentIds:[]),false)}
+            if let room = store.selected, store.owns(room) {
+                Button("重命名对话") {hideKeyboard();panel = .rename(room)}
+                    .disabled(!store.canRenameConversation(room)).accessibilityIdentifier("rename_conversation")
+            }
             if store.selected?.kind == "group" {Button("群成员") {if let room = store.selected {panel = .members(room,true)}}}
             if let room = store.selected,store.managesGroup(room) {
                 Button("添加用户") {panel = .inviteUsers(room)}.disabled(store.busy != nil).accessibilityIdentifier("chat_invite_users")
@@ -253,6 +258,7 @@ struct NativeChatView: View {
                 case .members(let room,let showMembers):MembersPanel(store:store,room:room,showMembers:showMembers,close:{self.panel = nil},addUsers:{self.panel = .inviteUsers(room)},addAgents:{self.panel = .inviteAgents(room)})
                 case .inviteUsers(let room):InviteUsersPanel(store:store,room:room,close:{self.panel = nil})
                 case .inviteAgents(let room):InviteAgentsPanel(store:store,room:room,close:{self.panel = nil})
+                case .rename(let room):RenameConversationPrompt(store:store,room:room,close:{self.panel = nil})
                 case .new(let agent,let request,let origin):NamePrompt(title:"与 \(agent.name) 新建对话",note:"新对话将从空白开始，不携带当前对话的消息和上下文。原对话可从 Agent 主页查看。",close:{self.panel = nil}) {name in
                     guard let result = await store.tool("正在新建对话…",work:{try await $0.newThread(agent:agent.id,name:name,requestId:request)}) else {return false}
                     store.upsert(result);store.showNotice("独立对话已创建");if visible && origin == store.imageOrigin {openRoom(result)};return true

@@ -9,6 +9,7 @@ struct NativeRootView: View {
     @State private var path: [Route] = []
     @State private var login = false
     @State private var group = false
+    @State private var renameRoom: Conversation?
     @State private var usage = false
     @State private var logout = false
     @State private var connectionInfo = false
@@ -54,7 +55,7 @@ struct NativeRootView: View {
         .onChange(of:tab) {_ in navigation = UUID()}
         .onChange(of:path) {_ in navigation = UUID()}
         .onChange(of:store.user?.id) {id in
-            path = [];tab = id == nil ? 2 : 0;login = false;group = false;usage = false;logout = false
+            path = [];tab = id == nil ? 2 : 0;login = false;group = false;renameRoom = nil;usage = false;logout = false
         }
     }
     private var home: some View {
@@ -113,6 +114,11 @@ struct NativeRootView: View {
                 DirectoryRow(title:room.name,detail:room.id == "shared" || room.id.hasPrefix("home:") ? "设备消息与 Agent 群聊" : "\(room.agentIds.count) 位 Agent",action:{openRoom(room)}) {
                     MobileIcon(symbol:.groups,size:28,color:.white).frame(width:48,height:48).background(MobileStyle.color(0x62AA88),in:RoundedRectangle(cornerRadius:7))
                 }.accessibilityIdentifier("group:"+room.id)
+                    .contextMenu {
+                        if store.owns(room) {
+                            Button("重命名对话") {renameRoom = room}.disabled(!store.canRenameConversation(room))
+                        }
+                    }
             }
         }
     }
@@ -159,6 +165,7 @@ struct NativeRootView: View {
     @ViewBuilder private var dialogs: some View {
         ZStack {
             if login {LoginView(store:store,close:{login = false})}
+            if let renameRoom { RenameConversationPrompt(store:store,room:renameRoom,close:{self.renameRoom = nil}) }
             if group {GroupForm(store:store,close:{group = false}) {name,agents,users in
                 let token = groupNavigation
                 guard let result = await store.tool("正在创建群聊…",work:{try await $0.group(name:name,agentIds:agents,usernames:users)}) else {return false}

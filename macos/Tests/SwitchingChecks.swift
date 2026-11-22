@@ -323,6 +323,39 @@ struct SwitchingChecks {
         race.setActive(false)
         check(!race.conversations.contains(a), "late directory response cannot restore a permanently deleted conversation")
 
+        let renamePath = "/api/conversations/rename"
+        let renamed = Conversation(id: a.id, name: "新标题", kind: a.kind, agentId: a.agentId, agentIds: a.agentIds)
+        let renaming = ChatStore(api: api)
+        renaming.setActive(false)
+        renaming.conversations = [a, b]
+        renaming.selectConversation(a.id)
+        renaming.draft = "unsent A draft"
+        FixtureProtocol.fixture.setup(holding: ["/api/conversations", renamePath], responses: [
+            "/api/conversations": try JSONEncoder().encode([a, b]),
+            "/api/agents": try JSONEncoder().encode([agent("a"), agent("b")]),
+            renamePath: try JSONEncoder().encode(renamed)
+        ])
+        renaming.setActive(true)
+        _ = await waitFor { FixtureProtocol.fixture.paths().contains("/api/conversations") }
+        let renameTask = Task { try await renaming.renameConversation(a, name: renamed.name) }
+        _ = await waitFor { FixtureProtocol.fixture.paths().contains(renamePath) }
+        let renameRequest = FixtureProtocol.fixture.request(renamePath)
+        check(renameRequest?.httpMethod == "POST" &&
+              renameRequest?.value(forHTTPHeaderField: "Authorization") == "Bearer fake-test-token",
+              "renaming uses the authenticated conversation endpoint")
+        renaming.selectConversation(b.id)
+        renaming.draft = "unsent B draft"
+        FixtureProtocol.fixture.release(renamePath)
+        try await renameTask.value
+        FixtureProtocol.fixture.release("/api/conversations")
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        renaming.setActive(false)
+        check(renaming.conversations == [renamed, b] && renaming.selectedConversationId == b.id && renaming.draft == "unsent B draft",
+              "renaming a background conversation preserves newer navigation and survives a stale directory response")
+        renaming.selectConversation(a.id)
+        check(renaming.title == renamed.name && renaming.draft == "unsent A draft",
+              "the renamed conversation retains its draft and identity")
+
         if failures > 0 { exit(1) }
     }
 }

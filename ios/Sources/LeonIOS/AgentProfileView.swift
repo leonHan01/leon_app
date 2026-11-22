@@ -8,6 +8,7 @@ struct AgentProfileView: View {
     var openAgent: (AgentInfo) -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var create = false
+    @State private var renameRoom: Conversation?
     @State private var requestID = UUID().uuidString.lowercased()
     @State private var origin: ImageOrigin?
     @State private var visible = false
@@ -34,12 +35,18 @@ struct AgentProfileView: View {
                                     MobileIcon(symbol:.chevron,size:18,color:MobileStyle.color(0xBBBBBB))
                                 }.foregroundStyle(MobileStyle.ink).padding(.horizontal,14).padding(.vertical,16).background(.white,in:RoundedRectangle(cornerRadius:14))
                             }.buttonStyle(MobilePressStyle(radius:14)).accessibilityIdentifier("agent-history:"+room.id)
+                                .contextMenu {
+                                    if store.owns(room) {
+                                        Button("重命名对话") {renameRoom = room}.disabled(!store.canRenameConversation(room))
+                                    }
+                                }
                         }
                     } else {Text("Agent 已不存在，请返回列表刷新。").font(.system(size:15)).foregroundStyle(MobileStyle.muted)}
                 }.padding(.horizontal,12).padding(.top,12).padding(.bottom,16)
             }
         }.background(MobileStyle.bar.ignoresSafeArea()).foregroundStyle(MobileStyle.ink).toolbar(.hidden,for:.navigationBar)
             .overlay {
+                if let renameRoom { RenameConversationPrompt(store:store,room:renameRoom,close:{self.renameRoom = nil}) }
                 if create {
                     NamePrompt(title:"新建独立对话",note:"新对话从空白开始，原对话保留在主页。",close:{create = false}) {name in
                         guard let result = await store.tool("正在新建对话…",work:{try await $0.newThread(agent:id,name:name,requestId:requestID)}) else {return false}

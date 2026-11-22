@@ -169,14 +169,17 @@ final class ChatSession {
     void searchFailure(Exception error){if(error instanceof MessageApi.SessionExpired)signedOut(error.getMessage());}
     interface Tool<T>{T run(MessageApi client)throws Exception;}
     <T> void tool(String label,Tool<T> work,java.util.function.Consumer<T> success){
+        tool(label, true, work, success);
+    }
+    private <T> void tool(String label, boolean requireSelectedRoom, Tool<T> work, java.util.function.Consumer<T> success){
         if(api==null||configuring||toolsBusy)return;
         int connection=connectionGeneration;String room=selectedConversation;MessageApi client=api;
         toolsBusy=true;toolsStatus=label;notifyChanged();
         navigationWorkers.execute(()->{
             try{
                 T result=work.run(client);
-                main.post(()->{if(connection!=connectionGeneration)return;toolsBusy=false;toolsStatus="";notifyChanged();if(room.equals(selectedConversation))success.accept(result);});
-            }catch(Exception failure){main.post(()->{if(connection!=connectionGeneration)return;toolsBusy=false;toolsStatus="";notifyChanged();if(room.equals(selectedConversation))report(failure);});}
+                main.post(()->{if(connection!=connectionGeneration)return;toolsBusy=false;toolsStatus="";notifyChanged();if(!requireSelectedRoom||room.equals(selectedConversation))success.accept(result);});
+            }catch(Exception failure){main.post(()->{if(connection!=connectionGeneration)return;toolsBusy=false;toolsStatus="";notifyChanged();if(!requireSelectedRoom||room.equals(selectedConversation))report(failure);});}
         });
     }
     List<MessageApi.Conversation> agentConversations(String agentId){
@@ -281,6 +284,7 @@ final class ChatSession {
     private final ExecutorService directoryWorker=Executors.newSingleThreadExecutor();
     private boolean directoryLoading;
     private long lastDirectoryRefresh;
+    private int directoryRevision;
     private final ExecutorService avatarWorkers=Executors.newFixedThreadPool(2);
     private final android.util.LruCache<String,android.graphics.Bitmap> avatarCache=new android.util.LruCache<String,android.graphics.Bitmap>(4096) {
         @Override protected int sizeOf(String key,android.graphics.Bitmap bitmap){return Math.max(1,bitmap.getAllocationByteCount()/1024);}
@@ -349,6 +353,22 @@ final class ChatSession {
     }
     boolean owns(MessageApi.Conversation room){
         return room!=null&&user!=null&&(user.id().equals(room.ownerId)||room.ownerId.isEmpty()&&user.home().equals("shared"));
+    }
+    boolean canRenameConversation(MessageApi.Conversation room) {
+        return owns(room) && !configuring && !toolsBusy && !unconfirmedRooms.contains(room.id);
+    }
+    void renameConversation(MessageApi.Conversation room, String name, Runnable saved) {
+        if (!canRenameConversation(room)) return;
+        tool("正在重命名…", false, client -> {
+            var renamed = client.renameConversation(room.id, name);
+            if (!renamed.id.equals(room.id)) throw new java.io.IOException("服务端返回的会话不匹配，请刷新列表。");
+            return renamed;
+        }, renamed -> {
+            directoryRevision++;
+            conversations.replaceAll(existing -> existing.id.equals(renamed.id) ? renamed : existing);
+            notifyChanged();
+            saved.run();
+        });
     }
     boolean managesGroup(MessageApi.Conversation room){
         return room!=null&&room.kind.equals("group")&&!room.id.equals("shared")&&!room.id.startsWith("home:")&&owns(room);
@@ -520,11 +540,11 @@ final class ChatSession {
     }
     private void refreshDirectory(){
         if(directoryLoading||api==null||directoryWorker.isShutdown()||(lastDirectoryRefresh!=0&&android.os.SystemClock.elapsedRealtime()-lastDirectoryRefresh<10_000))return;
-        directoryLoading=true;lastDirectoryRefresh=android.os.SystemClock.elapsedRealtime();int connection=connectionGeneration;MessageApi client=api;String deviceName=sender;
+        directoryLoading=true;lastDirectoryRefresh=android.os.SystemClock.elapsedRealtime();int connection=connectionGeneration, revisionAtStart=directoryRevision;MessageApi client=api;String deviceName=sender;
         directoryWorker.execute(()->{
             try{
                 var directory=client.agents();var rooms=client.conversations();
-                main.post(()->{if(connection!=connectionGeneration)return;
+                main.post(()->{if(connection!=connectionGeneration||revisionAtStart!=directoryRevision)return;
                     String old=avatarSignature(agents);agents.clear();agents.addAll(directory);if(!old.equals(avatarSignature(agents)))revision++;
                     for(var room:conversations)if(unconfirmedRooms.contains(room.id)&&rooms.stream().noneMatch(known->known.id.equals(room.id)))rooms.add(room);
                     conversations.clear();conversations.addAll(rooms);notifyChanged();

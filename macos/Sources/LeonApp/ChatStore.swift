@@ -185,10 +185,28 @@ final class ChatStore: ObservableObject {
     }
 
     @Published var selectedConversationId = "shared"
+    @Published var conversationToRename: Conversation?
     @Published var conversationToDelete: Conversation?
     @Published private(set) var deletingConversation = false
     private var deletedConversationIDs = Set<String>()
     private var directoryRevision = UUID()
+
+    func canRenameConversation(_ room: Conversation) -> Bool {
+        hasConnection && !deletingConversation && !unconfirmedDirectRooms.contains(room.id)
+    }
+
+    func renameConversation(_ room: Conversation, name: String) async throws {
+        guard let api, canRenameConversation(room), conversations.contains(where: { $0.id == room.id }) else {
+            throw ClientError.message("对话暂不可重命名，请刷新列表后重试。")
+        }
+        let connection = connectionId
+        let renamed = try await api.renameConversation(room.id, name: name)
+        guard connection == connectionId, !deletedConversationIDs.contains(room.id) else { throw CancellationError() }
+        guard renamed.id == room.id else { throw ClientError.message("服务端返回的会话不匹配，请刷新列表。") }
+        guard let index = conversations.firstIndex(where: { $0.id == room.id }) else { throw CancellationError() }
+        directoryRevision = UUID()
+        conversations[index] = renamed
+    }
 
     func previewConversationDeletion(_ room: Conversation) async throws -> ClearHistoryPreview {
         guard let api else { throw ClientError.message("请先连接服务器。") }
@@ -729,7 +747,7 @@ final class ChatStore: ObservableObject {
             let rooms = try await candidate.conversations()
             try await Keychain.save(secret)
             generation = UUID(); connectionId = UUID(); avatarSessionKey = UUID().uuidString
-            conversationToDelete = nil; deletingConversation = false; deletedConversationIDs = []; directoryRevision = UUID()
+            conversationToRename = nil; conversationToDelete = nil; deletingConversation = false; deletedConversationIDs = []; directoryRevision = UUID()
             agentDetailId = nil; creatingAgentConversation = false
             modelUsage = []; usageError = nil; usageLoadedAt = nil; usageBusy = false
             scrollPositions=[:];navigationRequest = UUID(); roomCache = [:]; roomCacheOrder = []

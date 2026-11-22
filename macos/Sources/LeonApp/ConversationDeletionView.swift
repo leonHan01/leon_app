@@ -36,9 +36,57 @@ struct AgentHistoryRow: View {
                 : compact ? Color.clear : Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: compact ? 8 : 12))
             .onHover { hover.hovering = $0 }
             .contextMenu {
+                Button("重命名对话…") { store.conversationToRename = room }
+                    .disabled(!store.canRenameConversation(room))
                 Button("永久删除对话…", role: .destructive) { store.conversationToDelete = room }
                     .disabled(!store.hasConnection || store.deletingConversation || store.creatingAgentConversation)
             }
+    }
+}
+
+struct RenameConversationView: View {
+    @ObservedObject var store: ChatStore
+    let room: Conversation
+    @Environment(\.dismiss) private var dismiss
+    @State private var name: String
+    @State private var saving = false
+    @State private var errorMessage: String?
+
+    init(store: ChatStore, room: Conversation) {
+        self.store = store
+        self.room = room
+        _name = State(initialValue: room.name)
+    }
+
+    private var title: String { name.trimmingCharacters(in: .whitespacesAndNewlines) }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("重命名对话").font(.title2.bold())
+            TextField("对话名称", text: $name).disabled(saving)
+            if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
+            HStack {
+                Spacer()
+                Button("取消") { dismiss() }.keyboardShortcut(.cancelAction).disabled(saving)
+                Button(saving ? "正在保存…" : "保存") {
+                    let newName = title
+                    saving = true
+                    errorMessage = nil
+                    Task {
+                        defer { saving = false }
+                        do {
+                            try await store.renameConversation(room, name: newName)
+                            dismiss()
+                        } catch is CancellationError {
+                            dismiss()
+                        } catch {
+                            errorMessage = error.localizedDescription
+                        }
+                    }
+                }.keyboardShortcut(.defaultAction).disabled(saving || !(1...60).contains(title.utf16.count))
+            }
+        }.padding(24).frame(width: 360)
+            .interactiveDismissDisabled(saving)
     }
 }
 
