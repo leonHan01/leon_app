@@ -1,0 +1,195 @@
+--- a/src/main/java/com/leon/workflow/ApiTokenInterceptor.java
++++ b/src/main/java/com/leon/workflow/ApiTokenInterceptor.java
+@@ -67,7 +67,7 @@
+         if(type==ChatUserController.class)return name.equals("me")||name.equals("logout");
+         if(type==AgentAvatarController.class)return name.equals("catalog")||name.equals("image");
+         if(type==DevicePresenceController.class)return name.equals("heartbeat");
+-        if(type==AgentController.class)return Set.of("agents","usage","conversations","group","members","addMembers","addAgents","direct","thread").contains(name);
++        if(type==AgentController.class)return Set.of("agents","usage","conversations","rename","group","members","addMembers","addAgents","direct","thread").contains(name);
+         return false;
+     }
+ 
+--- a/src/main/java/com/leon/workflow/messaging/AgentChatService.java
++++ b/src/main/java/com/leon/workflow/messaging/AgentChatService.java
+@@ -12,13 +12,16 @@
+     private static final Pattern MENTION=Pattern.compile("(?<![\\p{L}\\p{N}_])@([a-z][a-z0-9_-]{1,31})(?![\\p{L}\\p{N}_-])",Pattern.CASE_INSENSITIVE);
+     public AgentChatService(DeviceMessageStore store,AgentRegistry agents) { this.store=store; this.agents=agents; }
+     public List<DeviceMessageStore.Conversation> conversations() {
+-        return store.conversations().stream().map(c -> {
+-            if(c.kind().equals("direct")&&(c.id().equals("direct:"+c.agentId())||c.id().startsWith("dm:")) && !store.hasAutomaticTitle(c.id())) {
+-                var agent=agents.get(c.agentId()); return new DeviceMessageStore.Conversation(c.id(),agent.name(),c.kind(),c.agentId(),c.agentIds(),c.ownerId());
+-            }
+-            if(ChatAccess.personalRoom(c.id())) return new DeviceMessageStore.Conversation(c.id(),c.name(),c.kind(),null,agents.summaries().stream().filter(AgentRegistry.Summary::enabled).map(AgentRegistry.Summary::id).toList(),c.ownerId());
+-            return c;
+-        }).toList();
++        synchronized (store) {
++            return store.conversations().stream().map(this::displayConversation).toList();
++        }
++    }
++    DeviceMessageStore.Conversation displayConversation(DeviceMessageStore.Conversation c) {
++        if(c.kind().equals("direct")&&(c.id().equals("direct:"+c.agentId())||c.id().startsWith("dm:")) && !store.usesStoredTitle(c.id())) {
++            var agent=agents.get(c.agentId()); return new DeviceMessageStore.Conversation(c.id(),agent.name(),c.kind(),c.agentId(),c.agentIds(),c.ownerId());
++        }
++        if(ChatAccess.personalRoom(c.id())) return new DeviceMessageStore.Conversation(c.id(),c.name(),c.kind(),null,agents.summaries().stream().filter(AgentRegistry.Summary::enabled).map(AgentRegistry.Summary::id).toList(),c.ownerId());
++        return c;
+     }
+     public DeviceMessageStore.Conversation group(String name,List<String> ids) {
+         List<String> members=ids==null?List.of():ids.stream().map(DeviceMessageStore::uuid).distinct().toList();
+--- a/src/main/java/com/leon/workflow/messaging/AgentController.java
++++ b/src/main/java/com/leon/workflow/messaging/AgentController.java
+@@ -31,6 +31,16 @@
+     @GetMapping("/api/conversations") public ResponseEntity<?> conversations(HttpServletRequest request) {
+         var user=access.user(request);
+         return response(chat.conversations().stream().filter(room->access.canRead(user,room.id())).toList());
++    }
++    public record Rename(String conversationId, String name) {}
++    @PostMapping("/api/conversations/rename")
++    public ResponseEntity<?> rename(@RequestBody Rename input, HttpServletRequest request) {
++        if (input.conversationId() == null || input.conversationId().isBlank())
++            throw DeviceMessageStore.failure(HttpStatus.BAD_REQUEST, "请选择要重命名的对话");
++        synchronized (store) {
++            String id = access.room(request, input.conversationId(), true);
++            return response(chat.displayConversation(store.renameConversation(id, input.name())));
++        }
+     }
+     public record Group(String name,List<String> agentIds,List<String> usernames) {}
+     @PostMapping("/api/conversations/groups") public ResponseEntity<?> group(@RequestBody Group input,HttpServletRequest request) {
+--- a/src/main/java/com/leon/workflow/messaging/ConversationTitleScheduler.java
++++ b/src/main/java/com/leon/workflow/messaging/ConversationTitleScheduler.java
+@@ -41,7 +41,7 @@
+                        c.title_through_id,SUM(CASE WHEN m.message_role='user' AND m.id>c.title_through_id THEN 1 ELSE 0 END),
+                        MAX(m.created_at),c.auto_titled
+                 FROM chat_conversation c JOIN device_message m ON m.conversation_id=c.id
+-                WHERE c.kind='direct' AND c.title_retry_at<=?
++                WHERE c.kind='direct' AND NOT c.manually_titled AND c.title_retry_at<=?
+                   AND NOT EXISTS (SELECT 1 FROM chat_agent_job j WHERE j.conversation_id=c.id AND j.status IN ('PENDING','RUNNING'))
+                   AND NOT EXISTS (SELECT 1 FROM chat_context_operation o WHERE o.conversation_id=c.id AND o.status IN ('PENDING','RUNNING'))
+                 GROUP BY c.id,c.name,c.initial_name,c.agent_id,c.owner_id,c.history_revision,c.title_through_id,c.auto_titled
+@@ -61,7 +61,7 @@
+         List<Map<String,String>> input;
+         synchronized(store) {
+             // Claim before making a paid call, including across restarts and failed attempts.
+-            if(jdbc.update("UPDATE chat_conversation SET title_retry_at=? WHERE id=? AND name=? AND title_through_id=? AND title_retry_at<=?",now+RETRY_MS,c.id(),c.name(),c.throughId(),now)!=1)return;
++            if(jdbc.update("UPDATE chat_conversation SET title_retry_at=? WHERE id=? AND NOT manually_titled AND name=? AND title_through_id=? AND title_retry_at<=?",now+RETRY_MS,c.id(),c.name(),c.throughId(),now)!=1)return;
+             var lines=jdbc.query("SELECT message_role,body FROM device_message WHERE conversation_id=? AND id<=? AND TRIM(body)<>'' ORDER BY id DESC LIMIT 24",
+                 (rs,n)->Map.of("role",rs.getString(1),"content",rs.getString(2)),c.id(),c.lastId());
+             if(lines.isEmpty())return;
+@@ -85,7 +85,7 @@
+                 synchronized(store){
+                     jdbc.update("""
+                         UPDATE chat_conversation SET initial_name=COALESCE(initial_name,name),name=?,auto_titled=TRUE,title_through_id=?,title_retry_at=0
+-                        WHERE id=? AND name=? AND title_through_id=? AND history_revision=?
++                        WHERE id=? AND NOT manually_titled AND name=? AND title_through_id=? AND history_revision=?
+                           AND (SELECT MAX(id) FROM device_message WHERE conversation_id=?)=?
+                           AND NOT EXISTS (SELECT 1 FROM chat_agent_job WHERE conversation_id=? AND status IN ('PENDING','RUNNING'))
+                           AND NOT EXISTS (SELECT 1 FROM chat_context_operation WHERE conversation_id=? AND status IN ('PENDING','RUNNING'))
+--- a/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java
++++ b/src/main/java/com/leon/workflow/messaging/DeviceMessageStore.java
+@@ -136,6 +136,7 @@
+         jdbc.execute("ALTER TABLE chat_conversation ADD COLUMN IF NOT EXISTS history_revision BIGINT DEFAULT 0 NOT NULL");
+         jdbc.execute("ALTER TABLE chat_conversation ADD COLUMN IF NOT EXISTS initial_name VARCHAR(60)");
+         jdbc.execute("ALTER TABLE chat_conversation ADD COLUMN IF NOT EXISTS auto_titled BOOLEAN DEFAULT FALSE NOT NULL");
++        jdbc.execute("ALTER TABLE chat_conversation ADD COLUMN IF NOT EXISTS manually_titled BOOLEAN DEFAULT FALSE NOT NULL");
+         jdbc.execute("ALTER TABLE chat_conversation ADD COLUMN IF NOT EXISTS title_retry_at BIGINT DEFAULT 0 NOT NULL");
+         jdbc.execute("ALTER TABLE chat_conversation ADD COLUMN IF NOT EXISTS title_through_id BIGINT DEFAULT 0 NOT NULL");
+         jdbc.execute("ALTER TABLE chat_conversation ADD COLUMN IF NOT EXISTS last_clear_request_id VARCHAR(36) DEFAULT '' NOT NULL");
+@@ -168,12 +169,25 @@
+         jdbc.execute("CREATE INDEX IF NOT EXISTS idx_chat_helper_outreach_due ON chat_helper_outreach(status,due_at)");
+     }
+     public synchronized List<Conversation> conversations() { return jdbc.query("SELECT * FROM chat_conversation ORDER BY CASE WHEN id='shared' THEN 0 ELSE 1 END,name,id",CONVERSATION); }
+-    synchronized boolean hasAutomaticTitle(String id) {
+-        return Boolean.TRUE.equals(jdbc.queryForObject("SELECT auto_titled FROM chat_conversation WHERE id=?",Boolean.class,id));
++    synchronized boolean usesStoredTitle(String id) {
++        return Boolean.TRUE.equals(jdbc.queryForObject(
++            "SELECT auto_titled OR manually_titled FROM chat_conversation WHERE id=?", Boolean.class, id));
+     }
+     public synchronized Conversation conversation(String id) {
+         var rows=jdbc.query("SELECT * FROM chat_conversation WHERE id=?",CONVERSATION,id);
+         if(rows.isEmpty()) throw failure(HttpStatus.NOT_FOUND,"会话不存在"); return rows.getFirst();
++    }
++    synchronized Conversation renameConversation(String id, String name) {
++        String title = name == null ? "" : name.strip();
++        if (title.isBlank() || title.length() > 60 || title.codePoints().anyMatch(Character::isISOControl))
++            throw bad("对话名称应为 1–60 字且不能含控制字符");
++        int updated = jdbc.update("""
++            UPDATE chat_conversation
++            SET initial_name=COALESCE(initial_name, name), name=?, manually_titled=TRUE
++            WHERE id=?
++            """, title, id);
++        if (updated != 1) throw failure(HttpStatus.NOT_FOUND, "会话不存在");
++        return conversation(id);
+     }
+     public synchronized Conversation createGroup(String name,List<String> agentIds) {
+         name=name==null?"":name.strip();
+--- a/src/test/java/com/leon/workflow/messaging/AgentChatIntegrationTest.java
++++ b/src/test/java/com/leon/workflow/messaging/AgentChatIntegrationTest.java
+@@ -88,15 +88,23 @@
+         titles.runOnce(now+300_000);verify(model,times(1)).complete(any(),anyString(),anyList());
+     }
+ 
+-    @Test void automaticTitlePreservesConcurrentRenameAndClear() throws Exception {
+-        var a=agent("writer");var room=chat.createDirect(a.id(),UUID.randomUUID().toString(),"新对话");
++    @Test void manualRenameWinsOverInFlightAndFutureAutomaticTitles() throws Exception {
++        var a=agent("writer");String request=UUID.randomUUID().toString();var room=chat.createDirect(a.id(),request,"新对话");
+         chat.send(send(room.id(),"讨论旅行",List.of()));jdbc.update("UPDATE chat_agent_job SET status='SUCCEEDED'");
+         long now=System.currentTimeMillis();jdbc.update("UPDATE device_message SET created_at=?",now-300_000);
+         when(model.complete(any(),anyString(),anyList())).thenAnswer(inv->{
+-            jdbc.update("UPDATE chat_conversation SET name='手动改名',history_revision=history_revision+1 WHERE id=?",room.id());
++            // Saving the current title also protects it from an in-flight result.
++            store.renameConversation(room.id(),"新对话");
+             return "旅行计划";
+         });
+-        titles.runOnce(now);assertEquals("手动改名",store.conversation(room.id()).name());
++        titles.runOnce(now);assertEquals("新对话",store.conversation(room.id()).name());
++        store.renameConversation(room.id(),"手动改名");
++        for (int i=0; i<10; i++) chat.send(send(room.id(),"继续讨论旅行 "+i,List.of()));
++        jdbc.update("UPDATE chat_agent_job SET status='SUCCEEDED'");
++        titles.runOnce(now+7_200_000);
++        assertEquals("手动改名",chat.createDirect(a.id(),request,"新对话").name());
++        assertEquals(0L,store.historyRevision(room.id()));
++        verify(model,times(1)).complete(any(),anyString(),anyList());
+     }
+     @Test void automaticTitleIgnoresEmptyRoomsAndRejectsInvalidModelResults() throws Exception {
+         var a=agent("writer");var empty=chat.createDirect(a.id(),UUID.randomUUID().toString(),"新对话");
+--- a/src/test/java/com/leon/workflow/messaging/ChatAccountIntegrationTest.java
++++ b/src/test/java/com/leon/workflow/messaging/ChatAccountIntegrationTest.java
+@@ -104,6 +104,39 @@
+         mvc.perform(get("/api/device-messages").param("conversationId",group).header("Authorization",eve.authorization())).andExpect(status().isOk());
+         mvc.perform(post("/api/conversations/account/logout").header("Authorization",eve.authorization())).andExpect(status().isOk());
+         mvc.perform(get("/api/conversations").header("Authorization",eve.authorization())).andExpect(status().isUnauthorized());
++    }
++
++    @Test void onlyOwnersCanRenameConversationsAndMembersSeeTheNewName() throws Exception {
++        var owner = login("RenameOwner");
++        var member = login("RenameMember");
++        var outsider = login("RenameVisitor");
++        var agent = groupAgent("rename");
++        String group = room(owner, "/api/conversations/groups", Map.of("name","原群名称","usernames",List.of("RenameMember")));
++        String direct = room(owner, "/api/conversations/direct/"+agent.id(), Map.of());
++        long message = send(member, message(group,"保留的群聊记录",List.of()), "RenameMember");
++        mvc.perform(rename(group, "未认证")).andExpect(status().isUnauthorized());
++        for (var denied : List.of(member, outsider))
++            mvc.perform(rename(group, "不能重命名").header("Authorization",denied.authorization())).andExpect(status().isNotFound());
++        for (var invalid : List.of("  ", "两行\n名称", "字".repeat(61)))
++            mvc.perform(rename(group, invalid).header("Authorization",owner.authorization())).andExpect(status().isBadRequest());
++        mvc.perform(rename(group, "  新群名称  ").header("Authorization",owner.authorization()))
++            .andExpect(status().isOk()).andExpect(header().string("Cache-Control","no-store"))
++            .andExpect(jsonPath("$.id").value(group)).andExpect(jsonPath("$.name").value("新群名称"));
++        mvc.perform(rename(direct, "私聊新名称").header("Authorization",owner.authorization())).andExpect(status().isOk());
++        mvc.perform(rename("shared", "我的设备").header("Authorization",owner.authorization()))
++            .andExpect(status().isOk()).andExpect(jsonPath("$.id").value("home:"+owner.id()));
++        mvc.perform(get("/api/conversations").header("Authorization",owner.authorization()))
++            .andExpect(jsonPath("$[?(@.id == '"+direct+"')].name").value(List.of("私聊新名称")));
++        mvc.perform(get("/api/conversations").header("Authorization",member.authorization()))
++            .andExpect(jsonPath("$[?(@.id == '"+group+"')].name").value(List.of("新群名称")))
++            .andExpect(jsonPath("$[?(@.id == 'home:"+member.id()+"')].name").value(List.of("设备群聊")));
++        mvc.perform(get("/api/device-messages").param("conversationId",group).header("Authorization",member.authorization()))
++            .andExpect(jsonPath("$.messages[0].id").value(message)).andExpect(jsonPath("$.historyRevision").value(0));
++    }
++
++    private org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder rename(String id, String name) {
++        return post("/api/conversations/rename").contentType("application/json")
++            .content(json.writeValueAsString(Map.of("conversationId",id,"name",name)));
+     }
+ 
+     private AgentRegistry.Agent groupAgent(String label){
