@@ -1,0 +1,75 @@
+diff --git a/src/main/java/com/leon/workflow/messaging/AgentRegistry.java b/src/main/java/com/leon/workflow/messaging/AgentRegistry.java
+--- a/src/main/java/com/leon/workflow/messaging/AgentRegistry.java
++++ b/src/main/java/com/leon/workflow/messaging/AgentRegistry.java
+@@ -17,7 +17,7 @@
+ 
+ @Service
+ public class AgentRegistry {
+-    public static final String DEFAULT_IMAGE_MODEL="gpt-image-2.5-flare";
++    public static final String DEFAULT_IMAGE_MODEL="gpt-image-2.6-sunburst";
+     private final JdbcTemplate jdbc;
+     private final byte[] key;
+     private final AgentAvatarService avatars;
+@@ -61,7 +61,8 @@
+         jdbc.execute("ALTER TABLE chat_agent ADD COLUMN IF NOT EXISTS description VARCHAR(2000) DEFAULT '' NOT NULL");
+         jdbc.execute("ALTER TABLE chat_agent ADD COLUMN IF NOT EXISTS web_search_enabled BOOLEAN DEFAULT FALSE NOT NULL");
+         jdbc.execute("ALTER TABLE chat_agent ADD COLUMN IF NOT EXISTS image_generation_enabled BOOLEAN DEFAULT FALSE NOT NULL");
+-        jdbc.execute("ALTER TABLE chat_agent ADD COLUMN IF NOT EXISTS image_model VARCHAR(100) DEFAULT 'gpt-image-2.5-flare' NOT NULL");
++        jdbc.execute("ALTER TABLE chat_agent ADD COLUMN IF NOT EXISTS image_model VARCHAR(100) DEFAULT '"+DEFAULT_IMAGE_MODEL+"' NOT NULL");
++        jdbc.execute("ALTER TABLE chat_agent ALTER COLUMN image_model SET DEFAULT '"+DEFAULT_IMAGE_MODEL+"'");
+     }
+     public boolean keyStorageEnabled() { return key != null; }
+     static final class RuntimeConfig {
+diff --git a/src/main/resources/static/workspace/agents.js b/src/main/resources/static/workspace/agents.js
+--- a/src/main/resources/static/workspace/agents.js
++++ b/src/main/resources/static/workspace/agents.js
+@@ -4,6 +4,7 @@
+     if (!document.getElementById('agents-css')) { const css = document.createElement('link'); css.id = 'agents-css'; css.rel = 'stylesheet'; css.href = '/workspace/agents.css'; document.head.append(css); }
+     let viewActive = false, presenceTimer = null, presenceEpoch = 0;
+ const $ = id => pane.querySelector('#' + CSS.escape(id));
++const DEFAULT_IMAGE_MODEL = $('imageModel').defaultValue;
+ let agents = [], conversations = [], editing = null, current = 'shared', rows = [], more = false, generation = 0, timer, loading = false, activeTab = 'config', historyRevision = null;
+ let avatarCatalog = [], selectedAvatarId = 'alfred', uploadingAvatar = false, models = [];
+ const deviceId = (() => { let value = localStorage.getItem('leon-agent-web-device'); if (!value) { value = crypto.randomUUID(); localStorage.setItem('leon-agent-web-device', value); } return value; })();
+@@ -106,7 +107,7 @@
+     modelOptions(agent?.modelId || ''); $('enabled').checked = agent?.enabled ?? true;
+     $('webSearchEnabled').checked = agent?.webSearchEnabled ?? false;
+     $('imageGenerationEnabled').checked = agent?.imageGenerationEnabled ?? false;
+-    $('imageModel').value = agent?.imageModel || 'gpt-image-2.5-flare'; modelHint();
++    $('imageModel').value = agent?.imageModel || DEFAULT_IMAGE_MODEL; modelHint();
+     $('formTitle').textContent = agent ? `编辑 ${agent.name}` : '新建 Agent';
+     renderAgents();
+ }
+@@ -137,7 +138,7 @@
+     if (uploadingAvatar) return; body.avatarId = selectedAvatarId;
+     body.enabled = $('enabled').checked; body.version = editing?.version;
+     body.webSearchEnabled = $('webSearchEnabled').checked;
+-    body.imageGenerationEnabled = $('imageGenerationEnabled').checked; body.imageModel = $('imageModel').value.trim() || 'gpt-image-2.5-flare';
++    body.imageGenerationEnabled = $('imageGenerationEnabled').checked; body.imageModel = $('imageModel').value.trim() || DEFAULT_IMAGE_MODEL;
+     try {
+         const saved = await api('/api/agent-admin' + (editing ? '/' + editing.id : ''), { method: editing ? 'PUT' : 'POST', body: JSON.stringify(body) });
+         await loadAgents(); resetForm(saved); notice('Agent 已保存。客户端同步后即可开始私聊或在群聊中 @它。');
+diff --git a/src/main/resources/static/workspace/views/agents.html b/src/main/resources/static/workspace/views/agents.html
+--- a/src/main/resources/static/workspace/views/agents.html
++++ b/src/main/resources/static/workspace/views/agents.html
+@@ -18,7 +18,7 @@
+ <p id="webSearchHint" class="subtle">查询最新资料时自动搜索，并在回复中附可点击的来源链接。需要支持联网搜索的 OpenAI 模型；搜索会产生额外 API 费用，可与绘图同时开启。</p>
+ <label class="toggle"><input id="imageGenerationEnabled" type="checkbox">允许此 Agent 绘图</label>
+ <p id="imageGenerationHint" class="subtle">同一 Agent 可聊天、绘图和修改图片。需要支持图片生成工具的 OpenAI 对话模型，通常为 GPT-5 及更新模型；绘图会产生额外 API 费用。</p>
+-<label id="imageModelOptions" hidden>绘图模型<input id="imageModel" maxlength="100" list="imageModels" value="gpt-image-2.5-flare" placeholder="gpt-image-2.5-flare"><datalist id="imageModels"><option value="gpt-image-2.5-flare"><option value="gpt-image-2.5-sunburst"><option value="gpt-image-2"><option value="gpt-image-1.5"></datalist><small>复用此 Agent 的 OpenAI 凭据；聊天仍使用上方的对话模型。生成图保存到聊天记录，可继续要求修改。</small></label>
++<label id="imageModelOptions" hidden>绘图模型<input id="imageModel" maxlength="100" list="imageModels" value="gpt-image-2.6-sunburst" placeholder="gpt-image-2.6-sunburst"><datalist id="imageModels"><option value="gpt-image-2.6-sunburst"><option value="gpt-image-2.5-flare"><option value="gpt-image-2.5-sunburst"><option value="gpt-image-2"><option value="gpt-image-1.5"></datalist><small>复用此 Agent 的 OpenAI 凭据；聊天仍使用上方的对话模型。生成图保存到聊天记录，可继续要求修改。</small></label>
+ <label>Agent 介绍<textarea id="description" rows="3" maxlength="2000" placeholder="向用户介绍这个 Agent 的专长和用途，将在 App 详情页展示。"></textarea></label>
+ <label>角色与系统提示词<textarea id="systemPrompt" rows="8" maxlength="16000" placeholder="例如：你是一位严谨的写作编辑，先梳理逻辑，再给出具体修改建议。"></textarea></label>
+ <div class="form-footer"><p class="subtle">私聊直接回复；群聊仅响应 @标识。<br>每次回复仅使用当前会话的最近上下文。</p><button id="saveAgent" class="primary" type="submit">保存 Agent</button></div>
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -362,7 +362,7 @@
+ 
+ ### 同一 Agent 聊天与 GPT Image 绘图（2026-11-21）
+ 
+-Agent 管理页可为 OpenAI Agent 开启「允许此 Agent 绘图」，指定独立的 GPT Image 模型（默认 `gpt-image-2.5-flare`）。原对话模型需支持 Responses API 的 `image_generation` 工具，通常为 GPT-5 及更新模型；复用该 Agent 的 OpenAI API Key，不需要新建另一个 Agent。所有旧 Agent 默认关闭绘图，旧管理请求省略新字段时保留已有设置。
++Agent 管理页可为 OpenAI Agent 开启「允许此 Agent 绘图」，指定独立的 GPT Image 模型（默认 `gpt-image-2.6-sunburst`）。原对话模型需支持 Responses API 的 `image_generation` 工具，通常为 GPT-5 及更新模型；复用该 Agent 的 OpenAI API Key，不需要新建另一个 Agent。所有旧 Agent 默认关闭绘图，旧管理请求省略新字段时保留已有设置。新建 Agent 或工作台中未填写绘图模型时使用 `gpt-image-2.6-sunburst`；已有 Agent 保存的模型不会被默认值更新覆盖。
+ 
+ 开启后，仅交互回复使用 Responses API，由对话模型根据最新用户请求自动选择文字回复或生成 / 修改图片，每次最多调用一次工具。历史生成图作为图片参考重新附带，最近最多 8 张；摘要压缩、自动标题、归档总结与其他后台文字调用继续走原文字接口，不开启绘图工具。用量兼容 Responses 的 `input_tokens` / `output_tokens`，图片工具用量按独立绘图模型记录；未返回时记为未报告，不猜测费用。
+ 

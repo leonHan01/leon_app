@@ -263,6 +263,12 @@ window.renderMessage = async payload => {
   document.body.dataset.theme = nextTheme === 'dark' ? 'dark' : 'light';
   document.body.dataset.mine = String(!!payload.mine);
   document.body.dataset.platform = payload.platform || 'mac';
+  const fontScale = payload.fontScale;
+  if (document.body.dataset.platform === 'mac' && Number.isFinite(fontScale) && fontScale > 0) {
+    document.body.style.setProperty('--message-font-scale', fontScale);
+  } else {
+    document.body.style.removeProperty('--message-font-scale');
+  }
   if (changed) {
     generation++;
     source = nextSource;

@@ -16,7 +16,7 @@ struct LeonApp: App {
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .appSettings) {
-                Button("连接设置…") { store.showSettings = true }.keyboardShortcut(",")
+                Button("设置…") { store.showSettings = true }.keyboardShortcut(",")
             }
             CommandGroup(after: .newItem) {
                 Button("立即同步") { store.reconnect() }.keyboardShortcut("r")
@@ -27,6 +27,7 @@ struct LeonApp: App {
 
 struct ContentView: View {
     @ObservedObject var store: ChatStore
+    @AppStorage("chatFontSize") private var chatFontPoints = ChatFontSize.defaultPoints
     @State private var historyAgentId: String?
     @StateObject private var viewport=ConversationViewport()
     @State private var searchPresented = false
@@ -82,17 +83,12 @@ struct ContentView: View {
                         }
                     }
                 }
-                Text("私聊直接回复\n群聊中 @指定 Agent").font(.caption).foregroundStyle(.secondary).lineSpacing(5)
-                Divider()
-                NotificationSettingsView().frame(maxWidth:220)
-                Button { favoritesPresented=true } label: {Label("收藏",systemImage:"star").frame(maxWidth:.infinity,alignment:.leading)}
-                    .buttonStyle(.plain).disabled(!store.hasConnection)
-                Button { store.showUsage = true } label: {
-                    Label("Token 用量", systemImage: "chart.bar").frame(maxWidth: .infinity, alignment: .leading)
-                }.buttonStyle(.plain).disabled(!store.hasConnection)
-                Button { store.showSettings = true } label: {
-                    Label("连接设置", systemImage: "gearshape").frame(maxWidth: .infinity, alignment: .leading)
-                }.buttonStyle(.plain).padding(.bottom, 18)
+                SidebarFooter(
+                    hasConnection: store.hasConnection,
+                    openFavorites: { favoritesPresented = true },
+                    openUsage: { store.showUsage = true },
+                    openSettings: { store.showSettings = true }
+                )
             }.padding(.horizontal, 20).frame(width: 208).frame(maxHeight: .infinity).background(.regularMaterial)
             Divider()
             if let agentId = store.agentDetailId {
@@ -124,7 +120,7 @@ struct ContentView: View {
                     Button { store.showContext = true } label: { Label("上下文", systemImage: "brain") }
                         .disabled(!store.hasConnection || store.openingDirectConversation).help("查看对话摘要与上下文设置")
                     Button { store.reconnect() } label: { Image(systemName: "arrow.clockwise") }.help("立即同步")
-                    Button { store.showSettings = true } label: { Image(systemName: "slider.horizontal.3") }.help("连接设置")
+                    Button { store.showSettings = true } label: { Image(systemName: "slider.horizontal.3") }.help("设置")
                 }.buttonStyle(.borderless).padding(.horizontal, 26).padding(.vertical, 24)
                 Divider()
                 timeline
@@ -163,13 +159,16 @@ struct ContentView: View {
         .sheet(isPresented: $searchPresented) {
             ChatSearchView(store: store, room: searchRoom, title: searchTitle) { id in store.selectConversation(id) }
         }
-        .sheet(isPresented: $store.showSettings) { ConnectionView(store: store) }
+        .sheet(isPresented: $store.showSettings) {
+            ConnectionView(store: store, chatFontPoints: $chatFontPoints)
+        }
         .sheet(isPresented: $store.showNewGroup) { NewGroupView(store: store) }
         .sheet(isPresented: $store.showContext) { ContextSettingsView(store: store) }
         .sheet(isPresented: $store.showUsage) { TokenUsageView(store: store) }
         .sheet(isPresented: $store.showEndRound) { EndRoundView(store: store) }
         .sheet(isPresented: $store.showClearHistory) { ClearHistoryView(store: store) }
-        .alert("暂未完成", isPresented: Binding(get: { store.error != nil && !store.showSettings && !store.showNewGroup && !store.showContext && !store.showUsage && !store.showEndRound && !store.showClearHistory }, set: { if !$0 { store.error = nil } })) {
+        .sheet(item: $store.conversationToDelete) { room in DeleteConversationView(store: store, room: room) }
+        .alert("暂未完成", isPresented: Binding(get: { store.error != nil && !store.showSettings && !store.showNewGroup && !store.showContext && !store.showUsage && !store.showEndRound && !store.showClearHistory && store.conversationToDelete == nil }, set: { if !$0 { store.error = nil } })) {
             Button("知道了") { store.error = nil }
         } message: { Text(store.error ?? "") }
         .onAppear {
@@ -179,6 +178,7 @@ struct ContentView: View {
         .onChange(of: store.selectedConversationId) { _ in
             historyAgentId = store.selectedConversation?.kind == "direct" ? store.selectedConversation?.agentId : nil
         }
+        .environment(\.chatFontSize, ChatFontSize(chatFontPoints))
     }
 
     private var timeline: some View {
@@ -322,34 +322,95 @@ final class ConnectionDraft: ObservableObject {
 }
 
 struct ConnectionView: View {
+    private enum Section: Hashable { case connection, appearance, notifications }
     @ObservedObject var store: ChatStore
+    @Binding var chatFontPoints: Int
     @Environment(\.dismiss) private var dismiss
     @StateObject private var draft = ConnectionDraft()
+    @State private var section = Section.connection
+
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
-            Text("连接你的设备").font(.title2.bold())
-            Text("两端使用相同的服务地址和访问令牌。令牌保存在 macOS 钥匙串中。").foregroundStyle(.secondary)
-            Form {
-                TextField("服务地址", text: $draft.address)
-                SecureField("访问令牌", text: $draft.token)
-                TextField("设备名称", text: $draft.sender)
-            }.textFieldStyle(.roundedBorder)
-            if let error = store.error { Text(error).font(.callout).foregroundStyle(.red) }
-            Text("仅在应用打开且处于前台时自动接收。退出后，消息仍会保存在服务器。").font(.caption).foregroundStyle(.secondary)
-            HStack {
-                Button("取消") { store.error = nil; dismiss() }.keyboardShortcut(.cancelAction)
-                Spacer()
-                if store.configuring { ProgressView().controlSize(.small) }
-                Button("验证并连接") { Task { await store.configure(address: draft.address, token: draft.token, sender: draft.sender) } }
-                    .buttonStyle(.borderedProminent).disabled(store.configuring)
+            Text("设置").font(.title2.bold())
+            Picker("设置分类", selection: $section) {
+                Text("连接").tag(Section.connection)
+                Text("外观").tag(Section.appearance)
+                Text("通知").tag(Section.notifications)
             }
-        }.padding(30).frame(width: 440)
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .disabled(store.configuring)
+            Group {
+                switch section {
+                case .connection:
+                    connectionSettings
+                case .appearance:
+                    appearanceSettings
+                case .notifications:
+                    NotificationSettingsView()
+                }
+            }
+            .frame(maxWidth: .infinity, minHeight: 220, alignment: .topLeading)
+            Divider()
+            HStack {
+                if section == .connection {
+                    Button("取消") { store.error = nil; dismiss() }
+                        .keyboardShortcut(.cancelAction).disabled(store.configuring)
+                    Spacer()
+                    if store.configuring { ProgressView().controlSize(.small) }
+                    Button("验证并连接") { Task { await store.configure(address: draft.address, token: draft.token, sender: draft.sender) } }
+                        .buttonStyle(.borderedProminent).disabled(store.configuring)
+                } else {
+                    Spacer()
+                    Button("完成") { store.error = nil; dismiss() }.keyboardShortcut(.defaultAction)
+                }
+            }
+        }.padding(28).frame(width: 480)
         .task {
             draft.address = store.address; draft.sender = store.sender
             let token = await Keychain.read()
             if draft.token.isEmpty { draft.token = token }
         }
         .interactiveDismissDisabled(store.configuring)
+    }
+
+    private var connectionSettings: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text("填写服务器地址和访问令牌，连接你的聊天服务。")
+                .font(.callout).foregroundStyle(.secondary)
+            Form {
+                TextField("服务地址", text: $draft.address)
+                SecureField("访问令牌", text: $draft.token)
+                TextField("设备名称", text: $draft.sender)
+            }.textFieldStyle(.roundedBorder)
+            if let error = store.error { Text(error).font(.callout).foregroundStyle(.red) }
+            Text("访问令牌安全保存在 macOS 钥匙串中。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
+    private var appearanceSettings: some View {
+        let fontSize = ChatFontSize(chatFontPoints)
+        let selection = Binding(get: { ChatFontSize(chatFontPoints).points }, set: { chatFontPoints = $0 })
+        return VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Picker("聊天字号", selection: selection) {
+                    ForEach(ChatFontSize.pointRange, id: \.self) { points in
+                        Text("\(points) 磅").tag(points)
+                    }
+                }.fixedSize()
+                Spacer()
+                Button("恢复默认") { chatFontPoints = ChatFontSize.defaultPoints }
+                    .disabled(chatFontPoints == ChatFontSize.defaultPoints)
+            }
+            Text("适用于消息正文、引用和输入框。")
+                .font(.callout).foregroundStyle(.secondary)
+            MarkdownMessageView("你好，这是一条聊天消息。", mine: false)
+                .environment(\.chatFontSize, fontSize)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(.quaternary, in: RoundedRectangle(cornerRadius: 10))
+        }
     }
 }
 
@@ -478,13 +539,14 @@ struct EndRoundView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
             Text(store.endRoundExportOnly ? "导出本轮对话" : "结束本轮对话").font(.title2.bold())
-            Text("LeonBook 文章会先展示 AI 总结，再展示本轮原始对话和图片，并附完整原文文件。文章保存为草稿。").foregroundStyle(.secondary)
+            Text("LeonBook 文章会先展示 AI 总结，再展示本轮原始对话、引用、图片和文档，并附完整原文文件。文章保存为草稿。").foregroundStyle(.secondary)
             if !store.endRoundExportOnly { Text("归档成功后开始完全新的上下文。也可以仅开始新对话，历史记录保留。").font(.callout) }
             Picker("总结使用的 Agent", selection: $draft.agentId) {
                 Text("请选择 Agent").tag("")
                 ForEach(store.availableAgents) { Text($0.name + " · " + $0.model).tag($0.id) }
             }.disabled(store.exportBusy)
             if let destination = store.blogDestination { Text("资料库：" + destination.root + " · 用户：" + destination.user).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+            if store.blogDestinationLoading { ProgressView("正在读取资料库…").controlSize(.small) }
             if store.exportBusy { ProgressView(store.exportProgress).controlSize(.small) }
             if let error = store.exportError { Text(error).font(.callout).foregroundStyle(.red) }
             HStack {
@@ -492,10 +554,11 @@ struct EndRoundView: View {
                 if !store.endRoundExportOnly { Button("仅开始新对话") { Task { await store.startFreshRound() } }.disabled(store.exportBusy || store.contextActionActive) }
                 Spacer()
                 Button(store.endRoundExportOnly ? "导出到 LeonBook" : "导出并开始新对话") { Task { await store.exportCurrentRound(agentId: draft.agentId, startNew: !store.endRoundExportOnly) } }
-                    .buttonStyle(.borderedProminent).disabled(draft.agentId.isEmpty || store.exportBusy || store.contextActionActive)
+                    .buttonStyle(.borderedProminent).disabled(draft.agentId.isEmpty || store.exportBusy || store.contextActionActive || store.blogDestinationLoading || store.blogDestination == nil)
             }
         }.padding(28).frame(width: 600)
-        .task { store.exportError = nil; if store.availableAgents.count == 1 { draft.agentId = store.availableAgents[0].id }; await store.prepareBlogDestination() }
+        .onAppear { if store.availableAgents.count == 1 { draft.agentId = store.availableAgents[0].id } }
+        .task(id: draft.agentId) { await store.prepareBlogDestination(agentId: draft.agentId) }
         .interactiveDismissDisabled(store.exportBusy)
     }
 }

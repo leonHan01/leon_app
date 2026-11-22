@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 project_root="$(cd "$(dirname "$0")/.." && pwd)"
+source "$project_root/scripts/macos-signing.sh"
 cd "$project_root/macos"
 export CLANG_MODULE_CACHE_PATH="$project_root/macos/.build/clang-cache"
 swift build --build-system native -c release --disable-sandbox --cache-path "$project_root/macos/.build/cache"
@@ -14,12 +15,7 @@ cp "$project_root/macos/Vendor/SwiftMath/LICENSE" "$bundle/Contents/Resources/Sw
 ditto "$project_root/shared/markdown/runtime" "$bundle/Contents/Resources/MarkdownRuntime"
 swift "$project_root/scripts/make-icon.swift" "$project_root/dist/Leon.iconset"
 iconutil -c icns "$project_root/dist/Leon.iconset" -o "$bundle/Contents/Resources/Leon.icns"
-signing_identity="${LEON_CODESIGN_IDENTITY:-Leon Local Signing}"
-if [ "$signing_identity" = "-" ]; then
-    echo "A persistent signing identity is required for Keychain access across updates." >&2
-    exit 1
-fi
-codesign --force --sign "$signing_identity" "$bundle"
-codesign --verify --deep --strict "$bundle"
+codesign --force --sign "$leon_macos_signing_identity" "$bundle"
+leon_verify_macos_signing "$bundle"
 ditto -c -k --keepParent "$bundle" "$project_root/dist/Leon-macOS.zip"
 echo "Built: $bundle"

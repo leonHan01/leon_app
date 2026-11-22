@@ -9,5 +9,5 @@ sources=()
 for source in Sources/LeonApp/*.swift; do
     if [ "$(basename "$source")" != "LeonApp.swift" ]; then sources+=("$source"); fi
 done
-swiftc -parse-as-library "${math_flags[@]}" "${sources[@]}" Tests/SwitchingChecks.swift -o .build/switching-checks
+swiftc -disable-sandbox -swift-version 5 -target "$(uname -m)-apple-macosx13.0" -parse-as-library "${math_flags[@]}" "${sources[@]}" Tests/SwitchingChecks.swift -o .build/switching-checks
 .build/switching-checks

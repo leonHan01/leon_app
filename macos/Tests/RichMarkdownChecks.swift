@@ -40,7 +40,11 @@ struct RichMarkdownChecks {
         }
         let fixture = runtime.deletingLastPathComponent().appendingPathComponent("fixtures/showcase.md")
         let source = try String(contentsOf: fixture, encoding: .utf8)
-        let host = NSHostingView(rootView: MarkdownMessageView(source, mine: false).frame(width: 580).padding(20).background(Color.white).environment(\.colorScheme, .light))
+        func messageView(points: Int) -> some View {
+            MarkdownMessageView(source, mine: false).frame(width: 580).padding(20).background(Color.white)
+                .environment(\.colorScheme, .light).environment(\.chatFontSize, ChatFontSize(points))
+        }
+        let host = NSHostingView(rootView: messageView(points: 14))
         let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: 620, height: 1800), styleMask: .borderless, backing: .buffered, defer: false)
         window.contentView = host; window.orderFrontRegardless()
         defer { window.orderOut(nil) }
@@ -73,7 +77,25 @@ struct RichMarkdownChecks {
         let bitmap = NSBitmapImageRep(cgImage: cg)
         try check((bitmap.colorAt(x: bitmap.pixelsWide - 1, y: bitmap.pixelsHigh - 1)?.alphaComponent ?? 1) < 0.1,
                   "Web content must stay transparent over outgoing and dark chat bubbles")
+
+        let fontSizes = "['body', 'h1', 'h2', 'pre code'].map(selector => getComputedStyle(document.querySelector(selector)).fontSize).join(',')"
+        let defaultSizes = try evaluate(web, fontSizes) as? String
+        try check(defaultSizes == "14px,16px,15px,13px", "Default Mac Markdown sizes changed")
+        let expandedHeight = web.frame.height
+        host.rootView = messageView(points: 21)
+        try check(wait({
+            host.layoutSubtreeIfNeeded()
+            return web.frame.height > expandedHeight && (try? evaluate(web, fontSizes)) as? String == "21px,24px,22.5px,19.5px"
+        }, timeout: 5), "Changing the chat font size did not update and reflow the existing web view")
+        let detailsOpen = try evaluate(web, "document.querySelector('details').open") as? Bool
+        try check(detailsOpen == true, "Changing font size reset the expanded Markdown content")
+        host.rootView = messageView(points: 14)
+        try check(wait({
+            host.layoutSubtreeIfNeeded()
+            return web.frame.height < expandedHeight + 1 && (try? evaluate(web, fontSizes)) as? String == defaultSizes
+        }, timeout: 5), "Restoring the chat font size did not restore the original layout")
         print("PASS: native routing and packaged local runtime/font resources")
         print("PASS: real WKWebView task lists, math, Mermaid labels, merged tables, dynamic disclosure height and snapshot")
+        print("PASS: chat font size updates WKWebView text and height without resetting disclosure state")
     }
 }

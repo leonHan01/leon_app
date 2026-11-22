@@ -118,6 +118,7 @@ final class ComposerTextView: NSTextView {
 private struct NativeMentionEditor: NSViewRepresentable {
     @Binding var text: String
     @ObservedObject var state: MentionEditorState
+    let fontSize: CGFloat
     let agents: [AgentInfo]
     let group: Bool
     let conversationId: String
@@ -131,7 +132,7 @@ private struct NativeMentionEditor: NSViewRepresentable {
         scroll.hasVerticalScroller = true; scroll.drawsBackground = false
         let editor = ComposerTextView(frame: .zero)
         editor.isRichText = false; editor.allowsUndo = true; editor.drawsBackground = false
-        editor.font = .systemFont(ofSize: 14); editor.textColor = .textColor
+        editor.font = .systemFont(ofSize: fontSize); editor.textColor = .textColor
         editor.isVerticallyResizable = true; editor.isHorizontallyResizable = false
         editor.minSize = NSSize(width: 0, height: 82)
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
@@ -155,6 +156,7 @@ private struct NativeMentionEditor: NSViewRepresentable {
     func updateNSView(_ scroll: NSScrollView, context: Context) {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? NSTextView else { return }
+        if editor.font?.pointSize != fontSize { editor.font = .systemFont(ofSize: fontSize) }
         if editor.string != text, !editor.hasMarkedText() {
             editor.string = text
             editor.setSelectedRange(NSRange(location: (text as NSString).length, length: 0))
@@ -187,6 +189,7 @@ private struct NativeMentionEditor: NSViewRepresentable {
 
 struct MentionComposer: View {
     @ObservedObject var store: ChatStore
+    @Environment(\.chatFontSize) private var chatFontSize
     @StateObject private var state = MentionEditorState()
     var body: some View {
         VStack(spacing: 8) {
@@ -258,7 +261,7 @@ struct MentionComposer: View {
                     Spacer()
                 }
             }
-            NativeMentionEditor(text: $store.draft, state: state, agents: store.availableAgents,
+            NativeMentionEditor(text: $store.draft, state: state, fontSize: CGFloat(chatFontSize.points), agents: store.availableAgents,
                 group: store.selectedConversation?.kind == "group", conversationId: store.selectedConversationId,
                 onSend: { Task { await store.sendDraft() } }, onImages: { images in Task { await store.addImages(images) } },
                 onCommand: { command in Task { await store.performCommand(command) } })

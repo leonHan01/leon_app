@@ -138,6 +138,7 @@ struct ClearHistoryPreview: Codable {
     let hasActiveWork: Bool
 }
 struct ClearHistoryResult: Codable { let clearedMessages: Int64; let historyRevision: Int64 }
+struct DeleteConversationResult: Codable { let conversationId: String; let deletedMessages: Int64 }
 
 struct ChatArchive: Codable {
     let id: String
@@ -213,7 +214,10 @@ enum Endpoint {
 
 enum ClientError: LocalizedError {
     case message(String)
-    var errorDescription: String? { if case .message(let value) = self { return value }; return nil }
+    case archiveConflict(String)
+    var errorDescription: String? {
+        switch self { case .message(let value), .archiveConflict(let value): return value }
+    }
 }
 
 enum HTTPFailure {
@@ -374,6 +378,19 @@ final class MessageAPI: NotificationAPI, @unchecked Sendable {
             expectedLatestMessageId: preview.latestMessageId, expectedHistoryRevision: preview.historyRevision, confirm: true))
     }
     func clearImageCache() { imageCache.removeAllObjects() }
+    func deleteConversationPreview(_ conversation: String) async throws -> ClearHistoryPreview {
+        var url = URLComponents(url: base.appendingPathComponent("api/conversations/context/delete-preview"), resolvingAgainstBaseURL: false)!
+        url.queryItems = [URLQueryItem(name: "conversationId", value: conversation)]
+        return try await request(URLRequest(url: url.url!))
+    }
+    func deleteConversation(_ preview: ClearHistoryPreview, requestId: String) async throws -> DeleteConversationResult {
+        struct Delete: Encodable {
+            let conversationId: String; let requestId: String
+            let expectedLatestMessageId: Int64; let expectedHistoryRevision: Int64; let confirm: Bool
+        }
+        return try await post("api/conversations/context/delete", body: Delete(conversationId: preview.conversationId, requestId: requestId,
+            expectedLatestMessageId: preview.latestMessageId, expectedHistoryRevision: preview.historyRevision, confirm: true))
+    }
     func context(conversation: String) async throws -> ConversationContext {
         var url = URLComponents(url: base.appendingPathComponent("api/conversations/context"), resolvingAgainstBaseURL: false)!
         url.queryItems = [URLQueryItem(name: "conversationId", value: conversation)]
@@ -442,6 +459,16 @@ final class MessageAPI: NotificationAPI, @unchecked Sendable {
         switch http.statusCode {
         case 200...299: return try JSONDecoder().decode(T.self, from: data)
         default:
+            if http.statusCode == 409, let path = req.url?.path,
+               path.hasPrefix("/api/conversations/context/archive/"), path.hasSuffix("/finish") {
+                let failure = try? JSONDecoder().decode(Failure.self, from: data)
+                throw ClientError.archiveConflict(failure?.detail ?? failure?.message ?? "归档尚未重置上下文，请刷新会话后重试。")
+            }
+            if req.url?.path.contains("/context/delete") == true {
+                let failure = try? JSONDecoder().decode(Failure.self, from: data)
+                throw ClientError.message(failure?.message ?? failure?.detail ?? (http.statusCode == 404
+                    ? "服务端尚未支持永久删除会话，请先升级服务端。" : "删除失败（HTTP \(http.statusCode)），请重试。"))
+            }
             if http.statusCode == 404, req.url?.path == "/api/device-messages/search" {
                 throw ClientError.message("服务端尚未支持聊天记录搜索，请先升级服务端。")
             }

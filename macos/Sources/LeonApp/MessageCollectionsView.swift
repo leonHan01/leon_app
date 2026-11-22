@@ -13,13 +13,14 @@ struct QuoteCard: View {
     let title:String
     var cancel:(()->Void)? = nil
     @State private var target:ChatSearchHit?
+    @Environment(\.chatFontSize) private var chatFontSize
     var body:some View {
         HStack(spacing:9) {
             RoundedRectangle(cornerRadius:1).fill(Color.primary.opacity(0.35)).frame(width:2)
             Button {target=quote.anchor(room:room,title:title)} label:{
                 VStack(alignment:.leading,spacing:4) {
-                    Text(quote.sender).font(.system(size:12))
-                    Text(quote.preview.isEmpty ? "[消息]" : quote.preview).font(.system(size:12)).lineLimit(2)
+                    Text(quote.sender).font(.system(size:chatFontSize.scaled(12)))
+                    Text(quote.preview.isEmpty ? "[消息]" : quote.preview).font(.system(size:chatFontSize.scaled(12))).lineLimit(2)
                 }.frame(maxWidth:.infinity,alignment:.leading).multilineTextAlignment(.leading).contentShape(Rectangle())
             }.buttonStyle(.plain)
             if let cancel {Button(action:cancel) {Image(systemName:"xmark").font(.system(size:12)).frame(width:32,height:32)}.buttonStyle(.plain).accessibilityLabel("取消引用")}

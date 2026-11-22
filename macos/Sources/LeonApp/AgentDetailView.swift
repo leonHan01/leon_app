@@ -32,14 +32,7 @@ struct AgentConversationSidebar: View {
                             .frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 8)
                     }
                     ForEach(store.agentConversations(agent.id)) { room in
-                        Button { store.selectConversation(room.id) } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: "bubble.left").foregroundStyle(.secondary)
-                                Text(room.name).lineLimit(2).multilineTextAlignment(.leading)
-                                Spacer(minLength: 0)
-                            }.padding(10).frame(maxWidth: .infinity, alignment: .leading).contentShape(Rectangle())
-                                .background(store.selectedConversationId == room.id ? Color.accentColor.opacity(0.12) : Color.clear, in: RoundedRectangle(cornerRadius: 8))
-                        }.buttonStyle(.plain)
+                        AgentHistoryRow(store: store, room: room)
                     }
                 }
             }
@@ -109,15 +102,7 @@ struct AgentDetailView: View {
                     }
                     LazyVStack(spacing: 10) {
                         ForEach(store.agentConversations(agentId)) { room in
-                            Button { store.selectConversation(room.id) } label: {
-                                HStack(spacing: 12) {
-                                    Image(systemName: "bubble.left.and.bubble.right").foregroundStyle(.green)
-                                    Text(room.name).multilineTextAlignment(.leading)
-                                    Spacer()
-                                    Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
-                                }.padding(18).contentShape(Rectangle())
-                                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-                            }.buttonStyle(.plain)
+                            AgentHistoryRow(store: store, room: room, compact: false)
                         }
                     }
                 }.padding(20).frame(maxWidth: 820, alignment: .leading).frame(maxWidth: .infinity)

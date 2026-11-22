@@ -22,6 +22,7 @@ enum RichMarkdown {
 struct RichMarkdownMessageView: View {
     let source: String
     let mine: Bool
+    let fontScale: CGFloat
     var onQuote:(()->Void)? = nil
     var onFavorite:(()->Void)? = nil
     var onBranch:(()->Void)? = nil
@@ -31,7 +32,8 @@ struct RichMarkdownMessageView: View {
     var body: some View {
         Group {
             if layout.visible {
-                NativeRichMarkdown(source: source, mine: mine,onQuote:onQuote,onFavorite:onFavorite,onBranch:onBranch, dark: colorScheme == .dark, height: $layout.height)
+                NativeRichMarkdown(source: source, mine: mine, fontScale: fontScale,
+                    onQuote:onQuote,onFavorite:onFavorite,onBranch:onBranch, dark: colorScheme == .dark, height: $layout.height)
             } else {
                 Color.clear
             }
@@ -49,6 +51,7 @@ private final class MarkdownLayoutState: ObservableObject {
 private struct NativeRichMarkdown: NSViewRepresentable {
     let source: String
     let mine: Bool
+    let fontScale: CGFloat
     var onQuote:(()->Void)? = nil
     var onFavorite:(()->Void)? = nil
     var onBranch:(()->Void)? = nil
@@ -102,7 +105,10 @@ private struct NativeRichMarkdown: NSViewRepresentable {
 
         func render() {
             guard ready, let view,
-                  let data = try? JSONSerialization.data(withJSONObject: ["source": parent.source, "mine": parent.mine, "dark": parent.dark, "platform": "mac"]),
+                  let data = try? JSONSerialization.data(withJSONObject: [
+                      "source": parent.source, "mine": parent.mine, "dark": parent.dark,
+                      "platform": "mac", "fontScale": Double(parent.fontScale)
+                  ], options: .sortedKeys),
                   let json = String(data: data, encoding: .utf8), json != lastPayload else { return }
             lastPayload = json
             view.evaluateJavaScript("void window.renderMessage(\(json))", completionHandler: nil)

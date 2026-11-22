@@ -1,10 +1,39 @@
 import AppKit
+import SwiftUI
 
 @main
 struct ComposerChecks {
     static func check(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw ClientError.message(message) }
     }
+
+    @MainActor static func findEditor(in view: NSView) -> ComposerTextView? {
+        if let editor = view as? ComposerTextView { return editor }
+        return view.subviews.lazy.compactMap { findEditor(in: $0) }.first
+    }
+
+    @MainActor static func checkFontSize(in window: NSWindow) throws {
+        let store = ChatStore()
+        store.draft = "已有草稿"
+        func composer(points: Int) -> some View {
+            MentionComposer(store: store).environment(\.chatFontSize, ChatFontSize(points))
+        }
+
+        let host = NSHostingView(rootView: composer(points: 14))
+        window.contentView = host
+        host.layoutSubtreeIfNeeded()
+        guard let editor = findEditor(in: host) else { throw ClientError.message("Missing composer editor") }
+        try check(editor.font?.pointSize == 14, "Default composer font size changed")
+        let selection = NSRange(location: 2, length: 0)
+        editor.setSelectedRange(selection)
+
+        host.rootView = composer(points: 24)
+        host.layoutSubtreeIfNeeded()
+        let font = editor.textStorage?.attribute(.font, at: 0, effectiveRange: nil) as? NSFont
+        try check(font?.pointSize == 24, "Chat font size did not update existing draft text")
+        try check(editor.string == store.draft && editor.selectedRange() == selection, "Changing chat font size changed the draft or selection")
+    }
+
     @MainActor static func main() throws {
         NSApplication.shared.setActivationPolicy(.prohibited)
         let editor = ComposerTextView(frame: NSRect(x: 0, y: 0, width: 400, height: 100))
@@ -49,7 +78,10 @@ struct ComposerChecks {
         try check(editor.hasMarkedText(), "Could not start input-method composition")
         enter()
         try check(sent == 4, "Enter sent while input method was composing")
+        editor.unmarkText()
+        try checkFontSize(in: window)
         print("PASS: Enter sends, Shift+Enter adds a newline, Command/keypad Enter work, held keys do not resend")
         print("PASS: Enter confirms @ candidates first and does not send during input-method composition")
+        print("PASS: changing chat font size resizes existing draft text and preserves its selection")
     }
 }

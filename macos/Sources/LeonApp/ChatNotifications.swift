@@ -132,12 +132,34 @@ final class ChatNotifications:NSObject,ObservableObject,UNUserNotificationCenter
 struct NotificationSettingsView:View {
     @ObservedObject private var notifications=ChatNotifications.shared
     var body:some View {
-        VStack(alignment:.leading,spacing:12){
-            Toggle("新消息通知",isOn:Binding(get:{notifications.enabled},set:{value in Task {await notifications.setEnabled(value)}}))
-            Toggle("通知显示消息预览",isOn:$notifications.previews).disabled(!notifications.enabled)
-            Text(notifications.status).font(.system(size:12,weight:.regular))
-            Text("当前会话正在查看时不弹出提醒。关闭应用后的推送需要配置平台推送服务。").font(.system(size:12,weight:.regular))
-        }.foregroundStyle(.primary).font(.system(size:14,weight:.regular)).padding(16)
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(spacing: 0) {
+                Toggle(isOn: Binding(get: { notifications.enabled }, set: { value in
+                    Task { await notifications.setEnabled(value) }
+                })) {
+                    Text("新消息通知").frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .padding(14)
+                Divider().padding(.horizontal, 14)
+                Toggle(isOn: $notifications.previews) {
+                    Text("显示消息预览").frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .disabled(!notifications.enabled)
+                .padding(14)
+            }
+            .toggleStyle(.switch)
+            .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 10))
+            Text(notifications.status)
+                .font(.caption).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            DisclosureGroup("通知说明") {
+                Text("查看当前会话时不弹出提醒。应用退出后，只有后台推送可用时才能收到通知。")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.top, 6)
+            }
+            .font(.callout)
+        }
     }
 }
 

@@ -9,8 +9,11 @@ swiftc -parse-as-library Sources/LeonApp/Models.swift Sources/LeonApp/DocumentMo
 .build/message-checks
 swiftc -parse-as-library Sources/LeonApp/MathMarkup.swift Sources/LeonApp/MessageMarkdown.swift Tests/MarkdownChecks.swift -o .build/markdown-checks
 .build/markdown-checks
-swiftc -parse-as-library "${math_flags[@]}" Sources/LeonApp/MathMarkup.swift Sources/LeonApp/MessageMarkdown.swift Sources/LeonApp/MathRenderer.swift Sources/LeonApp/RichMarkdownMessageView.swift Sources/LeonApp/MarkdownMessageView.swift Tests/MathChecks.swift -o .build/math-checks
+markdown_sources=(Sources/LeonApp/{ChatFontSize,MathMarkup,MessageMarkdown,MathRenderer,RichMarkdownMessageView,MarkdownMessageView}.swift)
+swiftc -parse-as-library "${math_flags[@]}" "${markdown_sources[@]}" Tests/MathChecks.swift -o .build/math-checks
 .build/math-checks
+swiftc -parse-as-library "${math_flags[@]}" "${markdown_sources[@]}" Tests/TableLayoutChecks.swift -o .build/table-layout-checks
+.build/table-layout-checks
 image_sources=()
 for source in Sources/LeonApp/*.swift; do
     if [ "$(basename "$source")" != "LeonApp.swift" ]; then image_sources+=("$source"); fi
@@ -22,7 +25,6 @@ swiftc -parse-as-library "${math_flags[@]}" "${image_sources[@]}" Tests/ImageChe
 swiftc -parse-as-library "${math_flags[@]}" "${image_sources[@]}" Tests/ComposerChecks.swift -o .build/composer-checks
 .build/composer-checks
 
-swiftc -parse-as-library Sources/LeonApp/Models.swift Sources/LeonApp/DocumentModels.swift Sources/LeonApp/NotificationModels.swift Sources/LeonApp/LeonBlogExporter.swift Tests/ArchiveChecks.swift -o .build/archive-checks
-.build/archive-checks
+bash "$project_root/scripts/test-archive-macos.sh"
 bash "$project_root/scripts/test-switching-macos.sh"
 bash "$project_root/scripts/test-chat-search-macos.sh"

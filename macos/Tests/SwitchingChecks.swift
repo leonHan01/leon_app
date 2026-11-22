@@ -3,6 +3,8 @@ import Foundation
 private final class NetworkFixture: @unchecked Sendable {
     private let lock = NSLock()
     private var requests: [String] = []
+    private var inputs: [URLRequest] = []
+    private var statuses: [String: Int] = [:]
     private var holdAll = true
     private var heldPaths = Set<String>()
     private var responses: [String: Data] = [:]
@@ -11,13 +13,16 @@ private final class NetworkFixture: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         let path = request.request.url!.path
         requests.append(path)
+        inputs.append(request.request)
         if holdAll || heldPaths.contains(path) { pending.append(request); return nil }
         return responses[path] ?? Data("{\"messages\":[],\"hasMore\":false,\"jobs\":[]}".utf8)
     }
-    func setup(holding paths: Set<String>, responses: [String: Data] = [:]) {
+    func setup(holding paths: Set<String>, responses: [String: Data] = [:], statuses: [String: Int] = [:]) {
         lock.lock(); defer { lock.unlock() }
-        holdAll = false; heldPaths = paths; self.responses = responses; requests = []
+        holdAll = false; heldPaths = paths; self.responses = responses; self.statuses = statuses; requests = []; inputs = []
     }
+    func status(_ path: String) -> Int { lock.lock(); defer { lock.unlock() }; return statuses[path] ?? 200 }
+    func request(_ path: String) -> URLRequest? { lock.lock(); defer { lock.unlock() }; return inputs.last { $0.url?.path == path } }
     func paths() -> [String] { lock.lock(); defer { lock.unlock() }; return requests }
     func release(_ path: String) {
         lock.lock()
@@ -43,7 +48,7 @@ private final class FixtureProtocol: URLProtocol, @unchecked Sendable {
         stateLock.lock()
         guard !finished else { stateLock.unlock(); return }
         finished = true; stateLock.unlock()
-        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil,
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: Self.fixture.status(request.url!.path), httpVersion: nil,
             headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data); client?.urlProtocolDidFinishLoading(self)
     }
@@ -233,6 +238,91 @@ struct SwitchingChecks {
         branchTask.cancel();FixtureProtocol.fixture.release(branchPath)
         do {_ = try await branchTask.value;check(false,"cancelled branch must fail")} catch {}
         check(!store.conversations.contains(where:{$0.id==late.id}),"cancelled branch response cannot modify navigation state")
+        // Permanent deletion must wait for the server, then purge every local route back to the old room.
+        let deletion = ChatStore(api: api)
+        deletion.setActive(false); deletion.conversations = [a, b, c]; deletion.agents = [agent("a"), agent("b"), agent("c")]
+        deletion.selectConversation(b.id); deletion.messages = [message(2000, room: b)]; deletion.draft = "keep B"
+        deletion.selectConversation(a.id); deletion.messages = [message(2001, room: a)]; deletion.draft = "delete A"
+        deletion.draftImages = [picture]; deletion.quoteMessage(message(2001, room: a))
+        deletion.scrollPositions[a.id] = ConversationScrollPosition(offset: 15, messageID: 2001, messageTop: 0)
+        deletion.pending = [Outgoing(clientMessageId: UUID().uuidString, deviceId: "test", sender: "test", platform: "macos", text: "old pending", conversationId: a.id),
+            Outgoing(clientMessageId: UUID().uuidString, deviceId: "test", sender: "test", platform: "macos", text: "keep pending", conversationId: b.id)]
+        let deletePreview = ClearHistoryPreview(conversationId: a.id, conversationName: a.name, messageCount: 1, latestMessageId: 2001, historyRevision: 3, hasActiveWork: false)
+        let deletePath = "/api/conversations/context/delete", previewPath = "/api/conversations/context/delete-preview"
+        let deleteResult = DeleteConversationResult(conversationId: a.id, deletedMessages: 1)
+        FixtureProtocol.fixture.setup(holding: [deletePath], responses: [previewPath: try JSONEncoder().encode(deletePreview), deletePath: try JSONEncoder().encode(deleteResult)])
+        let confirmedPreview = try await deletion.previewConversationDeletion(a)
+        check(confirmedPreview.messageCount == 1 && !FixtureProtocol.fixture.paths().contains(deletePath), "preview and cancel never issue permanent deletion")
+        let deletionTask = Task { @MainActor in try await deletion.deleteConversation(confirmedPreview, requestId: "deletion-request") }
+        _ = await waitFor { FixtureProtocol.fixture.paths().contains(deletePath) }
+        check(deletion.conversations.contains(a) && deletion.messages.count == 1 && !deletion.canSend, "in-flight deletion keeps history visible and disables new sending")
+        let sentRequest = FixtureProtocol.fixture.request(deletePath)!
+        var requestBody = sentRequest.httpBody ?? Data()
+        if requestBody.isEmpty, let stream = sentRequest.httpBodyStream {
+            stream.open(); defer { stream.close() }
+            var buffer = [UInt8](repeating: 0, count: 1024)
+            while stream.hasBytesAvailable {
+                let count = stream.read(&buffer, maxLength: buffer.count)
+                if count <= 0 { break }; requestBody.append(contentsOf: buffer.prefix(count))
+            }
+        }
+        let sentBody = try JSONSerialization.jsonObject(with: requestBody) as! [String: Any]
+        check(sentRequest.httpMethod == "POST" && sentBody["conversationId"] as? String == a.id && sentBody["confirm"] as? Bool == true
+            && sentBody["expectedLatestMessageId"] as? Int == 2001 && sentBody["expectedHistoryRevision"] as? Int == 3,
+            "delete request carries explicit confirmation and both history concurrency guards")
+        FixtureProtocol.fixture.release(deletePath); try await deletionTask.value
+        check(!deletion.conversations.contains(a) && deletion.selectedConversationId != a.id && !deletion.pending.contains(where: { $0.conversationId == a.id }), "successful deletion removes the room and its outbox")
+        check(deletion.scrollPositions[a.id] == nil, "deletion clears the removed conversation reading position")
+        deletion.selectConversation(b.id)
+        check(deletion.draft == "keep B" && deletion.messages == [message(2000, room: b)] && deletion.currentPending.count == 1, "other conversation history, draft and outbox survive deletion")
+        deletion.selectConversation(a.id)
+        check(deletion.selectedConversationId == b.id, "stale navigation cannot reopen deleted cached history")
+
+        // A failed server transaction must leave the source conversation untouched.
+        let failedPreview = ClearHistoryPreview(conversationId: b.id, conversationName: b.name, messageCount: 1, latestMessageId: 2000, historyRevision: 0, hasActiveWork: false)
+        FixtureProtocol.fixture.setup(holding: [], responses: [deletePath: Data("{\"message\":\"会话已有新消息，请刷新后重新确认\"}".utf8)], statuses: [deletePath: 409])
+        do { try await deletion.deleteConversation(failedPreview, requestId: "failed-request"); check(false, "failed deletion must throw") }
+        catch { check(error.localizedDescription.contains("新消息"), "deletion preserves the server concurrency error") }
+        check(deletion.conversations.contains(b) && deletion.draft == "keep B" && deletion.currentPending.count == 1 && !deletion.deletingConversation, "failed deletion preserves history and drafts and exits busy state")
+
+        // A late response must not pull the user away from a newer selection.
+        FixtureProtocol.fixture.setup(holding: [deletePath], responses: [deletePath: try JSONEncoder().encode(DeleteConversationResult(conversationId: b.id, deletedMessages: 1))])
+        let backgroundDelete = Task { @MainActor in try await deletion.deleteConversation(failedPreview, requestId: "background-delete") }
+        _ = await waitFor { FixtureProtocol.fixture.paths().contains(deletePath) }
+        deletion.selectConversation(c.id); deletion.draft = "newer C draft"
+        FixtureProtocol.fixture.release(deletePath); try await backgroundDelete.value
+        check(deletion.selectedConversationId == c.id && deletion.draft == "newer C draft", "late deletion preserves newer navigation and draft")
+
+        // Reopening an Agent creates a fresh room rather than selecting its deleted default ID.
+        let freshA = Conversation(id: "thread:fresh-a", name: "A", kind: "direct", agentId: "a", agentIds: ["a"])
+        FixtureProtocol.fixture.setup(holding: [], responses: ["/api/conversations/direct/a": try JSONEncoder().encode(freshA)])
+        await deletion.openDirect(agent("a"))
+        check(deletion.selectedConversationId == freshA.id && deletion.messages.isEmpty && deletion.draft.isEmpty && deletion.draftImages.isEmpty && deletion.quotedMessage == nil,
+            "reopening a deleted Agent chat starts with fresh history and no old draft, quote or attachments")
+
+        let remote = ChatStore(api: api)
+        remote.setActive(false); remote.conversations = [a, b]; remote.selectConversation(a.id); remote.messages = [message(3000, room: a)]
+        remote.draft = "removed on another device"
+        remote.pending = [Outgoing(clientMessageId: UUID().uuidString, deviceId: "test", sender: "test", platform: "macos", text: "stale", conversationId: a.id)]
+        FixtureProtocol.fixture.setup(holding: [], responses: ["/api/conversations": try JSONEncoder().encode([b]), "/api/agents": try JSONEncoder().encode([agent("a"), agent("b")])])
+        remote.setActive(true)
+        _ = await waitFor { !remote.conversations.contains(a) }
+        remote.setActive(false)
+        check(!remote.conversations.contains(a) && remote.selectedConversationId == b.id && remote.pending.isEmpty,
+            "directory sync removes chats deleted on another device and purges their stale outbox")
+
+        let race = ChatStore(api: api)
+        race.setActive(false); race.conversations = [a, b]; race.selectConversation(a.id)
+        FixtureProtocol.fixture.setup(holding: ["/api/conversations"], responses: ["/api/conversations": try JSONEncoder().encode([a, b]),
+            "/api/agents": try JSONEncoder().encode([agent("a"), agent("b")]), deletePath: try JSONEncoder().encode(deleteResult)])
+        race.setActive(true)
+        _ = await waitFor { FixtureProtocol.fixture.paths().contains("/api/conversations") }
+        try await race.deleteConversation(deletePreview, requestId: "directory-race")
+        FixtureProtocol.fixture.release("/api/conversations")
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        race.setActive(false)
+        check(!race.conversations.contains(a), "late directory response cannot restore a permanently deleted conversation")
+
         if failures > 0 { exit(1) }
     }
 }

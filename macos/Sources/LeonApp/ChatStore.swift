@@ -15,7 +15,7 @@ final class ChatStore: ObservableObject {
         let connection=connectionId
         do {
             let result=try await api.branch(room:room,message:message.id,name:name,requestId:requestId)
-            guard connection==connectionId,!Task.isCancelled else {throw CancellationError()}
+            guard connection==connectionId,!Task.isCancelled,!deletedConversationIDs.contains(result.id) else {throw CancellationError()}
             if !conversations.contains(where:{$0.id==result.id}) {conversations.append(result)}
             return result
         } catch {
@@ -82,7 +82,7 @@ final class ChatStore: ObservableObject {
         Task {
             do {
                 let docs=try await Task.detached(priority:.userInitiated){try urls.map {try DraftDocument.read($0)}}.value
-                guard stamp==documentGeneration,searchConnectionID==connection else {return}
+                guard stamp==documentGeneration,searchConnectionID==connection,!deletedConversationIDs.contains(room) else {return}
                 if room==selectedConversationId {draftDocuments+=docs}else{documentDrafts[room,default:[]]+=docs}
             }catch {if stamp==documentGeneration {self.error=error.localizedDescription}}
             if stamp==documentGeneration {importingDocuments=false}
@@ -96,7 +96,7 @@ final class ChatStore: ObservableObject {
     @Published var draftImages: [ChatImageDraft] = []
     @Published var preparingImages = false
     private var imageDrafts: [String: [ChatImageDraft]] = [:]
-    var canSend: Bool { !openingDirectConversation && !clearBusy && !exportBusy && hasConnection && !configuring && !preparingImages && !importingDocuments && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty || !draftDocuments.isEmpty) && draft.utf16.count <= 8000 }
+    var canSend: Bool { !openingDirectConversation && !deletingConversation && !deletedConversationIDs.contains(selectedConversationId) && !clearBusy && !exportBusy && hasConnection && !configuring && !preparingImages && !importingDocuments && (!draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || !draftImages.isEmpty || !draftDocuments.isEmpty) && draft.utf16.count <= 8000 }
     func addImages(_ sources: [Data]) async {
         guard hasConnection, !configuring, !preparingImages else { return }
         let room = selectedConversationId, connection = connectionId
@@ -107,7 +107,7 @@ final class ChatStore: ObservableObject {
             Result { try sources.prefix(available).map(ChatImageDraft.prepare) }
         }.value
         preparingImages = false
-        guard connection == connectionId else { return }
+        guard connection == connectionId, !deletedConversationIDs.contains(room) else { return }
         switch result {
         case .success(let images):
             if selectedConversationId == room { draftImages += images }
@@ -140,7 +140,7 @@ final class ChatStore: ObservableObject {
         defer { if connection == connectionId { creatingAgentConversation = false } }
         do {
             let room = try await api.newThread(agentId: agent.id, name: title, requestId: requestId)
-            guard connection == connectionId else { return }
+            guard connection == connectionId, !deletedConversationIDs.contains(room.id) else { return }
             if !conversations.contains(where: { $0.id == room.id }) { conversations.append(room) }
             if navigation == navigationRequest, agentDetailId == agent.id || (fromHistory && agentDetailId == nil) { selectConversation(room.id) }
         } catch { if connection == connectionId { self.error = friendly(error) } }
@@ -185,6 +185,64 @@ final class ChatStore: ObservableObject {
     }
 
     @Published var selectedConversationId = "shared"
+    @Published var conversationToDelete: Conversation?
+    @Published private(set) var deletingConversation = false
+    private var deletedConversationIDs = Set<String>()
+    private var directoryRevision = UUID()
+
+    func previewConversationDeletion(_ room: Conversation) async throws -> ClearHistoryPreview {
+        guard let api else { throw ClientError.message("请先连接服务器。") }
+        let connection = connectionId
+        let preview = try await api.deleteConversationPreview(room.id)
+        guard connection == connectionId, !Task.isCancelled else { throw CancellationError() }
+        return preview
+    }
+
+    func deleteConversation(_ preview: ClearHistoryPreview, requestId: String) async throws {
+        guard let api, !deletingConversation else { return }
+        let room = preview.conversationId, connection = connectionId
+        guard !exportBusy, !clearBusy, !preparingImages, !importingDocuments,
+              !pending.contains(where: { ($0.conversationId ?? "shared") == room && sending.contains($0.id) }),
+              !unconfirmedDirectRooms.contains(room) else {
+            throw ClientError.message("请等待消息发送、附件处理或导出完成后再删除。")
+        }
+        deletingConversation = true
+        defer { if connection == connectionId { deletingConversation = false } }
+        let result = try await api.deleteConversation(preview, requestId: requestId)
+        guard connection == connectionId else { return }
+        guard result.conversationId == room else { throw ClientError.message("服务端返回的会话不匹配，请刷新列表。") }
+        directoryRevision = UUID()
+        removeConversationLocally(room)
+        conversationToDelete = nil
+    }
+
+    private func removeConversationLocally(_ room: String) {
+        let agent = conversations.first(where: { $0.id == room })?.agentId
+        deletedConversationIDs.insert(room)
+        conversations.removeAll { $0.id == room }
+        if selectedConversationId == room {
+            let next = conversations.first { $0.agentId == agent && $0.kind == "direct" } ?? conversations.first
+            selectConversation(next?.id ?? "shared")
+            if !conversations.contains(where: { $0.agentId == agent && $0.kind == "direct" }),
+               let agent = agents.first(where: { $0.id == agent }) { showAgentDetails(agent) }
+        }
+        for message in pending where (message.conversationId ?? "shared") == room {
+            ChatImageFiles.remove(message.imageIds ?? [], scope: pendingKey)
+            DocumentFiles.remove(message.documentIds ?? [], scope: pendingKey)
+        }
+        pending.removeAll { ($0.conversationId ?? "shared") == room }; savePending()
+        drafts.removeValue(forKey: room); imageDrafts.removeValue(forKey: room); documentDrafts.removeValue(forKey: room)
+        quoteDrafts.removeValue(forKey: room); scrollPositions.removeValue(forKey: room)
+        roomCache.removeValue(forKey: room); roomCacheOrder.removeAll { $0 == room }
+        unconfirmedDirectRooms.remove(room)
+        documentGeneration = UUID(); importingDocuments = false
+        compressionRequests = compressionRequests.filter { !$0.key.hasPrefix(room + ":") }
+        let prefix = pendingKey + ".archive." + room + ":"
+        for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix(prefix) { UserDefaults.standard.removeObject(forKey: key) }
+        if branchMessage?.conversationId == room { branchMessage = nil }
+        api?.clearImageCache()
+    }
+
     @Published var showClearHistory = false
     @Published var clearBusy = false
     @Published var clearPreview: ClearHistoryPreview?
@@ -250,73 +308,136 @@ final class ChatStore: ObservableObject {
     @Published var exportRoomId = ""
     @Published var exportError: String?
     @Published var blogDestination: LeonBlogExporter.Destination?
+    @Published private(set) var blogDestinationLoading = false
+    private var blogDestinationScope: String?
+    private var blogDestinationRequest = UUID()
     @Published var showContext = false
-    func prepareBlogDestination() async {
-        do { blogDestination = try await Task.detached { try LeonBlogExporter.destination() }.value }
-        catch { exportError = friendly(error) }
+    private func archiveKey(room: String, agentId: String) -> String { pendingKey + ".archive." + room + ":" + agentId }
+    private func clearPendingArchive(_ key: String) {
+        UserDefaults.standard.removeObject(forKey: key)
+        UserDefaults.standard.removeObject(forKey: key + ".destination")
+    }
+    private func clearPendingArchives(room: String) {
+        let prefix = pendingKey + ".archive." + room + ":"
+        for key in UserDefaults.standard.dictionaryRepresentation().keys where key.hasPrefix(prefix) { UserDefaults.standard.removeObject(forKey: key) }
+    }
+    private func discardChangedArchive(id: String, key: String, room: String, api: MessageAPI) async {
+        // A busy room can be retried with the same ID; a changed topic needs a new snapshot.
+        // Keep the pending archive if these read-only checks cannot establish which occurred.
+        guard let archive = try? await api.archive(id), let context = try? await api.context(conversation: room),
+              let newer = try? await api.page(conversation: room, after: archive.throughId) else { return }
+        if context.topicStartedAfter >= archive.throughId || !newer.messages.isEmpty {
+            if UserDefaults.standard.string(forKey: key) == id { clearPendingArchive(key) }
+        }
+    }
+    func prepareBlogDestination(agentId: String? = nil) async {
+        let targetAgent = agentId ?? (availableAgents.count == 1 ? availableAgents[0].id : "")
+        let room = selectedConversationId, connection = connectionId, request = UUID()
+        let key = archiveKey(room: room, agentId: targetAgent)
+        blogDestinationRequest = request; blogDestinationLoading = true
+        blogDestination = nil; blogDestinationScope = nil; exportError = nil
+        defer { if blogDestinationRequest == request { blogDestinationLoading = false } }
+        do {
+            let destination: LeonBlogExporter.Destination
+            if UserDefaults.standard.string(forKey: key) != nil, let data = UserDefaults.standard.data(forKey: key + ".destination") {
+                guard let saved = try? JSONDecoder().decode(LeonBlogExporter.Destination.self, from: data) else {
+                    throw ClientError.message("未完成归档的资料库配置无效，当前上下文已保留。")
+                }
+                destination = saved
+            } else { destination = try await Task.detached { try LeonBlogExporter.destination() }.value }
+            guard blogDestinationRequest == request, room == selectedConversationId, connection == connectionId, !Task.isCancelled else { return }
+            blogDestination = destination; blogDestinationScope = key
+        } catch {
+            if blogDestinationRequest == request, room == selectedConversationId, connection == connectionId, !Task.isCancelled { exportError = friendly(error) }
+        }
     }
     func startFreshRound() async {
-        guard let api, !exportBusy, !contextActionActive, currentPending.isEmpty, draftImages.isEmpty else { exportError = "请等待当前回复并处理待发送消息后再开始新对话。"; return }
+        guard let api, !exportBusy, !contextActionActive, currentPending.isEmpty, draftImages.isEmpty, draftDocuments.isEmpty, !preparingImages, !importingDocuments else { exportError = "请等待当前回复并处理待发送消息后再开始新对话。"; return }
         let connection = connectionId, room = selectedConversationId
         exportBusy = true; exportError = nil
         defer { exportBusy = false }
         do {
             let info = try await api.context(conversation: room)
             let updated = try await api.configureContext(conversation: room, rounds: info.recentRounds, reset: true)
+            if connection == connectionId { clearPendingArchives(room: room) }
             guard connection == connectionId, room == selectedConversationId else { return }
             contextInfo = updated; exportRoomId = room; exportProgress = "已开始全新上下文，历史对话保留。"; showEndRound = false
         } catch { exportError = friendly(error) }
     }
     func exportCurrentRound(agentId: String, startNew: Bool) async {
-        guard let api, !exportBusy, !contextActionActive, currentPending.isEmpty, draftImages.isEmpty else { exportError = "请等待当前回复并处理待发送消息后再归档。"; if !showEndRound { error = exportError }; return }
+        guard let api, !exportBusy, !contextActionActive, currentPending.isEmpty, draftImages.isEmpty, draftDocuments.isEmpty, !preparingImages, !importingDocuments else { exportError = "请等待当前回复并处理待发送消息后再归档。"; if !showEndRound { error = exportError }; return }
         let room = selectedConversationId, connection = connectionId
-        let key = pendingKey + ".archive." + room + ":" + agentId
-        let id = UserDefaults.standard.string(forKey: key) ?? UUID().uuidString.lowercased()
+        let key = archiveKey(room: room, agentId: agentId)
+        guard let destination = blogDestination, !blogDestinationLoading, blogDestinationScope == key else {
+            exportError = "请等待资料库读取完成并选择总结使用的 Agent 后再导出。"
+            if !showEndRound { error = exportError }; return
+        }
+        let pendingID = UserDefaults.standard.string(forKey: key)
+        let id = pendingID ?? UUID().uuidString.lowercased()
         exportBusy = true; exportRoomId = room; exportProgress = "正在生成本轮对话总结…"; exportError = nil
         defer { exportBusy = false }
         do {
-            let destination: LeonBlogExporter.Destination
-            if let data = UserDefaults.standard.data(forKey: key + ".destination"), let saved = try? JSONDecoder().decode(LeonBlogExporter.Destination.self, from: data) { destination = saved }
-            else { destination = try await Task.detached { try LeonBlogExporter.destination() }.value }
-            UserDefaults.standard.set(id, forKey: key)
+            if pendingID != nil, let data = UserDefaults.standard.data(forKey: key + ".destination") {
+                guard let saved = try? JSONDecoder().decode(LeonBlogExporter.Destination.self, from: data), saved == destination else {
+                    throw ClientError.message("未完成归档的资料库与当前显示不一致，请重新打开导出窗口。")
+                }
+            }
             UserDefaults.standard.set(try JSONEncoder().encode(destination), forKey: key + ".destination")
-            blogDestination = destination
-            let operation = try await api.archiveRound(conversation: room, agentId: agentId, requestId: id)
-            if connection == connectionId, room == selectedConversationId { contextOperations.removeAll { $0.agentId == agentId }; contextOperations.append(operation); beginPolling() }
-            var archive = try await api.archive(id)
-            let deadline = Date().addingTimeInterval(900)
-            while archive.operation.active, Date() < deadline {
-                try await Task.sleep(nanoseconds: 1_000_000_000)
-                archive = try await api.archive(id)
+            UserDefaults.standard.set(id, forKey: key)
+            // A previous attempt may have saved the article before its readback or context reset failed.
+            // Verify it before requesting another summary or downloading now-unavailable source files.
+            var saved: LeonBlogExporter.Saved?
+            if pendingID != nil { saved = try await Task.detached { try LeonBlogExporter.savedArchive(id: id, destination: destination) }.value }
+            if saved == nil {
+                let operation = try await api.archiveRound(conversation: room, agentId: agentId, requestId: id)
+                if connection == connectionId, room == selectedConversationId { contextOperations.removeAll { $0.agentId == agentId }; contextOperations.append(operation); beginPolling() }
+                var archive = try await api.archive(id)
+                let deadline = Date().addingTimeInterval(900)
+                while archive.operation.active, Date() < deadline {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                    archive = try await api.archive(id)
+                }
+                if archive.operation.status == "FAILED" { clearPendingArchive(key) }
+                guard archive.operation.status == "SUCCEEDED", !archive.summary.isEmpty else { throw ClientError.message(archive.operation.error.isEmpty ? "总结尚未完成，可稍后重试导出；当前上下文保留。" : archive.operation.error) }
+                exportProgress = "正在复制图片和文档到 LeonBook…"
+                let directory = FileManager.default.temporaryDirectory.appendingPathComponent("leon-archive-files-" + UUID().uuidString)
+                try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                defer { try? FileManager.default.removeItem(at: directory) }
+                var files: [String: URL] = [:], documents: [String: URL] = [:]
+                for image in LeonBlogExporter.images(in: archive) {
+                    guard UUID(uuidString: image.id) != nil else { throw ClientError.message("归档图片标识无效。") }
+                    let data = try await api.imageData(image.id)
+                    let file = directory.appendingPathComponent(image.id + ".jpg")
+                    try data.write(to: file, options: .atomic)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+                    files[image.id] = file
+                }
+                for document in LeonBlogExporter.documents(in: archive) {
+                    guard UUID(uuidString: document.id) != nil else { throw ClientError.message("归档文档标识无效。") }
+                    let name = (document.name as NSString).lastPathComponent
+                    guard !name.isEmpty, name != ".", name != "..", name != "/" else { throw ClientError.message("归档文档文件名无效。") }
+                    let folder = directory.appendingPathComponent(document.id, isDirectory: true)
+                    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+                    let data = try await api.document(document.id, favorite: nil)
+                    let file = folder.appendingPathComponent(name)
+                    try data.write(to: file, options: .atomic)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+                    documents[document.id] = file
+                }
+                let snapshot = archive, images = files, documentFiles = documents
+                saved = try await Task.detached { try LeonBlogExporter.export(snapshot, destination: destination, imageFiles: images, documentFiles: documentFiles) }.value
             }
-            if archive.operation.status == "FAILED" {
-                UserDefaults.standard.removeObject(forKey: key); UserDefaults.standard.removeObject(forKey: key + ".destination")
-            }
-            guard archive.operation.status == "SUCCEEDED", !archive.summary.isEmpty else { throw ClientError.message(archive.operation.error.isEmpty ? "总结尚未完成，可稍后重试导出；当前上下文保留。" : archive.operation.error) }
-            exportProgress = "正在通过 CLI 写入 LeonBook…"
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("leon-archive-images-" + UUID().uuidString)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
-            defer { try? FileManager.default.removeItem(at: directory) }
-            var files: [String: URL] = [:]
-            for image in archive.messages.flatMap({ $0.images ?? [] }) where files[image.id] == nil {
-                guard UUID(uuidString: image.id) != nil else { throw ClientError.message("归档图片标识无效。") }
-                let data = try await api.imageData(image.id)
-                let file = directory.appendingPathComponent(image.id + ".jpg")
-                try data.write(to: file, options: .atomic)
-                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
-                files[image.id] = file
-            }
-            let snapshot = archive, images = files
-            let saved = try await Task.detached { try LeonBlogExporter.export(snapshot, destination: destination, imageFiles: images) }.value
-            UserDefaults.standard.removeObject(forKey: key); UserDefaults.standard.removeObject(forKey: key + ".destination")
+            guard let saved else { throw ClientError.message("LeonBook 尚未确认归档已保存，当前上下文已保留。") }
             exportProgress = "已保存 LeonBook 草稿「" + saved.title + "」"
             if startNew {
                 let updated = try await api.finishArchive(id)
                 if connection == connectionId, room == selectedConversationId { contextInfo = updated }
                 exportProgress += "，已开始全新上下文。"
             }
+            clearPendingArchive(key)
             if connection == connectionId, room == selectedConversationId { showEndRound = false; beginPolling() }
         } catch {
+            if case ClientError.archiveConflict = error { await discardChangedArchive(id: id, key: key, room: room, api: api) }
             exportError = friendly(error)
             exportProgress = exportProgress.hasPrefix("已保存") ? exportProgress + "；尚未开始新对话。" : "归档未完成，当前上下文保留。"
             if !showEndRound { self.error = exportError }
@@ -339,7 +460,12 @@ final class ChatStore: ObservableObject {
             guard draftImages.isEmpty, !preparingImages, currentPending.isEmpty else { error = "请先处理待发送消息和图片，再结束或导出本轮。"; return }
             draft = ""
             endRoundExportOnly = command == .exportRound
-            if command == .exportRound, availableAgents.count == 1 { await exportCurrentRound(agentId: availableAgents[0].id, startNew: false) }
+            if command == .exportRound, availableAgents.count == 1 {
+                let agentId = availableAgents[0].id, room = selectedConversationId, connection = connectionId
+                await prepareBlogDestination(agentId: agentId)
+                guard room == selectedConversationId, connection == connectionId else { return }
+                await exportCurrentRound(agentId: agentId, startNew: false)
+            }
             else { showEndRound = true }
             return
         }
@@ -392,6 +518,7 @@ final class ChatStore: ObservableObject {
         defer { contextBusy = false }
         do {
             let info = try await api.configureContext(conversation: room, rounds: rounds, reset: reset)
+            if reset, connection == connectionId { clearPendingArchives(room: room) }
             guard connection == connectionId, room == selectedConversationId else { return }
             contextInfo = info
             beginPolling()
@@ -451,6 +578,7 @@ final class ChatStore: ObservableObject {
     var availableAgents: [AgentInfo] { agents.filter { $0.enabled && (selectedConversation?.agentIds.contains($0.id) ?? (selectedConversationId == "shared")) } }
 
     func selectConversation(_ id: String, refresh: Bool = true) {
+        guard !deletedConversationIDs.contains(id) else { return }
         agentDetailId = nil
         navigationRequest = UUID()
         guard id != selectedConversationId else { return }
@@ -487,8 +615,10 @@ final class ChatStore: ObservableObject {
             selectConversation(known.id); return nil
         }
         guard let api else { error = "请先连接服务器"; return nil }
-        // The server's direct-conversation identity is stable: direct:<agent UUID>.
-        let room = known ?? Conversation(id: "direct:" + agent.id, name: agent.name, kind: "direct", agentId: agent.id, agentIds: [agent.id])
+        // A deleted default room must never be selected again, even as a temporary placeholder.
+        let defaultID = "direct:" + agent.id
+        let placeholderID = deletedConversationIDs.contains(defaultID) ? "opening:" + UUID().uuidString : defaultID
+        let room = known ?? Conversation(id: placeholderID, name: agent.name, kind: "direct", agentId: agent.id, agentIds: [agent.id])
         unconfirmedDirectRooms.insert(room.id)
         if known == nil { conversations.append(room) }
         selectConversation(room.id, refresh: false)
@@ -507,7 +637,7 @@ final class ChatStore: ObservableObject {
         }
         do {
             let room = try await selection.creation.task.value
-            guard !Task.isCancelled, selection.connection == connectionId else { return }
+            guard !Task.isCancelled, selection.connection == connectionId, !deletedConversationIDs.contains(room.id) else { return }
             if let index = conversations.firstIndex(where: { $0.id == room.id }) { conversations[index] = room }
             else { conversations.append(room) }
             unconfirmedDirectRooms.remove(selection.room.id)
@@ -599,6 +729,7 @@ final class ChatStore: ObservableObject {
             let rooms = try await candidate.conversations()
             try await Keychain.save(secret)
             generation = UUID(); connectionId = UUID(); avatarSessionKey = UUID().uuidString
+            conversationToDelete = nil; deletingConversation = false; deletedConversationIDs = []; directoryRevision = UUID()
             agentDetailId = nil; creatingAgentConversation = false
             modelUsage = []; usageError = nil; usageLoadedAt = nil; usageBusy = false
             scrollPositions=[:];navigationRequest = UUID(); roomCache = [:]; roomCacheOrder = []
@@ -641,6 +772,7 @@ final class ChatStore: ObservableObject {
         guard directoryRefresh == nil, let api,
               lastDirectoryRefresh.map({ Date().timeIntervalSince($0) >= 10 }) ?? true else { return }
         let connection = connectionId
+        let revision = directoryRevision, knownIDs = Set(conversations.map(\.id))
         lastDirectoryRefresh = Date()
         directoryRefresh = Task { [weak self] in
             guard let self else { return }
@@ -650,11 +782,17 @@ final class ChatStore: ObservableObject {
             async let presence: Void? = try? api.heartbeat(deviceId: self.deviceId, name: self.sender)
             do {
                 let (directory, conversations) = try await (agents, rooms)
-                guard !Task.isCancelled, connection == self.connectionId else { return }
+                guard !Task.isCancelled, connection == self.connectionId, revision == self.directoryRevision else { return }
                 if self.agents != directory { self.agents = directory }
-                var updated = conversations
-                if let selected = self.selectedConversation, !updated.contains(where: { $0.id == selected.id }) { updated.append(selected) }
+                var updated = conversations.filter { !self.deletedConversationIDs.contains($0.id) }
+                for room in self.conversations where (!knownIDs.contains(room.id) || self.unconfirmedDirectRooms.contains(room.id)) && !updated.contains(where: { $0.id == room.id }) {
+                    updated.append(room)
+                }
+                let updatedIDs = Set(updated.map(\.id))
+                let outboxRooms = Set(self.pending.map { $0.conversationId ?? "shared" }).subtracting(["shared"])
+                let removed = knownIDs.union(outboxRooms).subtracting(updatedIDs)
                 if self.conversations != updated { self.conversations = updated }
+                for room in removed { self.removeConversationLocally(room) }
             } catch { /* Directory refresh must not block the selected conversation. */ }
             _ = await presence
         }

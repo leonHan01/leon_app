@@ -19,19 +19,21 @@ struct ChatImageView: View {
     var onBranch:(()->Void)? = nil
     @StateObject private var loaded = ChatImageState()
     @State private var branchAfterPreview=false
+    @State private var previewSize = CGSize(width: 1200, height: 850)
 
     var body: some View {
         Button {
-            if loaded.image != nil { loaded.preview = true } else { loaded.retry += 1 }
+            if loaded.image != nil { openPreview() } else { loaded.retry += 1 }
         } label: {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8).fill(.quaternary)
+            RoundedRectangle(cornerRadius: 8).fill(.quaternary)
+                .aspectRatio(4.0 / 3.0, contentMode: .fit)
+                .overlay {
                 if let image = loaded.image {
                     Image(nsImage: image).resizable().scaledToFit().padding(3)
                 } else if loaded.failed {
                     Label("图片加载失败，点击重试", systemImage: "arrow.clockwise").font(.caption)
                 } else { ProgressView().controlSize(.small) }
-            }.frame(width: 240, height: 180).clipShape(RoundedRectangle(cornerRadius: 8))
+                }.frame(maxWidth: 360).clipShape(RoundedRectangle(cornerRadius: 8))
         }.buttonStyle(.plain).accessibilityLabel("聊天图片，点击查看大图")
             .contextMenu { saveButton;messageActions }
             .onDisappear { if !loaded.preview { loaded.image = nil; loaded.data = nil } }
@@ -46,14 +48,19 @@ struct ChatImageView: View {
             }
             .onChange(of:store.searchConnectionID) {_ in branchAfterPreview=false}
             .sheet(isPresented: $loaded.preview,onDismiss:{if branchAfterPreview {branchAfterPreview=false;onBranch?()}}) {
-                VStack(spacing: 12) {
-                    HStack { Text("图片预览").font(.headline); Spacer(); Button("关闭") { loaded.preview = false }.keyboardShortcut(.cancelAction) }
-                    ScrollView([.horizontal, .vertical]) {
-                        if let image = loaded.image { Image(nsImage: image).textSelection(.disabled).contextMenu { saveButton;messageActions } }
-                    }.background(Color(nsColor: .textBackgroundColor))
-                        .overlay(alignment:.bottomTrailing) { downloadButton.padding(16) }
-                }.padding(20).frame(width: 820, height: 620)
+                if let image = loaded.image {
+                    ChatImagePreview(image: image, close: { loaded.preview = false },
+                                     actions: Group { saveButton; messageActions }, download: downloadButton)
+                        .frame(width: previewSize.width, height: previewSize.height)
+                }
             }
+    }
+    private func openPreview() {
+        let screen = NSApp.keyWindow?.screen ?? NSScreen.main
+        let available = screen?.visibleFrame.size ?? CGSize(width: 1440, height: 1000)
+        previewSize = CGSize(width: min(1600, floor(available.width * 0.92)),
+                             height: min(1100, floor(available.height * 0.92)))
+        loaded.preview = true
     }
     @ViewBuilder private var messageActions:some View {
         if let onQuote {Button("引用") {loaded.preview=false;onQuote()}}

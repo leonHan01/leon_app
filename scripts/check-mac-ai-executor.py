@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the installed Mac executor's chat and drawing protocols without network or credentials."""
+"""Check installed chat, drawing and web-search protocols without network or credentials."""
 import argparse
 import importlib.util
 import io
@@ -20,11 +20,16 @@ def check(script):
         spec.loader.exec_module(worker)
     finally:
         sys.dont_write_bytecode = old_bytecode
-    for api, field, endpoint in [
-        ('chat', 'messages', 'https://api.openai.com/v1/chat/completions'),
-        ('responses', 'input', 'https://api.openai.com/v1/responses'),
+    for api, field, endpoint, tool_types in [
+        ('chat', 'messages', 'https://api.openai.com/v1/chat/completions', []),
+        ('responses', 'input', 'https://api.openai.com/v1/responses', ['image_generation']),
+        ('responses', 'input', 'https://api.openai.com/v1/responses', ['web_search']),
+        ('responses', 'input', 'https://api.openai.com/v1/responses', ['image_generation', 'web_search']),
     ]:
-        payload = {'status': 'completed', 'output': []}
+        payload = {'status': 'completed', 'output': [{
+            'type': 'message', 'content': [{'type': 'output_text', 'text': 'protocol-check',
+                'annotations': [{'type': 'url_citation', 'start_index': 0, 'end_index': 14,
+                                 'url': 'https://example.test/source', 'title': 'Source'}]}]}]}
         response = io.BytesIO(json.dumps(payload).encode())
         response.status = 200
         job = {
@@ -33,6 +38,8 @@ def check(script):
             'body': {'model': 'gpt-6.1-sol', 'stream': False,
                      field: [{'role': 'user', 'content': 'protocol-check'}]},
         }
+        if tool_types:
+            job['body']['tools'] = [dict(type=tool_type) for tool_type in tool_types]
         with patch.object(worker, 'opener') as factory:
             factory.return_value.open.return_value = response
             result = worker.invoke_openai(job)
@@ -42,6 +49,9 @@ def check(script):
                 raise ValueError(api + ' protocol made an unexpected number of provider attempts')
             if factory.return_value.open.call_args.args[0].full_url != endpoint:
                 raise ValueError(api + ' protocol selected the wrong OpenAI endpoint')
+            sent = json.loads(factory.return_value.open.call_args.args[0].data)
+            if sent != job['body']:
+                raise ValueError(api + ' protocol changed the tools or request body')
 
 
 def main():
@@ -54,7 +64,7 @@ def main():
     except (OSError, ImportError, ValueError, AttributeError):
         print('MAC_EXECUTOR_CHECK=failed; update the installed executor and rerun this check', file=sys.stderr)
         return 1
-    print('MAC_EXECUTOR_CHECK=ok; chat and Responses drawing protocols supported; no network requests made')
+    print('MAC_EXECUTOR_CHECK=ok; chat, drawing and web-search protocols supported; no network requests made')
     return 0
 
 
