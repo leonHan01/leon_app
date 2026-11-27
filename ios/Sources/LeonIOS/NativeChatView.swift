@@ -118,7 +118,7 @@ struct NativeChatView: View {
                         if store.opening.contains(store.roomID),let agent = store.agent(store.selected?.agentId) {MobileTextButton(title:"重试打开") {Task {await store.open(agent)}}}
                     }.frame(maxWidth:.infinity).padding(.horizontal,16).padding(.top,45).padding(.bottom,35)
                 }
-                ForEach(ChatTimeline.entries(messages:store.room.messages,jobs:store.visibleJobs,operations:store.room.operations)) {entry in
+                ForEach(store.timeline.entries) {entry in
                     timelineEntry(entry,width:width,resized:{viewport.resized()}).id(entry.id)
                 }
                 ForEach(store.currentPending) {outgoing in
@@ -135,9 +135,9 @@ struct NativeChatView: View {
             .onPreferenceChange(TimelineLayoutKey.self) {layout in
                 guard viewport.room==store.roomID else {return};viewport.geometryChanged(layout,loaded:store.room.loaded)
             }
-            .onChange(of:store.room.messages.map(\.id)) {_ in
+            .onChange(of:store.timeline.messageIDs) {rows in
                 if viewport.room != store.roomID {enterTimeline(proxy)}
-                viewport.receivedRows(room:store.roomID,rows:store.room.messages.map(\.id),pending:store.currentPending.map(\.id),loaded:store.room.loaded)
+                viewport.receivedRows(room:store.roomID,rows:rows,pending:store.currentPending.map(\.id),loaded:store.room.loaded)
             }
             .onChange(of:store.currentPending.map(\.id)) {viewport.pendingChanged($0)}
             .onChange(of:store.room.loaded) {viewport.loadedChanged($0)}
@@ -147,7 +147,7 @@ struct NativeChatView: View {
     }
     private func enterTimeline(_ proxy:ScrollViewProxy){
         let room=store.roomID,connection=store.searchConnectionID
-        viewport.enter(room:room,position:store.scrollPositions[room],rows:store.room.messages.map(\.id),pending:store.currentPending.map(\.id),loaded:store.room.loaded,proxy:proxy,anchor:{AnyHashable("message:\($0)")}) {[weak store=store] position in
+        viewport.enter(room:room,position:store.scrollPositions[room],rows:store.timeline.messageIDs,pending:store.currentPending.map(\.id),loaded:store.room.loaded,proxy:proxy,anchor:{AnyHashable("message:\($0)")}) {[weak store=store] position in
             guard let store,store.roomID==room,store.searchConnectionID==connection else {return};store.scrollPositions[room]=position
         }
     }

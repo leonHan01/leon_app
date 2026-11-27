@@ -19,6 +19,24 @@ struct Message: Codable, Identifiable, Equatable {
     var documents:[DocumentAttachment]? = nil
     var date: Date { Date(timeIntervalSince1970: Double(createdAt) / 1000) }
 }
+extension Array where Element == Message {
+    // A page usually falls entirely before or after the loaded history.
+    func mergingMessagePage(_ page: [Message]) -> [Message]? {
+        guard let firstIncoming = page.first, let lastIncoming = page.last else { return nil }
+        if zip(page, page.dropFirst()).allSatisfy({ $0.0.id < $0.1.id }) {
+            guard let first, let last else { return page }
+            if firstIncoming.id > last.id { return self + page }
+            if lastIncoming.id < first.id { return page + self }
+        }
+
+        // Preserve the latest value for each ID when pages overlap or arrive out of order.
+        var byID = Dictionary(uniqueKeysWithValues: map { ($0.id, $0) })
+        for message in page { byID[message.id] = message }
+        let merged = byID.values.sorted { $0.id < $1.id }
+        return merged == self ? nil : merged
+    }
+}
+
 struct AgentInfo: Codable, Identifiable, Equatable {
     let id: String; let name: String; let handle: String; let provider: String
     let model: String?; let enabled: Bool; let avatarId: String?; let description: String?

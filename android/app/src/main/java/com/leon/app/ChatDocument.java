@@ -13,6 +13,10 @@ final class ChatDocument {
     final String id,name,mimeType;final int byteCount,characterCount;final boolean truncated;final byte[] data;
     ChatDocument(JSONObject value)throws JSONException{id=value.getString("id");name=value.getString("name");mimeType=value.optString("mimeType","application/octet-stream");byteCount=value.getInt("byteCount");characterCount=value.optInt("characterCount");truncated=value.optBoolean("truncated");data=null;}
     ChatDocument(String name,byte[] data){id=UUID.randomUUID().toString();this.name=name;this.data=data;byteCount=data.length;characterCount=0;truncated=false;mimeType="application/octet-stream";}
+    boolean sameMetadata(ChatDocument other){
+        return id.equals(other.id)&&name.equals(other.name)&&mimeType.equals(other.mimeType)
+                &&byteCount==other.byteCount&&characterCount==other.characterCount&&truncated==other.truncated;
+    }
     JSONObject json()throws JSONException{return new JSONObject().put("id",id).put("name",name).put("mimeType",mimeType).put("byteCount",byteCount).put("characterCount",characterCount).put("truncated",truncated);}
     String detail(){return (byteCount<1024?byteCount+" B":String.format(Locale.ROOT,"%.1f KB",byteCount/1024.0))+(characterCount>0?" · 已提取 "+characterCount+" 字符":"")+(truncated?" · 长文已截取":"");}
     static ChatDocument read(ContentResolver resolver,Uri uri)throws Exception{

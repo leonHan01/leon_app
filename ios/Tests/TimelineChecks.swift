@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 @MainActor
 extension Checks {
@@ -6,6 +7,27 @@ extension Checks {
         Message(id:id,clientMessageId:"timeline-\(id)",deviceId:"device",sender:"Alice",platform:"ios",text:"hello",createdAt:time,conversationId:"shared",role:"user",agentId:nil,replyTo:nil,images:[],userId:nil)
     }
     func checkTimeline() async throws {
+        try await run("empty pages stay quiet and metadata-only pages update the timeline") {
+            let value=await store(api:FakeAPI()),room=value.roomID
+            let initial = MessagePage(messages:[timedMessage(20,1_000)],hasMore:true,jobs:[],contextOperations:[],historyRevision:1)
+            _ = try await value.apply(initial,room:room,older:false)
+            _ = value.timeline
+            var publications = 0
+            let subscription = value.objectWillChange.sink { publications += 1 }
+            defer { subscription.cancel() }
+            _ = try await value.apply(pageFixture([]),room:room,older:false)
+            try expect(publications == 0 && value.room.hasOlder,"empty poll changed the view or older-page availability")
+            let job = AgentJob(messageId:20,agentId:"a",agentName:"A",status:"RUNNING",error:"")
+            _ = try await value.apply(pageFixture([],jobs:[job]),room:room,older:false)
+            try expect(publications == 1 && value.timeline.entries.contains {$0.id == "job:20:a"},"empty message page lost its job update")
+            _ = try await value.apply(pageFixture([timedMessage(10,500)],jobs:[job]),room:room,older:true)
+            _ = try await value.apply(pageFixture([timedMessage(30,1_500)],jobs:[job]),room:room,older:false)
+            try expect(value.timeline.messageIDs == [10,20,30] && !value.room.hasOlder,"prepend and append broke message order or pagination")
+            let publicationsBeforeOverlap = publications
+            _ = try await value.apply(pageFixture([timedMessage(20,1_000)],jobs:[job]),room:room,older:false)
+            try expect(publications == publicationsBeforeOverlap,"identical overlapping page republished the timeline")
+        }
+
         try await run("cached history keeps the reading anchor and clears positions with history") {
             let value=await store(api:FakeAPI()),room=value.roomID
             value.room.messages=(1...500).map {messageFixture(Int64($0))};value.room.loaded=true

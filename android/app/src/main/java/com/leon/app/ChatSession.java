@@ -13,7 +13,14 @@ import java.util.concurrent.*;
 /** Retained across rotations. All state changes occur on the main looper. */
 final class ChatSession {
     interface Listener { void changed(); void error(String message); }
-    static final class ScrollPosition {final long message;final int top,offset;ScrollPosition(long message,int top,int offset){this.message=message;this.top=top;this.offset=offset;}}
+    static final class ScrollPosition {
+        final long message;
+        final int top,itemPosition;
+        final String rowKey;
+        ScrollPosition(long message,int top,int itemPosition,String rowKey){
+            this.message=message;this.top=top;this.itemPosition=itemPosition;this.rowKey=rowKey;
+        }
+    }
     final Map<String,ScrollPosition> scrollPositions=new HashMap<>();
     final SharedPreferences prefs;
     final SecretStore secrets;
@@ -151,11 +158,20 @@ final class ChatSession {
         if(pendingKey!=null)prefs.edit().putStringSet(pendingKey+".dismissedJobs",new HashSet<>(dismissedJobKeys)).apply();
     }
     void receiveJobs(List<MessageApi.Job> incoming){
-        Set<String> active=new HashSet<>();for(var job:incoming)if(!job.status.equals("FAILED"))active.add(jobId(job));
-        boolean changed=dismissedJobKeys.removeIf(key->active.contains(key.split("#",2)[0]));
-        if(changed)saveDismissals();
-        String previous=jobSignature(jobs);jobs.clear();jobs.addAll(incoming);
-        if(changed||!previous.equals(jobSignature(jobs)))revision++;
+        boolean dismissalsChanged=false;
+        if(!dismissedJobKeys.isEmpty()&&!incoming.isEmpty()){
+            Set<String> active=new HashSet<>();for(var job:incoming)if(!job.status.equals("FAILED"))active.add(jobId(job));
+            dismissalsChanged=dismissedJobKeys.removeIf(key->active.contains(key.split("#",2)[0]));
+            if(dismissalsChanged)saveDismissals();
+        }
+        if(!sameJobs(incoming)){
+            jobs.clear();jobs.addAll(incoming);revision++;
+        }else if(dismissalsChanged)revision++;
+    }
+    private boolean sameJobs(List<MessageApi.Job> incoming){
+        if(jobs.size()!=incoming.size())return false;
+        for(int i=0;i<jobs.size();i++)if(!jobs.get(i).content().equals(incoming.get(i).content()))return false;
+        return true;
     }
     boolean toolsBusy;
     String toolsStatus="";
@@ -236,6 +252,7 @@ final class ChatSession {
         generation++;polling=false;loadingOlder=false;messages.clear();jobs.clear();contextOperations=new JSONArray();
         RoomSnapshot cached=historyCache.get(id);initialLoaded=cached!=null&&cached.loaded;hasOlder=cached!=null&&cached.older;
         if(cached!=null){messages.addAll(cached.messages);jobs.addAll(cached.jobs);}
+        reconcile(messages);
         revision++;notifyChanged();refresh();
     }
     void mention(MessageApi.Agent agent) { draft+=(draft.isEmpty()||Character.isWhitespace(draft.charAt(draft.length()-1))?"":" ")+"@"+agent.handle+" ";notifyChanged(); }
@@ -519,11 +536,18 @@ final class ChatSession {
                     if (epoch != generation) return;
                     polling = false;
                     if(historyChanged(page,conversation)){schedule(0);return;}
-                    String previousOperations=contextOperations.toString();contextOperations=page.contextOperations;if(!previousOperations.equals(contextOperations.toString()))revision++;
+                    long previousRevision=revision;
+                    boolean stateChanged=!initialLoaded||!connected||!status.equals("已连接 · 自动同步");
+                    if (contextOperations.length()!=0 || page.contextOperations.length()!=0) {
+                        if (!contextOperations.toString().equals(page.contextOperations.toString())) {
+                            contextOperations=page.contextOperations;revision++;
+                        }
+                    }
                     receiveJobs(page.jobs);
                     if (!initialLoaded) { hasOlder = page.hasMore; initialLoaded = true; }
-                    merge(page.messages); if(!connected)revision++; connected = true; backoff = 2000; status = "已连接 · 自动同步";
-                    notifyChanged(); schedule(after != null && page.hasMore ? 0 : backoff);
+                    merge(page.messages);connected = true;backoff = 2000;status = "已连接 · 自动同步";
+                    if (stateChanged || revision!=previousRevision) notifyChanged();
+                    schedule(after != null && page.hasMore ? 0 : backoff);
                 });
             } catch (Exception e) {
                 main.post(() -> {
@@ -532,8 +556,12 @@ final class ChatSession {
                         signedOut(e.getMessage());
                         return;
                     }
-                    polling = false; connected = false; status = e.getMessage() == null ? "连接未完成" : e.getMessage();
-                    backoff = Math.min(backoff * 2, 30000); notifyChanged(); schedule(backoff);
+                    String failure = e.getMessage() == null ? "连接未完成" : e.getMessage();
+                    boolean stateChanged = connected || !status.equals(failure);
+                    polling = false; connected = false; status = failure;
+                    backoff = Math.min(backoff * 2, 30000);
+                    if (stateChanged) notifyChanged();
+                    schedule(backoff);
                 });
             }
         });
@@ -615,17 +643,41 @@ final class ChatSession {
     }
 
     private String avatarSignature(List<MessageApi.Agent> directory){StringBuilder signature=new StringBuilder();for(MessageApi.Agent a:directory)signature.append(a.id).append(a.avatarId);return signature.toString();}
-    private String jobSignature(List<MessageApi.Job> jobs) { StringBuilder signature=new StringBuilder();for(MessageApi.Job job:jobs)signature.append(job.signature());return signature.toString(); }
     private void merge(List<MessageApi.Message> incoming) {
-        TreeMap<Long, MessageApi.Message> unique = new TreeMap<>();
-        for (MessageApi.Message m : messages) unique.put(m.id, m);
-        for (MessageApi.Message m : incoming) unique.put(m.id, m);
-        if (unique.size() != messages.size()) { messages.clear(); messages.addAll(unique.values()); revision++; }
-        reconcile();
+        if (incoming.isEmpty()) return;
+        boolean ascending = true;
+        for (int i=1;i<incoming.size();i++) {
+            if (incoming.get(i-1).id >= incoming.get(i).id) { ascending=false; break; }
+        }
+        boolean changed;
+        if (ascending && (messages.isEmpty() || incoming.get(0).id > messages.get(messages.size()-1).id)) {
+            messages.addAll(incoming);
+            changed = true;
+        } else if (ascending && incoming.get(incoming.size()-1).id < messages.get(0).id) {
+            messages.addAll(0,incoming);
+            changed = true;
+        } else {
+            changed = false;
+            Comparator<MessageApi.Message> byId = Comparator.comparingLong(message->message.id);
+            for (MessageApi.Message message : incoming) {
+                int index = Collections.binarySearch(messages,message,byId);
+                if (index < 0) {
+                    messages.add(-index-1,message);
+                    changed = true;
+                } else if (!messages.get(index).sameContent(message)) {
+                    messages.set(index,message);
+                    changed = true;
+                }
+            }
+        }
+        if (changed) revision++;
+        reconcile(incoming);
     }
-    private void reconcile() {
+    private void reconcile(List<MessageApi.Message> received) {
+        if (pending.isEmpty() || received.isEmpty()) return;
         Set<String> confirmed = new HashSet<>();
-        for (MessageApi.Message m : messages) if (m.deviceId.equals(deviceId)) confirmed.add(m.clientMessageId);
+        for (MessageApi.Message m : received) if (m.deviceId.equals(deviceId)) confirmed.add(m.clientMessageId);
+        if (confirmed.isEmpty()) return;
         if (pending.removeIf(m -> {if(!confirmed.contains(m.optString("clientMessageId")))return false;removeImageFiles(m);return true;})) { revision++; savePending(); }
     }
     private void restorePending(String token) {

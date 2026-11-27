@@ -8,6 +8,7 @@ import UIKit
 struct TimelineLayout:Equatable {
     var viewport:CGFloat?
     var content:CGFloat?
+    var contentTop:CGFloat?
     var bottom:CGFloat?
     var messages:[Int64:CGRect]=[:]
     var nearBottom:Bool {guard let viewport,let bottom else {return false};return bottom>=0 && bottom<=viewport+48}
@@ -16,13 +17,16 @@ struct TimelineLayout:Equatable {
 struct TimelineLayoutKey:PreferenceKey {
     static let defaultValue=TimelineLayout()
     static func reduce(value:inout TimelineLayout,nextValue:()->TimelineLayout){
-        let next=nextValue();value.viewport=next.viewport ?? value.viewport;value.content=next.content ?? value.content;value.bottom=next.bottom ?? value.bottom
+        let next=nextValue();value.viewport=next.viewport ?? value.viewport;value.content=next.content ?? value.content
+        value.contentTop=next.contentTop ?? value.contentTop;value.bottom=next.bottom ?? value.bottom
         value.messages.merge(next.messages,uniquingKeysWith:{$1})
     }
 }
 extension View {
     func timelineViewport()->some View {coordinateSpace(name:"conversation-viewport").background(GeometryReader {proxy in Color.clear.preference(key:TimelineLayoutKey.self,value:TimelineLayout(viewport:proxy.size.height))})}
-    func timelineContent()->some View {background(GeometryReader {proxy in Color.clear.preference(key:TimelineLayoutKey.self,value:TimelineLayout(content:proxy.size.height))})}
+    func timelineContent()->some View {background(GeometryReader {proxy in
+        Color.clear.preference(key:TimelineLayoutKey.self,value:TimelineLayout(content:proxy.size.height,contentTop:proxy.frame(in:.named("conversation-viewport")).minY))
+    })}
     func timelineBottom()->some View {background(GeometryReader {proxy in Color.clear.preference(key:TimelineLayoutKey.self,value:TimelineLayout(bottom:proxy.frame(in:.named("conversation-viewport")).maxY))})}
     func timelineMessage(_ id:Int64)->some View {background(GeometryReader {proxy in Color.clear.preference(key:TimelineLayoutKey.self,value:TimelineLayout(messages:[id:proxy.frame(in:.named("conversation-viewport"))]))})}
 }
@@ -116,6 +120,7 @@ final class ConversationViewport:ObservableObject {
     private var rows:[Int64]=[],pending=Set<String>()
     private var lastNativeOffset:CGFloat?
     private var loaded=false,active=false,initial=true,following=true,interacting=false,anchorRequested=false
+    private var restoreScheduled=false
     private var restoring:ConversationScrollPosition?,lastSaved:ConversationScrollPosition?
     init(){
         handle.changed={[weak self] in self?.nativeMoved()}
@@ -125,7 +130,7 @@ final class ConversationViewport:ObservableObject {
     }
     func enter(room:String,position:ConversationScrollPosition?,rows:[Int64],pending:[String],loaded:Bool,proxy:ScrollViewProxy,anchor:@escaping (Int64)->AnyHashable,save:@escaping (ConversationScrollPosition)->Void){
         self.entry=UUID();self.room=room;self.proxy=proxy;self.anchor=anchor;self.save=save;self.rows=rows;self.pending=Set(pending);self.loaded=loaded
-        active=true;initial=position==nil;following=position==nil;interacting=false;restoring=position;lastSaved=position;anchorRequested=false;layout=TimelineLayout()
+        active=true;initial=position==nil;following=position==nil;interacting=false;restoring=position;lastSaved=position;anchorRequested=false;restoreScheduled=false;layout=TimelineLayout()
         applyPosition()
     }
     func leave(room:String){if self.room==room {remember()};active=false;entry=UUID();proxy=nil}
@@ -143,18 +148,21 @@ final class ConversationViewport:ObservableObject {
     func loadedChanged(_ loaded:Bool){self.loaded=loaded;applyPosition()}
     func geometryChanged(_ value:TimelineLayout,loaded:Bool){
         guard active else {return}
-        layout=value;layoutOffset=handle.offset ?? 0;self.loaded=loaded
+        // Use the offset from the same geometry pass as the row frames.
+        // A native scroll or LazyVStack estimate can change before this callback runs.
+        layout=value;layoutOffset=value.contentTop.map {-$0} ?? handle.offset ?? 0;self.loaded=loaded
         if interacting || handle.isScrolling?() == true {remember();return}
         if restoring != nil || initial || following {applyPosition();return}
         if let previous=lastSaved {
-            if let id=previous.messageID,rows.contains(id),value.messages[id].map({abs(Double($0.minY)-previous.messageTop)>0.5}) ?? true {
+            let nativeDelta=(handle.offset ?? layoutOffset)-layoutOffset
+            if let id=previous.messageID,rows.contains(id),value.messages[id].map({abs(Double($0.minY-nativeDelta)-previous.messageTop)>0.5}) ?? true {
                 restoring=previous;anchorRequested=false;applyPosition();return
             }
             if previous.messageID == nil {remember()}
         }else {remember()}
     }
     func resized(){applyPosition()}
-    private func applyPosition(){
+    private func applyPosition(deferRestore:Bool=true){
         guard active,!interacting,handle.isScrolling?() != true,let proxy else {return};let stamp=entry
         if initial,loaded,layout.nearBottom,handle.nearBottom?() == true,(rows.last.map {layout.messages[$0] != nil} ?? true),handle.offset != nil {initial=false;following=true;remember();return}
         if let position=restoring {
@@ -165,7 +173,21 @@ final class ConversationViewport:ObservableObject {
                     return
                 }
                 let top=rect.minY-(current-layoutOffset),wanted=current+top-CGFloat(position.messageTop)
-                handle.write?(wanted)
+                if abs(wanted-current)>0.5 {
+                    // Apply the pixel correction after SwiftUI finishes its own scrollTo layout.
+                    if deferRestore {
+                        if !restoreScheduled {
+                            restoreScheduled=true
+                            DispatchQueue.main.async {[weak self] in
+                                guard let self,self.active,self.entry==stamp else {return}
+                                self.restoreScheduled=false
+                                if self.restoring != nil {self.applyPosition(deferRestore:false)}
+                            }
+                        }
+                        return
+                    }
+                    handle.write?(wanted)
+                }
                 let actual=handle.offset ?? wanted
                 lastSaved=ConversationScrollPosition(offset:Double(actual),messageID:id,messageTop:position.messageTop)
                 if abs(wanted-actual)>1 {return}

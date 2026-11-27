@@ -17,7 +17,7 @@ final class TimelineScrollScene:NSObject,UIWindowSceneDelegate {
         guard let root=window?.rootViewController else {exit(2)}
         let store=ChatStore(disk:FilePersistence(root:FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)),credentials:ScrollCheckCredentials())
         store.conversations=[Conversation(id:"room:a",name:"缓存会话",kind:"direct",agentId:nil,agentIds:[]),Conversation(id:"room:b",name:"延迟加载",kind:"direct",agentId:nil,agentIds:[])]
-        store.roomID="room:a";store.room.messages=messages(1,count:40,room:"room:a");store.room.loaded=true
+        store.roomID="room:a";store.room.messages=messages(10,count:40,room:"room:a");store.room.loaded=true
         var failures:[String]=[]
         var viewport=ConversationViewport()
         func host()->UIHostingController<NativeChatView>{
@@ -58,15 +58,18 @@ final class TimelineScrollScene:NSObject,UIWindowSceneDelegate {
             if saved.messageID != actual.messageID || abs(saved.messageTop-actual.messageTop)>2 {failures.append("\(label): anchor \(String(describing:actual.messageID)) at \(actual.messageTop), expected \(String(describing:saved.messageID)) at \(saved.messageTop)")}
         }
         store.room.messages.append(message(1000,room:"room:a",text:"阅读旧消息时收到的新回复"));await settle();checkRestored("new reply does not interrupt reading history")
-        store.room.messages[0]=message(1,room:"room:a",text:String(repeating:"较早消息稍后完成排版，当前阅读位置应保持。",count:100))
+        store.room.messages[0]=message(10,room:"room:a",text:String(repeating:"较早消息稍后完成排版，当前阅读位置应保持。",count:100))
         await settle();checkRestored("height expansion above the reading anchor")
+        viewport.loadOlder()
+        store.room.messages.insert(message(1,room:"room:a",text:"更早的历史消息"),at:0)
+        await settle();checkRestored("loading an older page preserves the reading anchor")
         store.select("room:b");await settle()
         store.room.messages=messages(100,count:35,room:"room:b");store.room.loaded=true
         await settle();check("history arriving after entering an empty room")
         store.select("room:a");await settle();checkRestored("switching back to cached history")
         controller.willMove(toParent:nil);controller.view.removeFromSuperview();controller.removeFromParent();viewport=ConversationViewport();controller=host()
         await settle();checkRestored("returning from another page without new IDs")
-        let report=failures.map {"FAIL: "+$0}.joined(separator:"\n")+"\n"+(failures.isEmpty ? "PASS: 7 production conversation scrolling scenarios" : "FAIL: \(failures.count) conversation scrolling scenarios")+"\n"
+        let report=failures.map {"FAIL: "+$0}.joined(separator:"\n")+"\n"+(failures.isEmpty ? "PASS: 8 production conversation scrolling scenarios" : "FAIL: \(failures.count) conversation scrolling scenarios")+"\n"
         if let path=ProcessInfo.processInfo.environment["LEON_SCROLL_RESULT"] {try? report.write(toFile:path,atomically:true,encoding:.utf8)}
         print(report);exit(failures.isEmpty ? 0 : 1)
     }

@@ -54,6 +54,11 @@ struct MessageChecks {
         let items = TimelineItem.ordered(messages: messages, operations: [operation], jobs: [job])
         try check(items.map(\.id) == ["message:1", "job:1:sol", "operation:compact", "message:2"], "Failures and context notices must remain in the conversation timeline")
         try check(TimelineItem.ordered(messages: messages, operations: [], jobs: [job]).map(\.id) == ["message:1", "job:1:sol", "message:2"], "A failed reply must remain after its triggering message")
+        let earlier = [messages[0]], later = [messages[1]]
+        try check(earlier.mergingMessagePage([]) == nil, "An empty poll must leave history untouched")
+        try check(earlier.mergingMessagePage(later) == messages, "A new page must append")
+        try check(later.mergingMessagePage(earlier) == messages, "An older page must prepend")
+        try check(messages.mergingMessagePage([messages[1], messages[0]]) == nil, "Overlapping pages must deduplicate in ID order")
     }
     static func commandChecks() throws {
         try check(ChatCommand.query(in: "/", selection: NSRange(location: 1, length: 0)) == "", "Slash did not open commands")

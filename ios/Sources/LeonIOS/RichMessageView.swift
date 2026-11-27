@@ -204,6 +204,26 @@ struct MessagePicture: View {
     }
 }
 @MainActor
+struct PlainMessageText: View {
+    let source: String
+    let availableWidth: CGFloat
+    var fillsWidth = false
+
+    var body: some View {
+        let font = UIFont.systemFont(ofSize:14)
+        let naturalWidth = ceil((source as NSString).size(withAttributes:[.font:font,.kern:0]).width) + 24
+        let width = fillsWidth ? availableWidth : min(availableWidth,max(36,naturalWidth))
+        Text(verbatim:source)
+            .font(.system(size:14)).kerning(0).foregroundStyle(MobileStyle.ink)
+            .textSelection(.enabled)
+            .lineSpacing(5).fixedSize(horizontal:false,vertical:true)
+            .frame(maxWidth:.infinity,alignment:.leading)
+            .padding(.horizontal,12).padding(.vertical,12)
+            .frame(width:width)
+    }
+}
+
+@MainActor
 struct MessageBubble: View {
     @ObservedObject var store:ChatStore
     let message:Message
@@ -217,16 +237,23 @@ struct MessageBubble: View {
     private var agentReply:Bool {message.role == "assistant" && message.agentId != nil}
     private var wide:Bool {!mine && agentReply && message.text.unicodeScalars.count>500}
     private var contentWidth:CGFloat {max(60,availableWidth-(wide ? 0 : 47+(mine || !agentReply ? 44 : 4)))}
-    private var bubbleWidth:CGFloat {
-        // Short plain text wraps tightly; every message still uses the full
-        // Markdown parser, so choosing a width cannot drop a syntax feature.
-        let controls = CharacterSet(charactersIn:"\n\r#+*_~`[]()<>\\^=|!:$-.@&")
-        guard !wide,message.text.rangeOfCharacter(from:controls) == nil else {return contentWidth}
-        // NSString's default kerning compresses CJK punctuation, while the
-        // WebView keeps its full advance. Match that spacing when measuring.
-        let natural = ceil((message.text as NSString).size(withAttributes:[.font:UIFont.systemFont(ofSize:14),.kern:0]).width)+28
-        return min(contentWidth,max(40,natural))
+    private static let markdownControls = CharacterSet(charactersIn:"\n\r#+*_~`[]()<>\\^=|:$-@&")
+
+    static func usesNativeText(_ source: String) -> Bool {
+        // Keep markup, autolinks and HTML whitespace normalization in Markdown.
+        guard !source.isEmpty, source.rangeOfCharacter(from:markdownControls) == nil,
+              !source.hasPrefix(" "), !source.hasSuffix(" "), !source.contains("  ") else { return false }
+        if let dot = source.firstIndex(of:".") {
+            // A single trailing period is plain text except for an ordered-list marker.
+            guard dot == source.index(before:source.endIndex),
+                  !source[..<dot].allSatisfy({ $0.isASCII && $0.isNumber }) else { return false }
+        }
+        return !source.unicodeScalars.contains { scalar in
+            scalar != " " && (CharacterSet.whitespacesAndNewlines.contains(scalar)
+                || scalar.value < 32 || scalar.value == 127 || scalar.value == 0xFEFF)
+        }
     }
+
     var body:some View {
         VStack(alignment:.leading,spacing:7) {
             if wide {
@@ -259,11 +286,17 @@ struct MessageBubble: View {
             }
             ForEach(outgoing?.documents ?? message.documents ?? []){document in DocumentCard(store:store,document:document,message:outgoing==nil && actionsEnabled ? message : nil).padding(.bottom,5)}
             if !message.text.isEmpty {
-                RichMessageView(source:message.text,mine:mine,height:$height,resized:resized,copied:{store.showNotice("已复制")})
-                    .frame(width:max(36,bubbleWidth-(wide ? 0 : 4)),height:height)
-                    .padding(.leading,!wide && !mine ? 4 : 0).padding(.trailing,!wide && mine ? 4 : 0)
-                    .background(MobileBubbleShape(mine:mine,wide:wide).fill(mine ? MobileStyle.outgoing : .white))
-
+                let width = max(36,contentWidth-(wide ? 0 : 4))
+                Group {
+                    if Self.usesNativeText(message.text) {
+                        PlainMessageText(source:message.text,availableWidth:width,fillsWidth:wide)
+                    } else {
+                        RichMessageView(source:message.text,mine:mine,height:$height,resized:resized,copied:{store.showNotice("已复制")})
+                            .frame(width:width,height:height)
+                    }
+                }
+                .padding(.leading,!wide && !mine ? 4 : 0).padding(.trailing,!wide && mine ? 4 : 0)
+                .background(MobileBubbleShape(mine:mine,wide:wide).fill(mine ? MobileStyle.outgoing : .white))
             }
             if let quote=message.quote,let room=message.conversationId {
                 QuoteCard(store:store,quote:quote,room:room,title:store.conversations.first(where:{$0.id==room})?.name ?? "聊天").padding(.top,6)

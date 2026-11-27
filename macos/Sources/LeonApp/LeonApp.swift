@@ -211,7 +211,7 @@ struct ContentView: View {
                             Text("选择 Agent 开始私聊，\n或在群聊中 @指定 Agent。").font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
                         }.frame(maxWidth: .infinity).padding(.vertical, 100)
                     }
-                    ForEach(TimelineItem.ordered(messages: store.messages, operations: store.contextOperations, jobs: store.visibleJobs)) { item in
+                    ForEach(store.timeline.items) { item in
                         switch item {
                         case .message(let message):
                         bubble(text: message.text, sender: message.sender, detail: (message.role == "assistant" ? "Agent · " : "") + message.date.formatted(date: .abbreviated, time: .shortened), mine: message.deviceId == store.deviceId, agentId: message.agentId, imageIds: (message.images ?? []).map(\.id), message:message)
@@ -274,9 +274,9 @@ struct ContentView: View {
             .onPreferenceChange(TimelineLayoutKey.self) {layout in
                 guard viewport.room==store.selectedConversationId else {return};viewport.geometryChanged(layout,loaded:!store.loadingMessages)
             }
-            .onChange(of:store.messages.map(\.id)) {_ in
+            .onChange(of:store.timeline.messageIDs) {rows in
                 if viewport.room != store.selectedConversationId {enterTimeline(proxy)}
-                viewport.receivedRows(room:store.selectedConversationId,rows:store.messages.map(\.id),pending:store.currentPending.map(\.id),loaded:!store.loadingMessages)
+                viewport.receivedRows(room:store.selectedConversationId,rows:rows,pending:store.currentPending.map(\.id),loaded:!store.loadingMessages)
             }
             .onChange(of:store.currentPending.map(\.id)) {viewport.pendingChanged($0)}
             .onChange(of:store.loadingMessages) {viewport.loadedChanged(!$0)}
@@ -284,7 +284,7 @@ struct ContentView: View {
     }
     private func enterTimeline(_ proxy:ScrollViewProxy){
         let room=store.selectedConversationId,connection=store.searchConnectionID
-        viewport.enter(room:room,position:store.scrollPositions[room],rows:store.messages.map(\.id),pending:store.currentPending.map(\.id),loaded:!store.loadingMessages,proxy:proxy,anchor:{AnyHashable($0)}) {[weak store=store] position in
+        viewport.enter(room:room,position:store.scrollPositions[room],rows:store.timeline.messageIDs,pending:store.currentPending.map(\.id),loaded:!store.loadingMessages,proxy:proxy,anchor:{AnyHashable($0)}) {[weak store=store] position in
             guard let store,store.selectedConversationId==room,store.searchConnectionID==connection else {return};store.scrollPositions[room]=position
         }
     }

@@ -129,7 +129,16 @@ final class ChatStore: ObservableObject {
     @Published var agents: [AgentInfo] = []
     @Published var conversations: [Conversation] = []
     @Published var roomID = "shared"
-    @Published var room = RoomState()
+    @Published var room = RoomState() {
+        didSet { cachedTimeline = nil }
+    }
+    private var cachedTimeline: (entries: [ChatTimeline.Entry], messageIDs: [Int64])?
+    var timeline: (entries: [ChatTimeline.Entry], messageIDs: [Int64]) {
+        if let cachedTimeline { return cachedTimeline }
+        let snapshot = (ChatTimeline.entries(messages:room.messages,jobs:visibleJobs,operations:room.operations), room.messages.map(\.id))
+        cachedTimeline = snapshot
+        return snapshot
+    }
     @Published var draft = ""
     @Published var draftDocuments:[DraftDocument]=[]
     @Published var importingDocuments=false
@@ -163,7 +172,9 @@ final class ChatStore: ObservableObject {
     @Published var preparingImages = 0
     @Published var pending: [Outgoing] = []
     @Published var sending = Set<String>()
-    @Published var ignored = Set<String>()
+    @Published var ignored = Set<String>() {
+        didSet { if oldValue != ignored { cachedTimeline = nil } }
+    }
     @Published var busy: String?
     @Published var configuring = false
     @Published var connected = false
@@ -329,8 +340,9 @@ final class ChatStore: ObservableObject {
         do {
             let (newAgents,newRooms) = try await (directory,rooms)
             guard connection == connectionID, revision == directoryRevision, !Task.isCancelled else { return }
-            agents = newAgents
-            conversations = newRooms + conversations.filter { old in (opening.contains(old.id) || old.id == roomID) && !newRooms.contains(where:{$0.id == old.id}) }
+            if agents != newAgents { agents = newAgents }
+            let updatedRooms = newRooms + conversations.filter { old in (opening.contains(old.id) || old.id == roomID) && !newRooms.contains(where:{$0.id == old.id}) }
+            if conversations != updatedRooms { conversations = updatedRooms }
         } catch { if !Task.isCancelled { await handle(error,connection:connection) } }
         _ = await presence
     }
@@ -388,11 +400,16 @@ final class ChatStore: ObservableObject {
                     let page = try await api.page(room:selected,after:after,before:nil)
                     guard current == self.generation, !Task.isCancelled else { return }
                     if try await self.apply(page,room:selected,older:false) { continue }
-                    self.connected = true; self.status = "已连接 · 自动同步"; delay = 2
+                    if !self.connected { self.connected = true }
+                    if self.status != "已连接 · 自动同步" { self.status = "已连接 · 自动同步" }
+                    delay = 2
                     if after != nil && page.hasMore { continue }
                 } catch {
                     guard current == self.generation, !Task.isCancelled else { return }
-                    self.connected = false; self.status = error.localizedDescription; delay = min(delay*2,30)
+                    if self.connected { self.connected = false }
+                    let status = error.localizedDescription
+                    if self.status != status { self.status = status }
+                    delay = min(delay*2,30)
                     if (error as? NativeError)?.expired == true { await self.handle(error,connection:connection); return }
                 }
                 do { try await Task.sleep(nanoseconds:delay*1_000_000_000) } catch { return }
@@ -406,16 +423,21 @@ final class ChatStore: ObservableObject {
             let previous = revisions.updateValue(revision,forKey:id)
             if let previous, previous != revision { try await clearLocal(id,revision:revision); return true }
         }
-        if !room.loaded || older { room.hasOlder = page.hasMore }
-        room.loaded = true
-        var merged = Dictionary(uniqueKeysWithValues:room.messages.map {($0.id,$0)})
-        for message in page.messages { merged[message.id] = message }
-        room.messages = merged.values.sorted {$0.id < $1.id}
-        room.jobs = page.jobs ?? []; room.operations = page.contextOperations ?? []
-        let activeJobs = Set(room.jobs.filter {!$0.failed}.map(\.id))
-        let oldIgnored = ignored; ignored = ignored.filter {!activeJobs.contains(String($0.split(separator:"#",maxSplits:1).first ?? ""))}
-        let confirmed = Set(page.messages.filter {$0.deviceId == deviceID}.map(\.clientMessageId))
-        let acknowledgements = pending.filter {confirmed.contains($0.clientMessageId)}
+        let messages = room.messages.mergingMessagePage(page.messages)
+        let hasOlder = !room.loaded || older ? page.hasMore : room.hasOlder
+        let jobs = page.jobs ?? []
+        let operations = page.contextOperations ?? []
+        if messages != nil || !room.loaded || hasOlder != room.hasOlder || jobs != room.jobs || operations != room.operations {
+            room = RoomState(messages:messages ?? room.messages,jobs:jobs,operations:operations,loaded:true,hasOlder:hasOlder)
+        }
+        let oldIgnored = ignored
+        if !ignored.isEmpty, !jobs.isEmpty {
+            let activeJobs = Set(jobs.filter {!$0.failed}.map(\.id))
+            let retained = ignored.filter {!activeJobs.contains(String($0.split(separator:"#",maxSplits:1).first ?? ""))}
+            if retained != ignored { ignored = retained }
+        }
+        let confirmed = pending.isEmpty ? [] : Set(page.messages.lazy.filter {$0.deviceId == self.deviceID}.map(\.clientMessageId))
+        let acknowledgements = confirmed.isEmpty ? [] : pending.filter {confirmed.contains($0.clientMessageId)}
         if !acknowledgements.isEmpty { try await acknowledge(acknowledgements) }
         else if oldIgnored != ignored { try await persist() }
         return false

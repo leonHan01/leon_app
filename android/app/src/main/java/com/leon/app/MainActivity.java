@@ -37,20 +37,17 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     private TextView homeTitle,homeStatus,roomTitle,roomStatus;
     private ImageButton homeAdd,chatAdd;
     private MentionEditText composer;
-    private Button send,older,imageButton,mentionButton;
-    private ScrollView scroll;
+    private Button send,imageButton,mentionButton;
     private HorizontalScrollView commandScroll;
-    private LinearLayout timeline;
+    private ChatTimelineView timeline;
     private AlertDialog settings;
     private AlertDialog usageDialog;
     private LinearLayout usageContent;
     private String usageSignature="";
     private String renderedConversation="",homeSignature="",attachmentSignature="";
     private long renderedRevision=-1;
-    private boolean timelineOnScreen,followingLatest=true,scrollTrackingPaused;
-    private ChatSession.ScrollPosition entryRestorePosition,lastScrollPosition;
+    private boolean timelineOnScreen,renderedHasOlder,renderedLoadingOlder,renderedInitialLoaded;
     private int renderedConnection=-1;
-    private int scrollEntryGeneration,scrollRenderGeneration;
     private final List<MessageApi.Agent> mentionCandidates=new ArrayList<>();
     private int mentionIndex;
     private String mentionKey="",dismissedMentionKey="",mentionRenderKey="";
@@ -144,12 +141,16 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         boolean detail=!navigation.agentId.isEmpty();
         if(timelineOnScreen&&(!navigation.inChat||detail))saveScrollPosition();
         boolean entering=navigation.inChat&&!detail&&!timelineOnScreen;timelineOnScreen=navigation.inChat&&!detail;
-        if(entering)beginLatestEntry();
+        if(entering)timeline.enter(session.scrollPositions.get(session.selectedConversation));
         homeScreen.setVisibility(navigation.inChat||detail?View.GONE:View.VISIBLE);chatScreen.setVisibility(navigation.inChat&&!detail?View.VISIBLE:View.GONE);
         agentDetailScreen.setVisibility(detail?View.VISIBLE:View.GONE);
         extras.setVisibility(navigation.inChat&&!detail&&navigation.attachments?View.VISIBLE:View.GONE);chatAdd.setRotation(navigation.attachments?45:0);
         if(detail){hideMentionSuggestions(false);renderAgentDetail();}
-        else if(navigation.inChat){changed();session.refreshImages();if(entering){if(entryRestorePosition!=null)afterTimelineLayout(this::timelineResized);else scrollToLatest();}}
+        else if(navigation.inChat){
+            changed();
+            if(entering)timeline.restore(session.initialLoaded);
+            session.refreshImages();
+        }
         else{hideMentionSuggestions(false);renderHome();}
     }
     private void renderHome(){
@@ -302,10 +303,10 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         roomTitle=text("聊天",16,INK);roomTitle.setId(R.id.chat_title);roomTitle.setSingleLine();roomTitle.setHorizontallyScrolling(false);roomTitle.setEllipsize(TextUtils.TruncateAt.END);roomTitle.setGravity(Gravity.CENTER);
         bar.addView(roomTitle,new LinearLayout.LayoutParams(0,dp(48),1));ImageButton more=ui.icon(R.drawable.ic_more,"聊天更多操作");more.setId(R.id.chat_more);more.setOnClickListener(view->showChatMenu(more));bar.addView(more);chatScreen.addView(bar);chatScreen.addView(ui.divider(0));
         roomStatus=text("",11,MUTED);roomStatus.setSingleLine();roomStatus.setHorizontallyScrolling(false);roomStatus.setEllipsize(TextUtils.TruncateAt.END);roomStatus.setGravity(Gravity.CENTER);roomStatus.setPadding(dp(12),dp(6),dp(12),dp(6));chatScreen.addView(roomStatus);
-        scroll=new ChatTimelineScrollView(this,()->{followingLatest=false;scrollTrackingPaused=false;scrollRenderGeneration++;});scroll.setTag("chat-timeline");scroll.setFillViewport(true);
-        scroll.setOnScrollChangeListener((view,x,y,oldX,oldY)->{if(!scrollTrackingPaused){followingLatest=nearLatest();saveScrollPosition();}session.refreshImages();});
-        scroll.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{if(b-t!=ob-ot)timelineResized();});
-        timeline=column();timeline.setPadding(dp(12),dp(12),dp(12),dp(18));scroll.addView(timeline);timeline.addOnLayoutChangeListener((v,l,t,r,b,ol,ot,or,ob)->{if(b-t!=ob-ot)timelineResized();});chatScreen.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));
+        timeline=new ChatTimelineView(this,()->{saveScrollPosition();session.refreshImages();});
+        timeline.setTag("chat-timeline");
+        timeline.setPadding(dp(12),dp(12),dp(12),dp(18));
+        chatScreen.addView(timeline,new LinearLayout.LayoutParams(-1,0,1));
         LinearLayout inputArea=column();inputArea.setBackgroundColor(ChatUi.BAR);inputArea.addView(ui.divider(0));
         mentionPanel=column();mentionPanel.setPadding(dp(10),dp(6),dp(10),dp(6));mentionPanel.setBackgroundColor(Color.WHITE);mentionPanel.setVisibility(View.GONE);
         TextView mentionTitle=text("提及 Agent",12,MUTED);mentionTitle.setPadding(dp(6),dp(5),dp(6),dp(5));mentionPanel.addView(mentionTitle);
@@ -368,7 +369,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
     private void chooseImages(){
         Intent picker=new Intent(Intent.ACTION_OPEN_DOCUMENT);picker.setType("image/*");picker.addCategory(Intent.CATEGORY_OPENABLE);picker.putExtra(Intent.EXTRA_ALLOW_MULTIPLE,true);startActivityForResult(picker,42);
     }
-    private void sendCurrent(){if(session.sendDraft(composer.getText().toString())){composer.setText("");navigation.attachments=false;extras.setVisibility(View.GONE);chatAdd.setRotation(0);followingLatest=true;scrollToLatest();}}
+    private void sendCurrent(){if(session.sendDraft(composer.getText().toString())){composer.setText("");navigation.attachments=false;extras.setVisibility(View.GONE);chatAdd.setRotation(0);timeline.followLatest();saveScrollPosition();}}
     private void showChatMenu(View anchor){
         PopupMenu menu=new PopupMenu(this,anchor);
         menu.getMenu().add("查看 Agent 信息").setOnMenuItemClickListener(item->{showConversationList();return true;});
@@ -535,7 +536,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
 
     @Override public void changed(){
         if(homeScreen==null)return;
-        if(renderedConnection!=session.connectionStamp()){renderedConnection=session.connectionStamp();renderedConversation="";entryRestorePosition=null;lastScrollPosition=null;}
+        if(renderedConnection!=session.connectionStamp()){renderedConnection=session.connectionStamp();renderedConversation="";}
         if(notifications!=null)notifications.changed(navigation.inChat?session.selectedConversation:null);
         renderUsage();tools.changed();if(chatSearch!=null)chatSearch.changed();if(favorites!=null)favorites.changed();
         if(!session.configured()&&navigation.tab!=ChatNavigation.Tab.SETTINGS&&session.status.equals("登录已失效，请重新登录。")){
@@ -554,11 +555,22 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         roomStatus.setText(subtitle);roomStatus.setVisibility(subtitle.isEmpty()?View.GONE:View.VISIBLE);
         boolean direct=session.selected()!=null&&session.selected().kind.equals("direct");mentionButton.setVisibility(direct?View.GONE:View.VISIBLE);mentionButton.setEnabled(!session.availableAgents().isEmpty());updateQuickCommandWidths();
         if(!composer.getText().toString().equals(session.draft)){composer.setText(session.draft);composer.setSelection(composer.length());}
-        if(!renderedConversation.equals(session.selectedConversation)){beginLatestEntry();renderedConversation=session.selectedConversation;hideMentionSuggestions(false);dismissedMentionKey="";mentionKey="";renderedRevision=-1;attachmentSignature="";timeline.setTag(null);RichMarkdownView.releaseTree(timeline);timeline.removeAllViews();}
+        boolean roomChanged=!renderedConversation.equals(session.selectedConversation);
+        if(roomChanged){
+            timeline.enter(session.scrollPositions.get(session.selectedConversation));
+            renderedConversation=session.selectedConversation;
+            hideMentionSuggestions(false);dismissedMentionKey="";mentionKey="";renderedRevision=-1;attachmentSignature="";
+        }
         if(notifications!=null)notifications.changed(navigation.inChat?session.selectedConversation:null);
         updateSend();renderQuotePreview();renderDocumentDrafts();renderAttachments();updateMentionSuggestions();
-        if(renderedRevision!=session.revision){renderMessages();renderedRevision=session.revision;}
-        if(older!=null){older.setText(session.loadingOlder?"正在加载…":"加载更早的消息");older.setEnabled(!session.loadingOlder);older.setVisibility(session.hasOlder?View.VISIBLE:View.GONE);}
+        if(renderedRevision!=session.revision || renderedHasOlder!=session.hasOlder
+                || renderedLoadingOlder!=session.loadingOlder || renderedInitialLoaded!=session.initialLoaded){
+            renderMessages(roomChanged);
+            renderedRevision=session.revision;
+            renderedHasOlder=session.hasOlder;
+            renderedLoadingOlder=session.loadingOlder;
+            renderedInitialLoaded=session.initialLoaded;
+        }
     }
     private void updateSend(){
         if(send==null)return;int length=composer.getText().length();boolean hasContent=length>0||!session.draftImages.isEmpty()||session.preparingImages>0;
@@ -566,88 +578,114 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         composer.setError(length>8000?"消息最多 8,000 字符":null);
     }
     @Override public void error(String message){if(!isFinishing()&&!isDestroyed())new AlertDialog.Builder(this).setTitle("暂未完成").setMessage(message).setPositiveButton("知道了",null).show();}
-    private int latestOffset(){return Math.max(0,timeline.getHeight()+scroll.getPaddingTop()+scroll.getPaddingBottom()-scroll.getHeight());}
-    private boolean nearLatest(){return latestOffset()-scroll.getScrollY()<dp(48);}
-    private void beginLatestEntry(){scrollEntryGeneration++;scrollRenderGeneration++;scrollTrackingPaused=false;entryRestorePosition=session.scrollPositions.get(session.selectedConversation);lastScrollPosition=entryRestorePosition;followingLatest=entryRestorePosition==null;}
-    private ChatSession.ScrollPosition currentScrollPosition(){
-        int y=scroll.getScrollY();for(int i=0;i<timeline.getChildCount();i++){
-            View row=timeline.getChildAt(i);Object tag=row.getTag();if(tag instanceof String&&((String)tag).startsWith("message-row:")&&row.getBottom()>y&&row.getTop()<y+scroll.getHeight())return new ChatSession.ScrollPosition(Long.parseLong(((String)tag).substring(12)),row.getTop()-y,y);
-        }return new ChatSession.ScrollPosition(0,0,y);
-    }
     private void saveScrollPosition(){
-        if(scroll==null||timeline==null||!timelineOnScreen||scrollTrackingPaused||renderedConversation.isEmpty()||renderedConnection!=session.connectionStamp())return;
-        lastScrollPosition=currentScrollPosition();session.scrollPositions.put(renderedConversation,lastScrollPosition);
+        if(timeline==null||!timelineOnScreen||renderedConversation.isEmpty()||renderedConnection!=session.connectionStamp())return;
+        ChatSession.ScrollPosition position=timeline.savedPosition();
+        if(position==null)session.scrollPositions.remove(renderedConversation);
+        else session.scrollPositions.put(renderedConversation,position);
     }
-    private void restoreScrollPosition(ChatSession.ScrollPosition saved){
-        int target=saved.offset;View anchor=saved.message==0?null:timeline.findViewWithTag("message-row:"+saved.message);if(anchor!=null)target=anchor.getTop()-saved.top;
-        scrollTrackingPaused=true;scroll.scrollTo(0,Math.max(0,Math.min(latestOffset(),target)));scrollTrackingPaused=false;
-        followingLatest=nearLatest();saveScrollPosition();
-    }
-    private void timelineResized(){
-        if(!timelineOnScreen||scrollTrackingPaused)return;
-        if(entryRestorePosition!=null){ChatSession.ScrollPosition saved=entryRestorePosition;if(saved.message!=0&&timeline.findViewWithTag("message-row:"+saved.message)==null&&!session.initialLoaded)return;entryRestorePosition=null;restoreScrollPosition(saved);}
-        else if(followingLatest)scrollToLatest();else if(lastScrollPosition!=null)restoreScrollPosition(lastScrollPosition);
-    }
-    private void scrollToLatest(){
-        if(!timelineOnScreen||!followingLatest||scrollTrackingPaused)return;int entry=scrollEntryGeneration;String room=session.selectedConversation;
-        afterTimelineLayout(()->{if(entry!=scrollEntryGeneration||!room.equals(session.selectedConversation)||!timelineOnScreen||!followingLatest||scrollTrackingPaused)return;scroll.scrollTo(0,latestOffset());session.refreshImages();});
-    }
-    private void afterTimelineLayout(Runnable action){
-        ViewTreeObserver observer=timeline.getViewTreeObserver();
-        ViewTreeObserver.OnGlobalLayoutListener listener=new ViewTreeObserver.OnGlobalLayoutListener(){
-            private boolean completed;
-            @Override public void onGlobalLayout(){if(completed)return;completed=true;if(observer.isAlive())observer.removeOnGlobalLayoutListener(this);action.run();}
-        };
-        observer.addOnGlobalLayoutListener(listener);
-        scroll.post(()->{if(!timeline.isLayoutRequested())listener.onGlobalLayout();});
-    }
-    private void renderMessages(){
-        int previousY=scroll.getScrollY(),previousHeight=timeline.getHeight();
-        if(session.messages.isEmpty()&&session.currentPending().isEmpty()){entryRestorePosition=null;lastScrollPosition=null;session.scrollPositions.remove(session.selectedConversation);followingLatest=true;}
-        ChatSession.ScrollPosition preserved=entryRestorePosition!=null?entryRestorePosition:!followingLatest&&!renderedConversation.isEmpty()?currentScrollPosition():null;
-        boolean nearBottom=preserved==null&&(followingLatest||timeline.getChildCount()==0);
-        scrollTrackingPaused=true;int request=++scrollRenderGeneration,entry=scrollEntryGeneration;String expectedRoom=session.selectedConversation;
-        Object firstTag=timeline.getTag();long firstId=session.messages.isEmpty()?0:session.messages.get(0).id;boolean prepended=firstTag instanceof Long&&firstId>0&&firstId<(Long)firstTag;
-        timeline.setTag(firstId);RichMarkdownView.releaseTree(timeline);timeline.removeAllViews();older=action("加载更早的消息");older.setTextColor(MUTED);older.setOnClickListener(view->{followingLatest=false;session.older();});older.setVisibility(session.hasOlder?View.VISIBLE:View.GONE);timeline.addView(older);
-        if(session.messages.isEmpty()&&session.currentPending().isEmpty()){
-            TextView empty=text(session.openingConversation()?"正在打开会话…":"开始和 "+session.title()+" 聊天",13,MUTED);empty.setGravity(Gravity.CENTER);empty.setPadding(dp(16),dp(45),dp(16),dp(35));timeline.addView(empty);
+
+    private void renderMessages(boolean roomChanged){
+        var pending=session.currentPending();
+        List<ChatTimelineView.Row> rows=new ArrayList<>();
+        if(session.hasOlder){
+            boolean loading=session.loadingOlder;
+            rows.add(new ChatTimelineView.Row("older",loading,()->olderButton(loading)));
         }
-        java.util.ArrayList<JSONObject> operations=new java.util.ArrayList<>();
-        for(int i=0;i<session.contextOperations.length();i++){
-            JSONObject operation=session.contextOperations.optJSONObject(i);if(operation!=null)operations.add(operation);
-        }
-        operations.sort(java.util.Comparator.comparingLong(operation->{long created=operation.optLong("createdAt",0);return created>0?created:Long.MAX_VALUE;}));
-        java.util.ArrayList<MessageApi.Job> jobs=new java.util.ArrayList<>(session.visibleJobs());
-        jobs.sort(java.util.Comparator.comparingLong(job->job.messageId));
-        int operationIndex=0,jobIndex=0;long lastTime=0;
-        for(MessageApi.Message message:session.messages){
-            while(jobIndex<jobs.size()&&jobs.get(jobIndex).messageId<message.id)addJobNotice(jobs.get(jobIndex++));
-            while(operationIndex<operations.size()&&operations.get(operationIndex).optLong("createdAt",0)>0&&operations.get(operationIndex).optLong("createdAt")<=message.createdAt){
-                addContextNotice(operations.get(operationIndex++));
+        if(session.messages.isEmpty()&&pending.isEmpty()){
+            if(session.initialLoaded){
+                session.scrollPositions.remove(session.selectedConversation);
+                timeline.enter(null);
             }
-            if(lastTime==0||Math.abs(message.createdAt-lastTime)>5*60*1000){addTime(message.createdAt);lastTime=message.createdAt;}
-            addBubble(message.text,message.sender,"",session.mine(message),null,message.role.equals("assistant")?message.agentId:null,message.imageIds,message,List.of());
-            while(jobIndex<jobs.size()&&jobs.get(jobIndex).messageId==message.id)addJobNotice(jobs.get(jobIndex++));
+            String label=session.openingConversation()?"正在打开会话…":"开始和 "+session.title()+" 聊天";
+            rows.add(new ChatTimelineView.Row("empty",label,()->emptyTimeline(label)));
         }
-        while(operationIndex<operations.size())addContextNotice(operations.get(operationIndex++));
-        while(jobIndex<jobs.size())addJobNotice(jobs.get(jobIndex++));
-        for(JSONObject message:session.currentPending()){
-            boolean sending=session.sending.contains(message.optString("clientMessageId"));addBubble(message.optString("text"),message.optString("sender"),sending?"发送中…":"发送未完成",true,sending?null:message,null,ChatSession.imageIds(message),null,ChatSession.documents(message));
-            if(message.optJSONObject("quote")!=null){try{var quoted=new MessageApi.Quote(message.getJSONObject("quote"));TextView preview=text(quoted.sender+"："+quoted.preview(),12,INK);preview.setMaxLines(2);timeline.addView(preview);}catch(Exception ignored){}}
+        List<JSONObject> operations=new ArrayList<>();
+        for(int i=0;i<session.contextOperations.length();i++){
+            JSONObject operation=session.contextOperations.optJSONObject(i);
+            if(operation!=null)operations.add(operation);
         }
-        if(session.dismissedFailureCount()>0){
-            Button restore=action("恢复已忽略的失败提示（"+session.dismissedFailureCount()+"）");restore.setTextSize(12);restore.setTextColor(MUTED);
-            restore.setTag("restore-dismissed-jobs");restore.setOnClickListener(view->session.restoreDismissedJobs());timeline.addView(restore);
+        operations.sort(Comparator.comparingLong(operation->{long created=operation.optLong("createdAt",0);return created>0?created:Long.MAX_VALUE;}));
+        List<MessageApi.Job> jobs=new ArrayList<>(session.visibleJobs());
+        jobs.sort(Comparator.comparingLong(job->job.messageId));
+        int operationIndex=0,jobIndex=0;
+        long lastTime=0;
+        var conversation=session.selected();
+        boolean showSender=conversation!=null&&!conversation.kind.equals("direct");
+        Map<String,String> avatars=new HashMap<>();
+        for(MessageApi.Message message:session.messages){
+            while(jobIndex<jobs.size()&&jobs.get(jobIndex).messageId<message.id)rows.add(jobRow(jobs.get(jobIndex++)));
+            while(operationIndex<operations.size()&&operations.get(operationIndex).optLong("createdAt",0)>0&&operations.get(operationIndex).optLong("createdAt")<=message.createdAt){
+                rows.add(operationRow(operations.get(operationIndex),operationIndex));
+                operationIndex++;
+            }
+            if(lastTime==0||Math.abs(message.createdAt-lastTime)>5*60*1000){
+                rows.add(new ChatTimelineView.Row("time:"+message.id,message.createdAt,()->timeLabel(message.createdAt)));
+                lastTime=message.createdAt;
+            }
+            boolean mine=session.mine(message);
+            String agentId=message.role.equals("assistant")?message.agentId:null;
+            String avatarId=mine?"":avatars.computeIfAbsent(agentId,session::avatarFor);
+            var content=new MessageRowContent(message,mine,showSender,avatarId);
+            rows.add(new ChatTimelineView.Row("message:"+message.id,message.id,content,()->bubble(
+                    message.text,message.sender,"",mine,null,agentId,avatarId,showSender,message.imageIds,message,List.of())));
+            while(jobIndex<jobs.size()&&jobs.get(jobIndex).messageId==message.id)rows.add(jobRow(jobs.get(jobIndex++)));
         }
-        afterTimelineLayout(()->{
-            if(entry!=scrollEntryGeneration||request!=scrollRenderGeneration||!expectedRoom.equals(session.selectedConversation))return;
-            if(preserved!=null){scrollTrackingPaused=false;entryRestorePosition=null;restoreScrollPosition(preserved);}
-            else if(prepended)scroll.scrollTo(0,previousY+timeline.getHeight()-previousHeight);
-            else if(nearBottom)scroll.scrollTo(0,latestOffset());else scroll.scrollTo(0,previousY);
-            scrollTrackingPaused=false;followingLatest=nearLatest();saveScrollPosition();session.refreshImages();
-        });
+        while(operationIndex<operations.size()){
+            rows.add(operationRow(operations.get(operationIndex),operationIndex));
+            operationIndex++;
+        }
+        while(jobIndex<jobs.size())rows.add(jobRow(jobs.get(jobIndex++)));
+        for(JSONObject message:pending){
+            String id=message.optString("clientMessageId");
+            boolean sending=session.sending.contains(id);
+            rows.add(new ChatTimelineView.Row("pending:"+id,List.of(message.toString(),sending),()->pendingBubble(message,sending)));
+        }
+        int dismissed=session.dismissedFailureCount();
+        if(dismissed>0)rows.add(new ChatTimelineView.Row("restore-dismissed-jobs",dismissed,()->restoreJobsButton(dismissed)));
+        timeline.submitRows(rows,roomChanged,session.initialLoaded);
     }
-    private void addJobNotice(MessageApi.Job job){
+
+    private record MessageRowContent(MessageApi.Message message, boolean mine, boolean showSender, String avatarId) {}
+
+    private View olderButton(boolean loading){
+        Button button=action(loading?"正在加载…":"加载更早的消息");
+        button.setTextColor(MUTED);button.setEnabled(!loading);
+        button.setOnClickListener(view->{timeline.pauseFollowing();session.older();});
+        return button;
+    }
+
+    private View emptyTimeline(String label){
+        TextView empty=text(label,13,MUTED);
+        empty.setGravity(Gravity.CENTER);empty.setPadding(dp(16),dp(45),dp(16),dp(35));
+        return empty;
+    }
+
+    private ChatTimelineView.Row jobRow(MessageApi.Job job){
+        return new ChatTimelineView.Row("job:"+job.messageId+":"+job.agentId,job.content(),()->jobNotice(job));
+    }
+
+    private ChatTimelineView.Row operationRow(JSONObject operation,int index){
+        String id=operation.optString("id");
+        String key=id.isEmpty()?"legacy-operation:"+index:"operation:"+id;
+        return new ChatTimelineView.Row(key,operation.toString(),()->contextNotice(operation));
+    }
+
+    private View pendingBubble(JSONObject message,boolean sending){
+        LinearLayout entry=column();
+        entry.addView(bubble(message.optString("text"),message.optString("sender"),sending?"发送中…":"发送未完成",true,
+                sending?null:message,null,"",false,ChatSession.imageIds(message),null,ChatSession.documents(message)));
+        if(message.optJSONObject("quote")!=null){try{var quote=new MessageApi.Quote(message.getJSONObject("quote"));TextView preview=text(quote.sender+"："+quote.preview(),12,INK);preview.setMaxLines(2);entry.addView(preview);}catch(Exception ignored){}}
+        return entry;
+    }
+
+    private View restoreJobsButton(int dismissed){
+        Button restore=action("恢复已忽略的失败提示（"+dismissed+"）");restore.setTextSize(12);restore.setTextColor(MUTED);
+        restore.setTag("restore-dismissed-jobs");restore.setOnClickListener(view->session.restoreDismissedJobs());
+        return restore;
+    }
+
+    private View jobNotice(MessageApi.Job job){
             LinearLayout notice=row();notice.setGravity(Gravity.CENTER_VERTICAL);notice.setPadding(dp(12),dp(3),dp(6),dp(3));notice.setBackground(shape(0xFFE4E4E4,6));
             TextView info=text(job.agentName+" · "+(job.status.equals("FAILED")?job.error:job.status.equals("RUNNING")?"正在回复…":"等待回复…"),12,0xFF777777);info.setMaxLines(3);notice.addView(info,new LinearLayout.LayoutParams(0,-2,1));
             if(job.status.equals("FAILED")){
@@ -658,26 +696,26 @@ public final class MainActivity extends Activity implements ChatSession.Listener
                 dismiss.setContentDescription("忽略 "+job.agentName+" 的失败提示");dismiss.setTag("dismiss-job:"+job.messageId+":"+job.agentId);
                 dismiss.setOnClickListener(view->session.dismissJob(job));notice.addView(dismiss,new LinearLayout.LayoutParams(dp(48),dp(48)));
             }
-            LinearLayout.LayoutParams np=new LinearLayout.LayoutParams(-1,-2);np.topMargin=dp(7);np.bottomMargin=dp(7);timeline.addView(notice,np);
+            FrameLayout.LayoutParams params=new FrameLayout.LayoutParams(-1,-2);params.topMargin=dp(7);params.bottomMargin=dp(7);notice.setLayoutParams(params);return notice;
     }
-    private void addContextNotice(JSONObject operation){
+    private View contextNotice(JSONObject operation){
         String status=operation.optString("status"),detail=status.equals("FAILED")?operation.optString("error"):status.equals("SUCCEEDED")?operation.optString("result"):"上下文压缩中…";
-        TextView notice=text(operation.optString("agentName")+" · "+detail,12,MUTED);notice.setPadding(dp(12),dp(10),dp(12),dp(10));timeline.addView(notice);
+        TextView notice=text(operation.optString("agentName")+" · "+detail,12,MUTED);notice.setPadding(dp(12),dp(10),dp(12),dp(10));return notice;
     }
-    private void addTime(long timestamp){
+    private View timeLabel(long timestamp){
         String value=android.text.format.DateUtils.isToday(timestamp)?DateFormat.getTimeInstance(DateFormat.SHORT).format(new Date(timestamp)):new SimpleDateFormat("M月d日 HH:mm",Locale.getDefault()).format(new Date(timestamp));
-        TextView time=text(value,11,0xFFAAAAAA);time.setGravity(Gravity.CENTER);time.setPadding(0,dp(10),0,dp(17));timeline.addView(time);
+        TextView time=text(value,11,0xFFAAAAAA);time.setGravity(Gravity.CENTER);time.setPadding(0,dp(10),0,dp(17));return time;
     }
-    private void addBubble(String body,String sender,String detail,boolean mine,JSONObject retry,String agentId,List<String> images,MessageApi.Message original,List<ChatDocument> pendingDocs){
+    private View bubble(String body,String sender,String detail,boolean mine,JSONObject retry,String agentId,String avatarId,boolean showSender,List<String> images,MessageApi.Message original,List<ChatDocument> pendingDocs){
         boolean wideAgentReply=!mine&&agentId!=null&&!agentId.isEmpty()&&body.codePointCount(0,body.length())>500;
-        LinearLayout message=row();if(original!=null)message.setTag("message-row:"+original.id);message.setGravity(Gravity.TOP);LinearLayout.LayoutParams mp=new LinearLayout.LayoutParams(-1,-2);mp.bottomMargin=dp(15);
+        LinearLayout message=row();if(original!=null)message.setTag("message-row:"+original.id);message.setGravity(Gravity.TOP);message.setPadding(0,0,0,dp(15));
         LinearLayout content=column();content.setGravity(mine?Gravity.END:Gravity.START);
         for(var doc:original!=null?original.documents:pendingDocs){content.addView(documents.card(doc,null,null,original==null?null:()->showMessageActions(original)),new LinearLayout.LayoutParams(-1,-2));}
         if(original!=null){content.setTag("message-actions:"+original.id);content.setOnLongClickListener(v->{showMessageActions(original);return true;});}
         View identity;
         if(mine){TextView initials=text(sender.isEmpty()?"我":new String(Character.toChars(sender.codePointAt(0))),16,Color.WHITE);initials.setGravity(Gravity.CENTER);initials.setBackground(shape(0xFF719983,6));identity=initials;}
         else {
-            identity=avatar(session.avatarFor(agentId),40);
+            identity=avatar(avatarId,40);
             if(agentId!=null&&!agentId.isEmpty()){identity.setTag("message-agent-avatar:"+agentId);identity.setOnClickListener(view->openAgentDetails(agentId));identity.setContentDescription("查看 "+sender+" 的详情");}
         }
         if(wideAgentReply){
@@ -688,7 +726,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         }
         else if(mine){message.addView(new View(this),new LinearLayout.LayoutParams(dp(44),1));message.addView(content,new LinearLayout.LayoutParams(0,-2,1));LinearLayout.LayoutParams av=new LinearLayout.LayoutParams(dp(40),dp(40));av.leftMargin=dp(7);message.addView(identity,av);}
         else{message.addView(identity,new LinearLayout.LayoutParams(dp(40),dp(40)));LinearLayout.LayoutParams cp=new LinearLayout.LayoutParams(0,-2,1);cp.leftMargin=dp(7);message.addView(content,cp);message.addView(new View(this),new LinearLayout.LayoutParams(dp(agentId!=null?4:44),1));}
-        if(!mine&&!wideAgentReply&&session.selected()!=null&&!session.selected().kind.equals("direct")){TextView name=text(sender,11,MUTED);name.setPadding(dp(5),0,0,dp(5));content.addView(name);}
+        if(!mine&&!wideAgentReply&&showSender){TextView name=text(sender,11,MUTED);name.setPadding(dp(5),0,0,dp(5));content.addView(name);}
         for(String id:images){
             ImageView image=new ImageView(this);image.setScaleType(ImageView.ScaleType.FIT_CENTER);image.setPadding(dp(3),dp(3),dp(3),dp(3));image.setBackground(shape(Color.WHITE,6));
             int width=Math.min(dp(220),getResources().getDisplayMetrics().widthPixels-dp(125));LinearLayout.LayoutParams ip=new LinearLayout.LayoutParams(width,Math.round(width*.75f));ip.bottomMargin=dp(5);content.addView(image,ip);session.bindImage(image,id);
@@ -709,7 +747,7 @@ public final class MainActivity extends Activity implements ChatSession.Listener
         }
         if(!detail.isEmpty()){TextView state=text(detail,10,MUTED);state.setPadding(dp(5),dp(4),dp(5),0);content.addView(state);}
         if(retry!=null){Button button=action("重试发送");button.setOnClickListener(view->session.retry(retry));content.addView(button);}
-        timeline.addView(message,mp);
+        return message;
     }
     private void showMessageActions(MessageApi.Message message){
         new AlertDialog.Builder(this).setItems(new String[]{"复制","引用","收藏","从这里创建分支"},(dialog,index)->{

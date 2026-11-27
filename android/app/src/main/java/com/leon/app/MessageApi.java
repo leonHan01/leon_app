@@ -40,6 +40,16 @@ final class MessageApi {
             userId=json.isNull("userId")?"":json.optString("userId");
             JSONArray images=json.optJSONArray("images");if(images!=null)for(int i=0;i<images.length();i++)imageIds.add(images.getJSONObject(i).getString("id"));
         }
+        boolean sameContent(Message other) {
+            if (createdAt!=other.createdAt || !clientMessageId.equals(other.clientMessageId)
+                    || !deviceId.equals(other.deviceId) || !sender.equals(other.sender) || !platform.equals(other.platform)
+                    || !text.equals(other.text) || !conversationId.equals(other.conversationId) || !role.equals(other.role)
+                    || !agentId.equals(other.agentId) || !userId.equals(other.userId) || !imageIds.equals(other.imageIds)
+                    || documents.size()!=other.documents.size()) return false;
+            if (quote==null ? other.quote!=null : other.quote==null || !quote.json.toString().equals(other.quote.json.toString())) return false;
+            for (int i=0;i<documents.size();i++) if (!documents.get(i).sameMetadata(other.documents.get(i))) return false;
+            return true;
+        }
     }
     static final class Quote {
         final long id;final String sender,text;final JSONObject json;
@@ -89,7 +99,7 @@ final class MessageApi {
     static final class Job {
         final long messageId; final String agentId,agentName,status,error,userId;
         Job(JSONObject j) throws JSONException { messageId=j.getLong("messageId");agentId=j.getString("agentId");agentName=j.getString("agentName");status=j.getString("status");error=j.getString("error");userId=j.isNull("userId")?"":j.optString("userId"); }
-        String signature() { return messageId+":"+agentId+":"+status+":"+error; }
+        List<Object> content() { return List.of(messageId,agentId,agentName,status,error,userId); }
     }
     static final int MAX_BACKUP=32*1024*1024;
     JSONObject context(String room) throws Exception {return request("/api/conversations/context?conversationId="+encode(room),null);}

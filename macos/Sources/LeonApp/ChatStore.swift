@@ -64,7 +64,16 @@ final class ChatStore: ObservableObject {
         guard self.api === api else { throw CancellationError() }
         return result
     }
-    @Published var messages: [Message] = []
+    @Published var messages: [Message] = [] {
+        didSet { cachedTimeline = nil }
+    }
+    private var cachedTimeline: (items: [TimelineItem], messageIDs: [Int64])?
+    var timeline: (items: [TimelineItem], messageIDs: [Int64]) {
+        if let cachedTimeline { return cachedTimeline }
+        let snapshot = (TimelineItem.ordered(messages:messages,operations:contextOperations,jobs:visibleJobs), messages.map(\.id))
+        cachedTimeline = snapshot
+        return snapshot
+    }
     @Published var pending: [Outgoing] = []
     @Published var draft = ""
     @Published var draftDocuments:[DraftDocument]=[]
@@ -162,8 +171,12 @@ final class ChatStore: ObservableObject {
         } catch { if connection == connectionId { usageError = friendly(error) } }
     }
     @Published var conversations: [Conversation] = []
-    @Published var jobs: [AgentJob] = []
-    @Published private var dismissedJobKeys = Set<String>()
+    @Published var jobs: [AgentJob] = [] {
+        didSet { cachedTimeline = nil }
+    }
+    @Published private var dismissedJobKeys = Set<String>() {
+        didSet { if oldValue != dismissedJobKeys { cachedTimeline = nil } }
+    }
     var visibleJobs: [AgentJob] { jobs.filter { $0.status != "FAILED" || !dismissedJobKeys.contains(dismissalKey($0)) } }
     var dismissedFailureCount: Int { jobs.filter { $0.status == "FAILED" && dismissedJobKeys.contains(dismissalKey($0)) }.count }
     private func dismissalKey(_ job: AgentJob) -> String {
@@ -463,7 +476,9 @@ final class ChatStore: ObservableObject {
     }
     @Published var contextInfo: ConversationContext?
     @Published var contextError: String?
-    @Published var contextOperations: [ContextOperation] = []
+    @Published var contextOperations: [ContextOperation] = [] {
+        didSet { cachedTimeline = nil }
+    }
     @Published var compressionRequestBusy = false
     private var compressionRequests: [String: String] = [:]
     var contextActionActive: Bool { compressionRequestBusy || jobs.contains { $0.status == "PENDING" || $0.status == "RUNNING" } || contextOperations.contains { $0.active } }
@@ -614,6 +629,7 @@ final class ChatStore: ObservableObject {
         contextInfo = cached?.context; contextOperations = cached?.operations ?? []
         messages = cached?.messages ?? []; jobs = cached?.jobs ?? []
         initialLoaded = cached?.loaded ?? false; hasOlder = cached?.hasOlder ?? false
+        reconcilePending(with: messages)
         loadingMessages = openingDirectConversation || (!initialLoaded && hasConnection && active)
         if refresh { beginPolling() } else { poller?.cancel() }
     }
@@ -769,7 +785,7 @@ final class ChatStore: ObservableObject {
             historyRevision = page.historyRevision
             initialLoaded = true
             hasOlder = page.hasMore
-            reconcilePending()
+            reconcilePending(with: messages)
             draft = ""
             connected = true
             status = "已连接 · 自动同步"
@@ -850,9 +866,10 @@ final class ChatStore: ObservableObject {
                     if !initial && page.hasMore { continue }
                 } catch {
                     guard !Task.isCancelled, self.generation == current else { return }
-                    self.loadingMessages = false
-                    self.connected = false
-                    self.status = self.friendly(error)
+                    if self.loadingMessages { self.loadingMessages = false }
+                    if self.connected { self.connected = false }
+                    let status = self.friendly(error)
+                    if self.status != status { self.status = status }
                     delay = min(delay * 2, 30)
                 }
                 do { try await Task.sleep(nanoseconds: delay * 1_000_000_000) } catch { return }
@@ -918,15 +935,14 @@ final class ChatStore: ObservableObject {
     }
 
     private func merge(_ incoming: [Message]) {
-        var byId = Dictionary(uniqueKeysWithValues: messages.map { ($0.id, $0) })
-        for message in incoming { byId[message.id] = message }
-        let merged = byId.values.sorted { $0.id < $1.id }
-        if messages != merged { messages = merged }
-        reconcilePending()
+        guard !incoming.isEmpty else { return }
+        if let merged = messages.mergingMessagePage(incoming) { messages = merged }
+        reconcilePending(with: incoming)
     }
-    private func reconcilePending() {
-        guard !pending.isEmpty else { return }
-        let confirmed = Set(messages.filter { $0.deviceId == deviceId }.map(\.clientMessageId))
+    private func reconcilePending(with received: [Message]) {
+        guard !pending.isEmpty, !received.isEmpty else { return }
+        let confirmed = Set(received.lazy.filter { $0.deviceId == self.deviceId }.map(\.clientMessageId))
+        guard !confirmed.isEmpty else { return }
         let count = pending.count
         for message in pending where confirmed.contains(message.clientMessageId) { ChatImageFiles.remove(message.imageIds ?? [], scope: pendingKey);DocumentFiles.remove(message.documentIds ?? [],scope:pendingKey) }
         pending.removeAll { confirmed.contains($0.clientMessageId) }

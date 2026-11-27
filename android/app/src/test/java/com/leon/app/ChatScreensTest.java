@@ -86,32 +86,61 @@ public class ChatScreensTest {
 
     @Test public void newConversationStartsAtLatestAndCachedReturnRestoresReadingPosition() throws Exception {
         view(R.id.tab_agents).performClick();openAgentChat("luna");fillMessages(100,45);layoutAndIdle();assertLatestVisible();
-        chatTimeline().scrollTo(0,chatTimeline().getChildAt(0).getHeight()/2);int saved=chatTimeline().getScrollY();assertTrue(saved>0);backToDirectory();
-        openAgentChat("luna");layoutAndIdle();assertEquals(saved,chatTimeline().getScrollY());
+        chatTimeline().scrollBy(0,-937);layoutAndIdle();
+        var saved=chatTimeline().savedPosition();assertNotNull(saved);assertTrue(saved.message>100);
+        backToDirectory();
+        openAgentChat("luna");layoutAndIdle();assertReadingPosition(saved);
         backToDirectory();openAgentChat("sol");fillMessages(200,30);layoutAndIdle();assertLatestVisible();
-        backToDirectory();openAgentChat("luna");layoutAndIdle();assertEquals(saved,chatTimeline().getScrollY());
-        tagged("message-agent-avatar:luna").performClick();activity.onBackPressed();layoutAndIdle();assertEquals(saved,chatTimeline().getScrollY());
+        backToDirectory();openAgentChat("luna");layoutAndIdle();assertReadingPosition(saved);
+        tagged("message-agent-avatar:luna").performClick();activity.onBackPressed();layoutAndIdle();assertReadingPosition(saved);
     }
     @Test public void delayedHistoryFollowsLatestButReadingAndPrependingStayInPlace() throws Exception {
         view(R.id.tab_agents).performClick();openAgentChat("luna");layoutAndIdle();fillMessages(100,45);layoutAndIdle();assertLatestVisible();
-        chatTimeline().scrollTo(0,0);session.messages.add(message(150,"luna","Luna","稍后收到的新回复",false));session.revision++;session.notifyChanged();layoutAndIdle();assertEquals(0,chatTimeline().getScrollY());
-        int[] before=new int[2];tagged("message-actions:100").getLocationOnScreen(before);
+        chatTimeline().scrollBy(0,-10_000);layoutAndIdle();
+        var saved=chatTimeline().savedPosition();assertNotNull(saved);assertEquals(100,saved.message);
+        View existing=tagged("message-actions:100");
+        int[] before=new int[2];
+        existing.getLocationOnScreen(before);
+        session.messages.add(message(150,"luna","Luna","稍后收到的新回复",false));session.revision++;session.notifyChanged();layoutAndIdle();
+        assertReadingPosition(saved);assertSame(existing,tagged("message-actions:100"));
+        assertTrue(chatTimeline().getChildCount()<session.messages.size());
         session.messages.add(0,message(50,"luna","Luna","更早的聊天记录",false));session.revision++;session.notifyChanged();layoutAndIdle();
-        int[] after=new int[2];tagged("message-actions:100").getLocationOnScreen(after);assertTrue(chatTimeline().getScrollY()>0);assertEquals(before[1],after[1]);
+        assertReadingPosition(saved);
+        int[] after=new int[2];
+        tagged("message-actions:100").getLocationOnScreen(after);
+        assertEquals(before[1],after[1]);
+        tagged("message-row:50").setMinimumHeight(350);
+        layoutAndIdle();
+        tagged("message-actions:100").getLocationOnScreen(after);
+        assertEquals("A resized older row must keep the reading anchor in place",before[1],after[1]);
     }
     @Test public void lateContentLayoutKeepsLatestOnlyWhenFollowingBottom() throws Exception {
         view(R.id.tab_agents).performClick();openAgentChat("luna");fillMessages(100,35);layoutAndIdle();assertLatestVisible();
-        android.widget.LinearLayout rows=(android.widget.LinearLayout)chatTimeline().getChildAt(0);View expanded=new View(activity);rows.addView(expanded,new android.widget.LinearLayout.LayoutParams(-1,300));layoutAndIdle();assertLatestVisible();
-        chatTimeline().scrollTo(0,0);rows.addView(new View(activity),new android.widget.LinearLayout.LayoutParams(-1,300));layoutAndIdle();assertEquals(0,chatTimeline().getScrollY());
+        var tail=chatTimeline().findViewHolderForAdapterPosition(chatTimeline().getAdapter().getItemCount()-1);
+        tail.itemView.setMinimumHeight(300);layoutAndIdle();assertLatestVisible();
+        chatTimeline().scrollBy(0,-10_000);layoutAndIdle();
+        var saved=chatTimeline().savedPosition();assertNotNull(saved);
+        session.messages.add(message(200,"luna","Luna","稍后完成的新回复",false));session.revision++;session.notifyChanged();layoutAndIdle();
+        assertReadingPosition(saved);
     }
-    private android.widget.ScrollView chatTimeline(){return (android.widget.ScrollView)tagged("chat-timeline");}
+    private ChatTimelineView chatTimeline(){return (ChatTimelineView)tagged("chat-timeline");}
     private void fillMessages(int start,int count)throws Exception {for(int i=0;i<count;i++)session.messages.add(message(start+i,session.selectedConversation.endsWith("sol")?"sol":"luna","助手","这是一段用于验证进入会话滚动位置的聊天记录，内容需要正常换行。第 "+i+" 条。",false));session.initialLoaded=true;session.revision++;session.notifyChanged();}
     private void layoutAndIdle(){View root=activity.findViewById(android.R.id.content);for(int i=0;i<5;i++){root.measure(View.MeasureSpec.makeMeasureSpec(360,View.MeasureSpec.EXACTLY),View.MeasureSpec.makeMeasureSpec(756,View.MeasureSpec.EXACTLY));root.layout(0,0,360,756);org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idleFor(java.time.Duration.ofMillis(16));}}
-    private void assertLatestVisible(){android.widget.ScrollView view=chatTimeline();int range=view.getChildAt(0).getHeight()-view.getHeight();assertTrue("Fixture must need scrolling",range>100);assertTrue("Latest message must be visible: "+view.getScrollY()+"/"+range,Math.abs(range-view.getScrollY())<=1);}
+    private void assertLatestVisible(){
+        var view=chatTimeline();
+        var manager=(androidx.recyclerview.widget.LinearLayoutManager)view.getLayoutManager();
+        assertTrue("Fixture must need scrolling",view.canScrollVertically(-1));
+        assertEquals(view.getAdapter().getItemCount()-1,manager.findLastCompletelyVisibleItemPosition());
+        assertFalse("Latest message must be fully visible",view.canScrollVertically(1));
+    }
+    private void assertReadingPosition(ChatSession.ScrollPosition expected){
+        var actual=chatTimeline().savedPosition();assertNotNull(actual);
+        assertEquals(expected.message,actual.message);assertEquals(expected.top,actual.top);
+    }
 
     @Test public void longHistoryCacheRetainsReadingAnchorAndClearRemovesIt()throws Exception {
         session.select("direct:luna");for(int i=1;i<=500;i++)session.messages.add(message(i,"luna","Luna","消息 "+i,false));session.initialLoaded=true;
-        session.scrollPositions.put("direct:luna",new ChatSession.ScrollPosition(20,-10,500));session.select("direct:sol");session.select("direct:luna");
+        session.scrollPositions.put("direct:luna",new ChatSession.ScrollPosition(20,-10,19,"message:20"));session.select("direct:sol");session.select("direct:luna");
         assertEquals(300,session.messages.size());assertTrue(session.messages.stream().anyMatch(m->m.id==20));
         session.clearLocalHistory("direct:luna",2);assertFalse(session.scrollPositions.containsKey("direct:luna"));
     }
@@ -129,6 +158,7 @@ public class ChatScreensTest {
         for(int i=1;i<=3;i++)session.jobs.add(new MessageApi.Job(new JSONObject().put("messageId",i).put("agentId","sol").put("agentName","Sol").put("status","FAILED").put("error","模型请求超时，请确认后手动重试")));
         session.revision++;session.notifyChanged();
         tagged("dismiss-job:2:sol").performClick();
+        layoutAndIdle();
         assertEquals(2,session.visibleJobs().size());assertEquals(3,session.jobs.size());assertEquals(1,session.messages.size());
         assertNull(activity.getWindow().getDecorView().findViewWithTag("dismiss-job:2:sol"));
         assertNotNull(tagged("dismiss-job:1:sol"));assertNotNull(tagged("dismiss-job:3:sol"));
@@ -142,8 +172,8 @@ public class ChatScreensTest {
         session.messages.add(message(3,"sol","Sol","压缩后",false));
         session.contextOperations=new JSONArray().put(new JSONObject().put("id","compact-1").put("agentName","Sol").put("status","SUCCEEDED").put("result","压缩完成").put("createdAt",1795053602000L));
         session.revision++;session.notifyChanged();
-        Field field=MainActivity.class.getDeclaredField("timeline");field.setAccessible(true);
-        android.view.ViewGroup timeline=(android.view.ViewGroup)field.get(activity);
+        layoutAndIdle();
+        var timeline=chatTimeline();
         assertTrue(timelineIndex(timeline,"压缩前") < timelineIndex(timeline,"压缩完成"));
         assertTrue(timelineIndex(timeline,"压缩完成") < timelineIndex(timeline,"压缩后"));
     }
@@ -154,8 +184,8 @@ public class ChatScreensTest {
         session.messages.add(message(3,"sol","我","后来的消息",true));
         session.jobs.add(new MessageApi.Job(new JSONObject().put("messageId",1).put("agentId","sol").put("agentName","Sol").put("status","FAILED").put("error","回复失败")));
         session.revision++;session.notifyChanged();
-        Field field=MainActivity.class.getDeclaredField("timeline");field.setAccessible(true);
-        android.view.ViewGroup timeline=(android.view.ViewGroup)field.get(activity);
+        layoutAndIdle();
+        var timeline=chatTimeline();
         assertTrue(timelineIndex(timeline,"触发失败的消息") < timelineIndex(timeline,"回复失败"));
         assertTrue(timelineIndex(timeline,"回复失败") < timelineIndex(timeline,"后来的消息"));
         assertNotNull(tagged("dismiss-job:1:sol"));
@@ -386,7 +416,11 @@ public class ChatScreensTest {
     private void backToDirectory(){activity.onBackPressed();assertTrue(view(R.id.home_screen).isShown());}
     private void assertChat(String title){assertEquals(View.VISIBLE,view(R.id.chat_screen).getVisibility());assertEquals(View.GONE,view(R.id.home_screen).getVisibility());assertEquals(title,((TextView)view(R.id.chat_title)).getText().toString());}
     private View view(int id){return activity.findViewById(id);}
-    private View tagged(String tag){View view=activity.getWindow().getDecorView().findViewWithTag(tag);assertNotNull(tag,view);return view;}
+    private View tagged(String tag){
+        View decor=activity.getWindow().getDecorView(),view=decor.findViewWithTag(tag);
+        if(view==null){layoutAndIdle();view=decor.findViewWithTag(tag);}
+        assertNotNull(tag,view);return view;
+    }
     private EditText input(){return (EditText)view(R.id.chat_input);}
     private MessageApi.Agent agent(String id,String name) throws Exception {return new MessageApi.Agent(new JSONObject().put("id",id).put("name",name).put("handle",id).put("provider","openai").put("model","test-model").put("description","帮你梳理思路，规划轻松的日常。").put("avatarId",id).put("enabled",true));}
     private MessageApi.Conversation room(String id,String name,String kind,String agentId) throws Exception {return new MessageApi.Conversation(new JSONObject().put("id",id).put("name",name).put("kind",kind).put("agentId",agentId).put("agentIds",new JSONArray(kind.equals("direct")?List.of(agentId):List.of("luna","sol","terra"))));}

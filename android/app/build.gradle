@@ -39,6 +39,7 @@ dependencies {
     implementation files('libs/vivo-push-4.1.0.0.aar')
     implementation 'androidx.webkit:webkit:1.14.0'
     implementation 'androidx.exifinterface:exifinterface:1.4.2'
+    implementation 'androidx.recyclerview:recyclerview:1.4.0'
     implementation 'io.noties.markwon:core:4.6.2'
     implementation 'io.noties.markwon:ext-strikethrough:4.6.2'
     implementation 'io.noties.markwon:ext-tables:4.6.2'

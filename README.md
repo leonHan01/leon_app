@@ -22,6 +22,8 @@ Leon 是面向 macOS、Android 和 iOS 的原生消息应用。你可以在设�
 
 模型和 Agent 在服务端的「Agent 工作台」（`/workspace/agents.html`）配置。
 
+macOS 覆盖安装前请先保留未发送内容，并用 `⌘Q` 正常退出 Leon；只关闭窗口不会退出旧进程。安装后重新打开，新的导出逻辑才会加载。
+
 ## 从源码构建
 
 在仓库根目录执行对应命令，产物写入本地 `dist/`。
@@ -37,6 +39,8 @@ Leon 是面向 macOS、Android 和 iOS 的原生消息应用。你可以在设�
 - **iOS**。`bash scripts/build-ios.sh simulator` 可构建模拟器版本。真机安装需要在 Xcode 中为 `ios/Leon.xcodeproj` 的 `Leon` scheme 配置签名。工程准备与签名步骤见 [iOS 开发说明](ios/README.md)。
 
 ## 开发检查
+
+Mac 升级验收还需核对实际运行进程及其加载的可执行文件。覆盖安装和磁盘版本校验通过，不能替代退出旧进程、启动新版及导出结果读回检查。
 
 ```bash
 bash scripts/test-macos.sh
